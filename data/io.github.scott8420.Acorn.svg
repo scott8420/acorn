@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <!-- Acorn app icon (placeholder; redraw whenever you like). A deep forest
+       tile; an acorn whose cap is a stack of database disks. -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1f5a3a"/>
+      <stop offset="1" stop-color="#0d2a1c"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.72" cy="0.2" r="0.6">
+      <stop offset="0" stop-color="#f5b942" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#f5b942" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="nut" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#e08a3c"/>
+      <stop offset="0.55" stop-color="#c9682a"/>
+      <stop offset="1" stop-color="#8e4318"/>
+    </linearGradient>
+    <linearGradient id="disk" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#8a6a4a"/>
+      <stop offset="1" stop-color="#5a4029"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="112" height="112" rx="26" fill="url(#tile)"/>
+  <rect x="8" y="8" width="112" height="112" rx="26" fill="url(#glow)"/>
+  <rect x="61" y="18" width="7" height="14" rx="3.5" fill="#5a4029"/>
+  <path d="M38 62c6 3 15 5 26 5s20-2 26-5c0 24-11 44-26 48-15-4-26-24-26-48z" fill="url(#nut)"/>
+  <path d="M60 104c-8-6-14-20-15-34" fill="none" stroke="#f6c27a" stroke-opacity="0.45" stroke-width="3" stroke-linecap="round"/>
+  <g>
+    <path d="M30 54v6c0 4 15 8 34 8s34-4 34-8v-6z" fill="url(#disk)"/>
+    <ellipse cx="64" cy="54" rx="34" ry="8" fill="#a5835f"/>
+    <path d="M32 44v6c0 4 14 7.5 32 7.5s32-3.5 32-7.5v-6z" fill="url(#disk)"/>
+    <ellipse cx="64" cy="44" rx="32" ry="7.5" fill="#b8956f"/>
+    <path d="M36 34v6c0 3.6 12.5 7 28 7s28-3.4 28-7v-6z" fill="url(#disk)"/>
+    <ellipse cx="64" cy="34" rx="28" ry="7" fill="#cba883"/>
+  </g>
+</svg>

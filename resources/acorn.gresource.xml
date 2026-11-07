@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Acorn resource bundle. The resource-pipeline paradigm: an app asset carried
+     the symbolic way (a currentColor SVG under the freedesktop icon-theme shape)
+     so set_icon_name("acorn-logo-symbolic") resolves it out of the compiled-in
+     binary and GTK recolours it to the theme foreground; no icon installed on
+     the user's disk.
+
+     Gotcha the shape encodes: GTK's icon lookup is RIGID about the trailing
+     .../scalable/apps/ path, so the prefix ends there and App::on_activate
+     passes only /io/github/scott8420/Acorn/icons to add_resource_path (GTK appends
+     scalable/apps/ itself). The prefix mirrors the app-id; both move together in
+     a one-pass rename. See docs/resources-and-dialog-lifetime.md. -->
+<gresources>
+  <gresource prefix="/io/github/scott8420/Acorn/icons/scalable/apps">
+    <file preprocess="xml-stripblanks" alias="acorn-logo-symbolic.svg">icons/scalable/apps/acorn-logo-symbolic.svg</file>
+  </gresource>
+</gresources>

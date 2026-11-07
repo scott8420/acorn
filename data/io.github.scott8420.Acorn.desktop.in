@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Acorn
+GenericName=Database Designer
+Comment=Design databases, layouts and reports over SQLite, MariaDB and PostgreSQL
+Exec=@BINDIR@/acorn
+Icon=io.github.scott8420.Acorn
+Terminal=false
+Categories=Office;Database;Development;GTK;
+Keywords=database;sql;sqlite;mysql;mariadb;postgresql;forms;reports;labels;filemaker;
+StartupNotify=true
+StartupWMClass=io.github.scott8420.Acorn
