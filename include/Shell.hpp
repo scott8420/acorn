@@ -65,6 +65,7 @@ namespace acorn {
 class AboutWindow;
 class ShortcutsDialog;
 class NewTableWindow;
+class DesignTableWindow;
 
 class Shell : public Gtk::ApplicationWindow {
 public:
@@ -118,6 +119,7 @@ private:
     void on_undo();                              // category: journal: Ctrl+Z
     void on_redo();                              // category: journal: Ctrl+Shift+Z
     void on_new_table();                         // category: journal: the New Table window -> Journal::run
+    void on_design_table();                      // category: journal: the designer (s007b) -> verbs::design_table
     void reload_schema(const std::string& show); // category: journal: re-read the schema after a step, repaint, select `show`
     bool focus_is_text() const;                  // category: journal: a text box keeps its own Ctrl+Z
     void journal_note(const std::string& text, const char* kind);  // category: journal: what a step did, under the Tables title
@@ -270,6 +272,8 @@ private:
     Glib::RefPtr<Gio::Menu>         m_edit_menu;
     Glib::RefPtr<Gio::SimpleAction> m_undo_action, m_redo_action, m_new_table_action;
     std::unique_ptr<NewTableWindow> m_new_table_win;
+    std::unique_ptr<DesignTableWindow> m_design_win;              // s007b
+    Glib::RefPtr<Gio::SimpleAction> m_design_table_action;        // s007b: win.design-table
 
     // s005c -- the ground: the saved choice, its radio action, and a style
     // provider one step above the skin that redefines the skin's colours.

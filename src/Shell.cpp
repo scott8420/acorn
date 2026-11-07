@@ -1,6 +1,7 @@
 #include "Shell.hpp"
 #include "AboutWindow.hpp"      // complete type for ~unique_ptr<AboutWindow> in ~Shell()
 #include "ShortcutsDialog.hpp"  // ditto -- same singleton shape, same dtor requirement
+#include "DesignTableWindow.hpp"   // s007b
 #include "NewTableWindow.hpp"   // ditto (s005b)
 #include "Log.hpp"
 

@@ -184,6 +184,7 @@ add_executable(acorn
     src/Shell_records.cpp
     src/AboutWindow.cpp
     src/NewTableWindow.cpp
+    src/DesignTableWindow.cpp
     src/Shell_journal.cpp
     src/Shell_ground.cpp
     src/ShortcutsDialog.cpp

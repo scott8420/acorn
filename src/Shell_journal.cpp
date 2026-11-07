@@ -1,5 +1,6 @@
 #include "Shell.hpp"
 #include "NewTableWindow.hpp"
+#include "DesignTableWindow.hpp"
 #include "Log.hpp"
 
 #include <gdk/gdkkeysyms.h>
@@ -28,6 +29,7 @@ void Shell::bind_journal() {  // journal: win.undo / win.redo / win.new-table + 
     m_new_table_action = add_action("new-table", sigc::mem_fun(*this, &Shell::on_new_table));
     m_new_record_action    = add_action("new-record",    sigc::mem_fun(*this, &Shell::on_new_record));     // s006c
     m_delete_record_action = add_action("delete-record", sigc::mem_fun(*this, &Shell::on_delete_record));  // s006c
+    m_design_table_action  = add_action("design-table",  sigc::mem_fun(*this, &Shell::on_design_table));   // s007b
 
     auto keys = Gtk::EventControllerKey::create();
     keys->set_propagation_phase(Gtk::PropagationPhase::BUBBLE);
@@ -66,6 +68,8 @@ void Shell::sync_undo() {  // journal: re-label + grey Undo / Redo / New Table
     if (m_undo_action) m_undo_action->set_enabled(cu);
     if (m_redo_action) m_redo_action->set_enabled(cr);
     if (m_new_table_action) m_new_table_action->set_enabled(cw);
+    const db::Table* shown = m_table_sel.empty() ? nullptr : m_schema.table(m_table_sel);   // s007b
+    if (m_design_table_action) m_design_table_action->set_enabled(cw && shown && shown->kind == db::Table::Kind::Table);
     const bool rw = m_journal && browse_writable();   // s006c
     if (m_new_record_action) m_new_record_action->set_enabled(rw);
     if (m_delete_record_action) m_delete_record_action->set_enabled(rw && !m_browse_sel.empty() && !m_record_new);
@@ -79,6 +83,7 @@ void Shell::sync_undo() {  // journal: re-label + grey Undo / Redo / New Table
         m_edit_menu->append(cu ? "Undo " + m_journal->undo_label() : std::string("Undo"), "win.undo");
         m_edit_menu->append(cr ? "Redo " + m_journal->redo_label() : std::string("Redo"), "win.redo");
         m_edit_menu->append("New Table…", "win.new-table");
+        m_edit_menu->append("Design Table…", "win.design-table");
         m_edit_menu->append("New Record", "win.new-record");
         m_edit_menu->append("Delete Record", "win.delete-record");
     }
@@ -149,6 +154,39 @@ void Shell::on_new_table() {  // journal: the New Table window -> Journal::run
             if (r) {
                 reload_schema(t.name);
                 journal_note("Made table “" + t.name + "”. Ctrl+Z undoes it.", "ok");
+            }
+            return r;
+        });
+}
+
+void Shell::on_design_table() {  // journal: the designer -> verbs::design_table (s007b)
+    if (!m_journal || !m_writable || !m_conn_engine) return;
+    const db::Table* t = m_schema.table(m_table_sel);
+    if (!t || t->kind != db::Table::Kind::Table) return;
+    // The live picture, with its row count, read through the store.
+    m_journal->store().forget_schema();
+    auto got = m_journal->store().get(db::Store::table_id(t->name));
+    if (m_journal->store().failed() || !got) {
+        const std::string why = m_journal->store().failed() ? m_journal->store().error().message : "it is not there any more";
+        m_journal->store().clear_failed();
+        journal_note("Can't design “" + t->name + "”: " + why + ".", "error");
+        return;
+    }
+    if (!m_design_win) m_design_win = std::make_unique<DesignTableWindow>(*this);
+    const std::string name = t->name;
+    m_design_win->start(m_conn_engine->dialect(), std::get<db::TableDef>(*got),
+        [this](const db::TableDef& w) { return db::verbs::preview(*m_journal, w); },
+        [this](const db::TableDef& w) { return db::verbs::design_losses(*m_journal, w); },
+        [this, name](const db::TableDef& w) -> std::expected<void, db::Error> {
+            const auto before = m_journal->size();
+            const bool could_redo = m_journal->can_redo();
+            auto r = db::verbs::design_table(*m_journal, w);
+            if (auto lg = log::get(log::Area::App))
+                lg->info("journal: design '{}': {}", name, r ? m_journal->undo_label() : r.error().message);
+            if (r) {
+                reload_schema(name);
+                const bool stepped = m_journal->size() != before || could_redo != m_journal->can_redo();
+                if (stepped) journal_note("Did " + m_journal->undo_label() + ". Ctrl+Z undoes it.", "ok");
             }
             return r;
         });

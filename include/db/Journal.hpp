@@ -9,12 +9,23 @@
 //           "row:<n>:<table>:<key>"        a record (s006): n = the table
 //                                          name's byte length, key = the
 //                                          primary key's values, encoded
-//     Value Record = TableDef | RowDef. TableDef: the table's shape as
-//           introspection reads it, plus its row count. RowDef: every field of
-//           one record, by column. Absent = no such table / record.
+//           "field:<n>:<table>:<column>"   one field's values in every record
+//                                          (s007) -- what Delete Field keeps
+//                                          so undo can put them back
+//     Value Record = TableDef | RowDef | FieldData. TableDef: the table's
+//           shape as introspection reads it (fields, indexes), plus its row
+//           count. RowDef: every field of one record, by column. FieldData: a
+//           field's non-NULL values by record key. Absent = no such table /
+//           record / field.
+//
+// A table's identity is its fields BY NAME (s007): their order is how they
+// are shown, not what they are. An engine can only add a field at the end, so
+// undoing Delete Field brings it back last; the pictures still match.
 //
 // Store::put turns the pictures into SQL: a table absent -> present is CREATE
-// TABLE, present -> absent DROP TABLE; a record absent -> present is INSERT
+// TABLE, present -> absent DROP TABLE, present -> a different shape is ALTER
+// (s007: plan_alter -- fields added / renamed / dropped, indexes made /
+// dropped); a record absent -> present is INSERT
 // (every field, the key included), present -> absent DELETE, changed UPDATE
 // (only the fields that differ). So New Table, New Record, a field edit and
 // Delete Record are undoable the day they go through run(), with no
@@ -22,8 +33,9 @@
 // one is browsed, never written; a key field is never changed (s006). Two safety rules sit in put()
 // and in undo / redo, because a database can change behind Acorn's back:
 //
-//   * put() never drops a table that holds rows, and never ALTERs (that is the
-//     table designer, s007) -- it refuses, and the step does not happen;
+//   * put() never drops a table that holds rows, and never drops a field that
+//     holds values unless the step keeps them (a "field:" record, s007) -- it
+//     refuses, and the step does not happen;
 //   * undo / redo first check the live records still look exactly like the
 //     step left them. Anything different -> refused, nothing touched.
 //
@@ -67,13 +79,26 @@ struct ColumnDef {
     bool operator==(const ColumnDef&) const = default;
 };
 
+// An index Acorn can make (s007): name, fields in key order, unique. The index
+// backing the primary key is not one of these -- it is the key.
+struct IndexDef {
+    std::string              name;
+    std::vector<std::string> columns;
+    bool                     unique = false;
+    bool                     partial = false;  // read from the engine; Acorn never makes one
+    bool operator==(const IndexDef&) const = default;
+};
+
 struct TableDef {
     std::string            name;
     std::vector<ColumnDef> columns;
     std::int64_t           rows = 0;          // live count -- a step never drops data
-    bool operator==(const TableDef&) const = default;
+    std::vector<IndexDef>  indexes;           // by name (s007)
+    // Same fields by name (order is display only), same indexes, same rows.
+    bool operator==(const TableDef& o) const;
 
     static TableDef from(const Table& t);     // introspection -> picture (rows = 0)
+    const ColumnDef* column(const std::string& n) const;
 };
 
 // One record: every column of its table, in the table's order (s006).
@@ -81,12 +106,24 @@ struct RowDef {
     std::string              table;
     std::vector<std::string> columns;
     std::vector<Value>       values;          // values[i] is columns[i]
-    bool operator==(const RowDef&) const = default;
+    // Same table, same fields BY NAME holding the same values (s007: a field
+    // put back by undo comes back last; the record is still the same).
+    bool operator==(const RowDef& o) const;
 
     const Value* field(const std::string& column) const;   // nullptr: no such column
 };
 
-using Record = std::variant<TableDef, RowDef>;
+// One field's values in every record of its table, by key (s007). Only the
+// non-NULL ones -- a field added back starts all NULL.
+struct FieldData {
+    std::string                     table;
+    std::string                     column;
+    std::vector<std::vector<Value>> keys;     // keys[i] holds values[i]; in key order
+    std::vector<Value>              values;
+    bool operator==(const FieldData&) const = default;
+};
+
+using Record = std::variant<TableDef, RowDef, FieldData>;
 
 // ── the DDL writer: one place, per dialect, shared by preview and act ─────────
 // The New Table window shows exactly the string the store will run.
@@ -100,6 +137,22 @@ std::string check_name(const std::string& what, const std::string& name);
 // The reason this def can't be made, in words ("" = fine): its name, each
 // column's name, duplicate names, no columns.
 std::string check_new_table(const TableDef& t, const Schema& existing);
+
+// s007 -- the designer's SQL. The statements that turn the table `live` into
+// `want`, in order -- what the designer previews and exactly what put() runs.
+// One step changes the fields one way: a field whose name alone changed is a
+// RENAME (one field gone + one come, otherwise identical); new fields are
+// added at the end; gone fields are dropped; indexes no longer wanted are
+// dropped first and new ones made last. Anything else (a field's type,
+// required, default, the key) is refused in words -- s007c. MariaDB gets ONE
+// ALTER TABLE (it can't roll DDL back, so one statement is the step).
+std::expected<std::vector<std::string>, std::string>
+plan_alter(Dialect d, char quote, const TableDef& live, const TableDef& want);
+std::string create_index_sql(Dialect d, char quote, const std::string& table, const IndexDef& ix);
+std::string drop_index_sql(Dialect d, char quote, const std::string& table, const std::string& index);
+// Every index name in the schema (SQLite and PostgreSQL keep them per database,
+// not per table -- a new index must not reuse one).
+bool index_name_taken(const Schema& s, const std::string& name);
 
 // ── the gate ──────────────────────────────────────────────────────────────────
 // True for statements that only read (SELECT, WITH .. SELECT is NOT counted as
@@ -142,6 +195,9 @@ public:
     // What a step that MAKES a record in `table` declares (the record's own id
     // is not known until the engine assigns its key).
     static Id new_row_id(const std::string& table) { return "new:" + table; }
+    // One field's values (s007): what Delete Field declares to keep them.
+    static Id field_id(const std::string& table, const std::string& column);
+    static bool parse_field_id(const Id& id, std::string& table, std::string& column);
     // "“customers” record 7" -- for messages.
     static std::string describe(const Id& id);
 
@@ -177,6 +233,7 @@ public:
     void set_door(std::function<bool()> open) { m_door = std::move(open); }
     int  strays() const { return m_strays; }
     Dialect dialect() const { return m_dialect; }
+    const Capabilities& caps() const { return m_caps; }
     Connection& connection() const { return m_conn; }
     // The records the running step declared; put() refuses any other.
     void set_allowed(std::vector<Id> ids) { m_allowed = std::move(ids); }
@@ -189,6 +246,9 @@ private:
     std::optional<Record> get_row(const Id& id) const;
     void put_table(const Id& id, const std::optional<TableDef>& v);
     void put_row(const Id& id, const RowDef* v);
+    std::optional<Record> get_field(const Id& id) const;
+    void put_field(const Id& id, const FieldData* v);
+    bool exec_all(const std::vector<std::string>& sql);
     std::string where_key(const Table& t) const;
 
     Connection&           m_conn;
@@ -273,6 +333,36 @@ std::expected<void, Error> set_field(Journal& j, const Store::Id& row, const std
                                      const Value& v);
 // Label: Delete Record from “table”.
 std::expected<void, Error> delete_record(Journal& j, const Store::Id& row);
+
+// s007 -- the table designer. Each is one step; undo puts the table back.
+// New Field “c” in “t”: added at the end, NULL in every record (a required
+// field needs a default). Not a key field (s007c).
+std::expected<void, Error> new_field(Journal& j, const std::string& table, const ColumnDef& c);
+// Rename Field “a” to “b”: its values, indexes and links go with it.
+std::expected<void, Error> rename_field(Journal& j, const std::string& table, const std::string& from,
+                                        const std::string& to);
+// Delete Field “c” from “t”: the indexes on it go too; its values are KEPT in
+// the step, so undo puts them back. Never a key field.
+std::expected<void, Error> delete_field(Journal& j, const std::string& table, const std::string& column);
+// New Index “i” on “t” / Delete Index “i” from “t”.
+std::expected<void, Error> new_index(Journal& j, const std::string& table, const IndexDef& ix);
+std::expected<void, Error> delete_index(Journal& j, const std::string& table, const std::string& index);
+// s007b -- the designer window: every change it holds, as ONE step. Fields
+// it drops that hold values are kept in the step (as delete_field does).
+// Label: the one change's own name when there is one change ("Rename Field
+// “a” to “b”"), else Change Table “t”. Pictures carry no field identity, so
+// one field gone + one identical field come IS a rename; deleting one field
+// and adding another of the same kind in one step is refused (two steps) --
+// the designer window keeps them apart before it gets here.
+std::expected<void, Error> design_table(Journal& j, const TableDef& want);
+std::string design_label(const TableDef& live, const TableDef& want);
+// What the change takes with it, in words -- one line per field that holds
+// values ("“notes” holds 37 values -- they go with the field"). Empty:
+// nothing is lost. The designer never pre-ticks its "I understand".
+std::expected<std::vector<std::string>, Error> design_losses(Journal& j, const TableDef& want);
+// What a design step would do to the live table, as the SQL put() will run
+// (the designer's preview): `want` is the table as the designer has it.
+std::expected<std::vector<std::string>, Error> preview(Journal& j, const TableDef& want);
 
 struct Verb {
     std::string name;

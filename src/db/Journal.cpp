@@ -38,7 +38,39 @@ TableDef TableDef::from(const Table& t) {
     d.name = t.name;
     for (const auto& c : t.columns)
         d.columns.push_back({c.name, c.decl_type, c.nullable, c.default_sql, c.pk_position, c.auto_increment});
+    for (const auto& ix : t.indexes)
+        if (!ix.primary) d.indexes.push_back({ix.name, ix.columns, ix.unique, ix.partial});
+    std::sort(d.indexes.begin(), d.indexes.end(), [](auto& a, auto& b) { return a.name < b.name; });
     return d;
+}
+
+const ColumnDef* TableDef::column(const std::string& n) const {
+    for (const auto& c : columns) if (c.name == n) return &c;
+    return nullptr;
+}
+
+bool TableDef::operator==(const TableDef& o) const {
+    if (name != o.name || rows != o.rows || columns.size() != o.columns.size()) return false;
+    for (const auto& c : columns) {
+        const ColumnDef* m = o.column(c.name);
+        if (!m || !(*m == c)) return false;
+    }
+    auto a = indexes, b = o.indexes;
+    auto by_name = [](const IndexDef& x, const IndexDef& y) { return x.name < y.name; };
+    std::sort(a.begin(), a.end(), by_name);
+    std::sort(b.begin(), b.end(), by_name);
+    return a == b;
+}
+
+bool RowDef::operator==(const RowDef& o) const {
+    if (table != o.table || columns.size() != o.columns.size() || values.size() != columns.size() ||
+        o.values.size() != o.columns.size())
+        return false;
+    for (std::size_t i = 0; i < columns.size(); ++i) {
+        const Value* v = o.field(columns[i]);
+        if (!v || !(*v == values[i])) return false;
+    }
+    return true;
 }
 
 // ── the DDL writer ──────────────────────────────────────────────────────────
@@ -113,6 +145,158 @@ std::string create_table_sql(Dialect d, char q, const TableDef& t) {
 
 std::string drop_table_sql(char q, const std::string& name) {
     return "DROP TABLE " + quote_ident_with(q, name);
+}
+
+// ── s007: the designer's SQL ─────────────────────────────────────────────────
+std::string create_index_sql(Dialect, char q, const std::string& table, const IndexDef& ix) {
+    std::string s = std::string("CREATE ") + (ix.unique ? "UNIQUE " : "") + "INDEX " + quote_ident_with(q, ix.name) +
+                    " ON " + quote_ident_with(q, table) + " (";
+    for (std::size_t i = 0; i < ix.columns.size(); ++i) s += (i ? ", " : "") + quote_ident_with(q, ix.columns[i]);
+    return s + ")";
+}
+
+std::string drop_index_sql(Dialect d, char q, const std::string& table, const std::string& index) {
+    std::string s = "DROP INDEX " + quote_ident_with(q, index);
+    if (d == Dialect::MariaDB) s += " ON " + quote_ident_with(q, table);
+    return s;
+}
+
+bool index_name_taken(const Schema& s, const std::string& name) {
+    for (const auto& t : s.tables)
+        for (const auto& ix : t.indexes)
+            if (lower(ix.name) == lower(name)) return true;
+    return false;
+}
+
+namespace {
+
+// A field as ADD COLUMN writes it (never a key field -- plan_alter refuses).
+std::string field_decl(char q, const ColumnDef& c) {
+    std::string s = quote_ident_with(q, c.name) + " " + c.decl_type;
+    if (!c.nullable) s += " NOT NULL";
+    if (c.default_sql) s += " DEFAULT " + *c.default_sql;
+    return s;
+}
+
+bool same_but_name(const ColumnDef& a, const ColumnDef& b) {
+    ColumnDef x = a;
+    x.name = b.name;
+    return x == b;
+}
+
+// What one design step does to a table, field by field (shared by plan_alter
+// and the store's data rule, so the two can't disagree).
+struct Diff {
+    std::optional<std::pair<std::string, std::string>> rename;   // from, to
+    std::vector<const ColumnDef*> dropped;                        // live's
+    std::vector<const ColumnDef*> added;                          // want's, in want's order
+    std::vector<std::string>      idx_drop;                       // names, live's
+    std::vector<const IndexDef*>  idx_make;                       // want's
+};
+
+std::expected<Diff, std::string> diff_tables(const TableDef& live, const TableDef& want) {
+    Diff df;
+    if (live.name != want.name) return std::unexpected("renaming a table is not done here");
+    for (const auto& c : live.columns) if (!want.column(c.name)) df.dropped.push_back(&c);
+    for (const auto& c : want.columns) if (!live.column(c.name)) df.added.push_back(&c);
+    for (const auto& c : live.columns) {
+        const ColumnDef* w = want.column(c.name);
+        if (w && !(*w == c))
+            return std::unexpected("changing " + curly(c.name) +
+                                   "'s type, whether it is required, its default or its part in the key "
+                                   "is not done here yet");
+    }
+    if (df.dropped.size() == 1 && df.added.size() == 1 && same_but_name(*df.dropped[0], *df.added[0])) {
+        df.rename = {df.dropped[0]->name, df.added[0]->name};
+        df.dropped.clear();
+        df.added.clear();
+    }
+    if (df.rename && (!df.dropped.empty() || !df.added.empty()))
+        return std::unexpected("a rename is a step of its own");
+    for (const auto* c : df.dropped)
+        if (c->pk_position > 0) return std::unexpected(curly(c->name) + " is part of the key -- the key is not changed here");
+    for (const auto* c : df.added) {
+        if (c->pk_position > 0 || c->auto_increment)
+            return std::unexpected(curly(c->name) + " would join the key -- the key is not changed here");
+        if (!c->nullable && !c->default_sql)
+            return std::unexpected(curly(c->name) + " is required, so it needs a default for the records already there");
+    }
+    if (want.columns.empty()) return std::unexpected("a table needs at least one field");
+
+    // Indexes: live's, with the rename applied, against want's -- by name.
+    auto renamed = [&](IndexDef ix) {
+        if (df.rename)
+            for (auto& col : ix.columns) if (col == df.rename->first) col = df.rename->second;
+        return ix;
+    };
+    for (const auto& lx : live.indexes) {
+        const IndexDef* w = nullptr;
+        for (const auto& wx : want.indexes) if (wx.name == lx.name) w = &wx;
+        if (w && *w == renamed(lx)) continue;
+        if (lower(lx.name).rfind("sqlite_autoindex", 0) == 0)
+            return std::unexpected(curly(lx.name) + " belongs to a UNIQUE rule written into the table -- not dropped here");
+        df.idx_drop.push_back(lx.name);
+    }
+    for (const auto& wx : want.indexes) {
+        const IndexDef* l = nullptr;
+        for (const auto& lx : live.indexes) if (lx.name == wx.name) l = &lx;
+        if (l && renamed(*l) == wx) continue;
+        if (wx.partial) return std::unexpected("Acorn doesn't make partial indexes");
+        if (auto why = check_name("The index", wx.name); !why.empty()) return std::unexpected(why);
+        if (wx.columns.empty()) return std::unexpected("the index " + curly(wx.name) + " needs at least one field");
+        for (std::size_t i = 0; i < wx.columns.size(); ++i) {
+            if (!want.column(wx.columns[i]))
+                return std::unexpected("the index " + curly(wx.name) + " uses " + curly(wx.columns[i]) +
+                                       ", which the table won't have");
+            for (std::size_t k = 0; k < i; ++k)
+                if (wx.columns[k] == wx.columns[i])
+                    return std::unexpected("the index " + curly(wx.name) + " names " + curly(wx.columns[i]) + " twice");
+        }
+        df.idx_make.push_back(&wx);
+    }
+    // An index the table keeps must not use a field that is going.
+    for (const auto& wx : want.indexes)
+        for (const auto& col : wx.columns)
+            if (!want.column(col))
+                return std::unexpected("the index " + curly(wx.name) + " uses " + curly(col) + ", which is going");
+    return df;
+}
+
+}  // namespace
+
+std::expected<std::vector<std::string>, std::string>
+plan_alter(Dialect d, char q, const TableDef& live, const TableDef& want) {
+    auto df = diff_tables(live, want);
+    if (!df) return std::unexpected(df.error());
+    const std::string t = quote_ident_with(q, live.name);
+    std::vector<std::string> out;
+    if (d == Dialect::MariaDB) {   // ONE statement: atomic on an engine that can't roll DDL back
+        std::vector<std::string> cl;
+        for (const auto& n : df->idx_drop) cl.push_back("DROP INDEX " + quote_ident_with(q, n));
+        if (df->rename)
+            cl.push_back("RENAME COLUMN " + quote_ident_with(q, df->rename->first) + " TO " +
+                         quote_ident_with(q, df->rename->second));
+        for (const auto* c : df->dropped) cl.push_back("DROP COLUMN " + quote_ident_with(q, c->name));
+        for (const auto* c : df->added) cl.push_back("ADD COLUMN " + field_decl(q, *c));
+        for (const auto* ix : df->idx_make) {
+            std::string a = std::string("ADD ") + (ix->unique ? "UNIQUE " : "") + "INDEX " + quote_ident_with(q, ix->name) + " (";
+            for (std::size_t i = 0; i < ix->columns.size(); ++i) a += (i ? ", " : "") + quote_ident_with(q, ix->columns[i]);
+            cl.push_back(a + ")");
+        }
+        if (cl.empty()) return out;
+        std::string s = "ALTER TABLE " + t;
+        for (std::size_t i = 0; i < cl.size(); ++i) s += (i ? ",\n  " : "\n  ") + cl[i];
+        out.push_back(s);
+        return out;
+    }
+    for (const auto& n : df->idx_drop) out.push_back(drop_index_sql(d, q, live.name, n));
+    if (df->rename)
+        out.push_back("ALTER TABLE " + t + " RENAME COLUMN " + quote_ident_with(q, df->rename->first) + " TO " +
+                      quote_ident_with(q, df->rename->second));
+    for (const auto* c : df->dropped) out.push_back("ALTER TABLE " + t + " DROP COLUMN " + quote_ident_with(q, c->name));
+    for (const auto* c : df->added) out.push_back("ALTER TABLE " + t + " ADD COLUMN " + field_decl(q, *c));
+    for (const auto* ix : df->idx_make) out.push_back(create_index_sql(d, q, live.name, *ix));
+    return out;
 }
 
 std::string check_name(const std::string& what, const std::string& name) {
@@ -238,6 +422,26 @@ bool Store::parse_row_id(const Id& id, std::string& table, std::vector<db::Value
     return !key.empty();
 }
 
+Store::Id Store::field_id(const std::string& table, const std::string& column) {
+    return "field:" + std::to_string(table.size()) + ":" + table + ":" + column;
+}
+
+bool Store::parse_field_id(const Id& id, std::string& table, std::string& column) {
+    if (id.rfind("field:", 0) != 0) return false;
+    const std::size_t c = id.find(':', 6);
+    if (c == std::string::npos || c == 6) return false;
+    std::size_t n = 0;
+    for (std::size_t k = 6; k < c; ++k) {
+        if (!std::isdigit(static_cast<unsigned char>(id[k]))) return false;
+        n = n * 10 + static_cast<std::size_t>(id[k] - '0');
+        if (n > id.size()) return false;
+    }
+    if (c + 1 + n >= id.size() || id[c + 1 + n] != ':') return false;
+    table  = id.substr(c + 1, n);
+    column = id.substr(c + 2 + n);
+    return !table.empty() && !column.empty();
+}
+
 std::string Store::describe(const Id& id) {
     std::string table;
     std::vector<db::Value> key;
@@ -251,6 +455,8 @@ std::string Store::describe(const Id& id) {
         return curly(table) + " record " + k;
     }
     if (id.rfind("new:", 0) == 0) return "a new record in " + curly(id.substr(4));
+    std::string column;
+    if (parse_field_id(id, table, column)) return "the values of " + curly(table) + "." + curly(column);
     return curly(name_of(id));
 }
 
@@ -279,6 +485,7 @@ std::string Store::where_key(const Table& t) const {
 std::optional<Record> Store::get(const Id& id) const {
     if (id.rfind("table:", 0) == 0) return get_table(name_of(id));
     if (id.rfind("row:", 0) == 0) return get_row(id);
+    if (id.rfind("field:", 0) == 0) return get_field(id);
     return std::nullopt;   // "new:..." -- a declaration, never a record
 }
 
@@ -317,6 +524,91 @@ std::optional<Record> Store::get_row(const Id& id) const {
     return d;
 }
 
+std::optional<Record> Store::get_field(const Id& id) const {
+    std::string table, column;
+    if (!parse_field_id(id, table, column)) { fail(Error::Code::Internal, "not a field: " + id); return std::nullopt; }
+    m_schema.reset();   // a field may have come or gone this step
+    const Table* t = table_info(table);
+    if (failed() || !t || t->kind != Table::Kind::Table || !t->column(column)) return std::nullopt;
+    const auto pk = t->primary_key();
+    const std::string c = m_conn.quote_ident(column);
+    FieldData d{table, column, {}, {}};
+    if (pk.empty()) {
+        auto n = m_conn.query("SELECT COUNT(*) FROM " + m_conn.quote_ident(table) + " WHERE " + c + " IS NOT NULL");
+        if (!n || n->rows.empty()) { fail(Error::Code::Internal, "could not count " + describe(id)); return std::nullopt; }
+        const auto& v = n->rows[0][0];
+        const std::int64_t k = v.as_int() ? *v.as_int() : (v.as_text() ? std::stoll(*v.as_text()) : 0);
+        if (k > 0) fail(Error::Code::Unsupported, curly(table) + " has no primary key -- Acorn can't keep " +
+                        curly(column) + "'s values to bring them back");
+        return d;
+    }
+    std::string sql = "SELECT ", order;
+    for (std::size_t i = 0; i < pk.size(); ++i) {
+        sql += m_conn.quote_ident(pk[i]) + ", ";
+        order += (i ? ", " : "") + m_conn.quote_ident(pk[i]);
+    }
+    sql += c + " FROM " + m_conn.quote_ident(table) + " WHERE " + c + " IS NOT NULL ORDER BY " + order;
+    auto r = m_conn.query(sql);
+    if (!r) { fail(r.error().code, r.error().message); return std::nullopt; }
+    for (auto& row : r->rows) {
+        d.values.push_back(row.back());
+        row.pop_back();
+        d.keys.push_back(std::move(row));
+    }
+    return d;
+}
+
+void Store::put_field(const Id& id, const FieldData* v) {
+    // Absent: the field going is the TABLE's change (Delete Field declares
+    // both); there is nothing to write here.
+    if (!v) return;
+    std::string table, column;
+    if (!parse_field_id(id, table, column)) { fail(Error::Code::Internal, "not a field: " + id); return; }
+    if (v->table != table || v->column != column) { fail(Error::Code::Internal, id + " given another field's values"); return; }
+    m_schema.reset();
+    const Table* t = table_info(table);
+    if (failed()) return;
+    if (!t || !t->column(column)) { fail(Error::Code::Changed, curly(table) + "." + curly(column) + " is not there"); return; }
+    const auto pk = t->primary_key();
+    if (pk.empty()) {
+        if (!v->values.empty()) fail(Error::Code::Unsupported, curly(table) + " has no primary key -- values can't be put back");
+        return;
+    }
+    const auto got = get_field(id);
+    if (failed()) return;
+    const FieldData live = got ? std::get<FieldData>(*got) : FieldData{table, column, {}, {}};
+    if (live == *v) return;
+    auto set_one = [&](const std::vector<db::Value>& key, const db::Value& val) {
+        std::vector<db::Value> params{val};
+        params.insert(params.end(), key.begin(), key.end());
+        auto r = m_conn.query("UPDATE " + m_conn.quote_ident(table) + " SET " + m_conn.quote_ident(column) + " = ?" +
+                              where_key(*t), params);
+        if (!r) { fail(r.error().code, r.error().message); return false; }
+        if (r->affected != 1) {
+            fail(Error::Code::Changed, describe(row_id(table, key)) + " is not there any more -- " +
+                 curly(column) + "'s values were not put back");
+            return false;
+        }
+        return true;
+    };
+    auto find = [](const FieldData& f, const std::vector<db::Value>& key) -> const db::Value* {
+        for (std::size_t i = 0; i < f.keys.size(); ++i) if (f.keys[i] == key) return &f.values[i];
+        return nullptr;
+    };
+    for (std::size_t i = 0; i < live.keys.size(); ++i)
+        if (!find(*v, live.keys[i]) && !set_one(live.keys[i], db::Value())) return;
+    for (std::size_t i = 0; i < v->keys.size(); ++i) {
+        const db::Value* now = find(live, v->keys[i]);
+        if (now && *now == v->values[i]) continue;
+        if (!set_one(v->keys[i], v->values[i])) return;
+    }
+}
+
+bool Store::exec_all(const std::vector<std::string>& sql) {
+    for (const auto& s : sql) if (!exec(s)) return false;
+    return true;
+}
+
 bool Store::exec(const std::string& sql) {
     auto r = m_conn.query(sql);
     if (!r) fail(r.error().code, r.error().message);
@@ -350,6 +642,11 @@ void Store::put(const Id& id, const std::optional<Record>& v) {
         put_row(id, v ? &std::get<RowDef>(*v) : nullptr);
         return;
     }
+    if (id.rfind("field:", 0) == 0) {
+        if (v && !std::holds_alternative<FieldData>(*v)) { fail(Error::Code::Internal, id + " given a table or record"); return; }
+        put_field(id, v ? &std::get<FieldData>(*v) : nullptr);
+        return;
+    }
     fail(Error::Code::Internal, "unknown record " + id);
 }
 
@@ -372,15 +669,39 @@ void Store::put_table(const Id& id, const std::optional<TableDef>& v) {
         return;
     }
     if (v->name != name) { fail(Error::Code::Internal, "record " + id + " does not hold table " + v->name); return; }
-    if (live) {
-        fail(Error::Code::Unsupported, "changing an existing table comes with the table designer");
+    if (live) {   // present -> another shape: ALTER (s007)
+        auto df = diff_tables(*live, *v);
+        if (!df) { fail(Error::Code::Unsupported, df.error()); return; }
+        // The data rule: a field holding values is dropped only when the step
+        // keeps them (declared its field id) -- else it is refused.
+        for (const auto* c : df->dropped) {
+            const Id fid = field_id(name, c->name);
+            if (std::find(m_allowed.begin(), m_allowed.end(), fid) != m_allowed.end()) continue;
+            auto n = m_conn.query("SELECT COUNT(*) FROM " + m_conn.quote_ident(name) + " WHERE " +
+                                  m_conn.quote_ident(c->name) + " IS NOT NULL");
+            if (!n || n->rows.empty()) { fail(Error::Code::Internal, "could not count " + curly(c->name) + "'s values"); return; }
+            const auto& cv = n->rows[0][0];
+            const std::int64_t k = cv.as_int() ? *cv.as_int() : (cv.as_text() ? std::stoll(*cv.as_text()) : 0);
+            if (k > 0) {
+                fail(Error::Code::Constraint, curly(c->name) + " holds " + std::to_string(k) + " value" +
+                     (k == 1 ? "" : "s") + " -- Acorn will not drop a field with data in it unless the step keeps them");
+                return;
+            }
+        }
+        auto plan = plan_alter(m_dialect, q, *live, *v);
+        if (!plan) { fail(Error::Code::Unsupported, plan.error()); return; }
+        exec_all(*plan);
         return;
     }
     if (v->rows > 0) {
         fail(Error::Code::Unsupported, "a table's rows can't be put back yet");
         return;
     }
-    exec(create_table_sql(m_dialect, q, *v));
+    if (!exec(create_table_sql(m_dialect, q, *v))) return;
+    for (const auto& ix : v->indexes) {
+        if (ix.partial) { fail(Error::Code::Unsupported, "Acorn doesn't make partial indexes"); return; }
+        if (!exec(create_index_sql(m_dialect, q, v->name, ix))) return;
+    }
 }
 
 void Store::put_row(const Id& id, const RowDef* v) {
@@ -508,6 +829,12 @@ bool touches_tables(const std::vector<Store::Id>& ids) {
     for (const auto& id : ids) if (id.rfind("table:", 0) == 0) return true;
     return false;
 }
+// Everything a step declares except a field's kept values.
+std::size_t not_fields(const std::vector<Store::Id>& ids) {
+    std::size_t n = 0;
+    for (const auto& id : ids) if (id.rfind("field:", 0) != 0) ++n;
+    return n;
+}
 }  // namespace
 
 std::expected<void, Error> Journal::begin(const std::vector<Store::Id>& ids) {
@@ -544,7 +871,9 @@ void Journal::rollback() {
 std::expected<void, Error> Journal::run(const std::string& label, const std::vector<Store::Id>& ids,
                                         const std::function<void(Store&)>& op) {
     if (m_txn) return std::unexpected(Error{Error::Code::Internal, "a step is already running"});
-    if (!m_caps.transactional_ddl && ids.size() > 1 && touches_tables(ids))
+    // One table per step where DDL can't roll back. A field's kept values
+    // (Delete Field) ride along: put back AFTER the one ALTER on undo.
+    if (!m_caps.transactional_ddl && touches_tables(ids) && not_fields(ids) > 1)
         return std::unexpected(Error{Error::Code::Unsupported,
             "this engine can't roll back a table change, so Acorn changes one table per step"});
     if (auto b = begin(ids); !b) return b;
@@ -690,6 +1019,287 @@ std::expected<void, Error> delete_record(Journal& j, const Store::Id& row) {
     });
 }
 
+// ── s007: the table designer ────────────────────────────────────────────────
+namespace {
+
+// The live table, as a picture, inside a step ("" refused already).
+std::optional<TableDef> live_table(Store& s, const std::string& table) {
+    auto got = s.get(Store::table_id(table));
+    if (s.failed()) return std::nullopt;
+    if (!got) { s.refuse(Error{Error::Code::NotFound, "there is no table " + curly(table)}); return std::nullopt; }
+    return std::get<TableDef>(*got);
+}
+
+const ColumnDef* named_like(const TableDef& t, const std::string& n, const std::string& except = {}) {
+    for (const auto& c : t.columns)
+        if (lower(c.name) == lower(n) && c.name != except) return &c;
+    return nullptr;
+}
+
+std::int64_t count_values(Connection& c, const std::string& table, const std::string& column) {
+    auto n = c.query("SELECT COUNT(*) FROM " + c.quote_ident(table) + " WHERE " + c.quote_ident(column) + " IS NOT NULL");
+    if (!n || n->rows.empty()) return -1;
+    const auto& v = n->rows[0][0];
+    if (auto i = v.as_int()) return *i;
+    if (auto t = v.as_text()) return std::stoll(*t);
+    return -1;
+}
+
+}  // namespace
+
+std::expected<void, Error> new_field(Journal& j, const std::string& table, const ColumnDef& c) {
+    if (auto why = check_name("The field", c.name); !why.empty())
+        return std::unexpected(Error{Error::Code::Unsupported, why});
+    const auto id = Store::table_id(table);
+    return j.run("New Field " + curly(c.name) + " in " + curly(table), {id}, [&](Store& s) {
+        auto t = live_table(s, table);
+        if (!t) return;
+        if (const auto* x = named_like(*t, c.name)) {
+            s.refuse(Error{Error::Code::Exists, curly(table) + " already has a field named " + curly(x->name)});
+            return;
+        }
+        t->columns.push_back(c);
+        s.put(id, *t);
+    });
+}
+
+std::expected<void, Error> rename_field(Journal& j, const std::string& table, const std::string& from,
+                                        const std::string& to) {
+    if (from == to) return {};
+    if (auto why = check_name("The field", to); !why.empty())
+        return std::unexpected(Error{Error::Code::Unsupported, why});
+    const auto id = Store::table_id(table);
+    return j.run("Rename Field " + curly(from) + " to " + curly(to), {id}, [&](Store& s) {
+        auto t = live_table(s, table);
+        if (!t) return;
+        if (!t->column(from)) { s.refuse(Error{Error::Code::NotFound, curly(table) + " has no field " + curly(from)}); return; }
+        if (const auto* x = named_like(*t, to, from)) {
+            s.refuse(Error{Error::Code::Exists, curly(table) + " already has a field named " + curly(x->name)});
+            return;
+        }
+        for (auto& c : t->columns) if (c.name == from) c.name = to;
+        for (auto& ix : t->indexes)
+            for (auto& col : ix.columns) if (col == from) col = to;
+        s.put(id, *t);
+    });
+}
+
+std::expected<void, Error> delete_field(Journal& j, const std::string& table, const std::string& column) {
+    // Decide what the step declares BEFORE it runs: the field's values ride
+    // along when there are any, so undo can put them back.
+    Store& st = j.store();
+    st.forget_schema();
+    const Table* info = st.table_info(table);
+    if (st.failed()) { Error e = st.error(); st.clear_failed(); return std::unexpected(e); }
+    if (!info || info->kind != Table::Kind::Table)
+        return std::unexpected(Error{Error::Code::NotFound, "there is no table " + curly(table)});
+    const Column* col = info->column(column);
+    if (!col) return std::unexpected(Error{Error::Code::NotFound, curly(table) + " has no field " + curly(column)});
+    if (col->pk_position > 0)
+        return std::unexpected(Error{Error::Code::Unsupported, curly(column) + " is part of the key -- the key is not changed here"});
+    if (info->columns.size() == 1)
+        return std::unexpected(Error{Error::Code::Unsupported, "a table needs at least one field -- " + curly(column) + " is its last"});
+    const std::int64_t held = count_values(st.connection(), table, column);
+    if (held < 0) return std::unexpected(Error{Error::Code::Internal, "could not count " + curly(column) + "'s values"});
+    if (held > 0 && info->primary_key().empty())
+        return std::unexpected(Error{Error::Code::Unsupported, curly(table) + " has no primary key -- Acorn can't keep " +
+                                     curly(column) + "'s values to bring them back, so it won't delete it"});
+    const auto tid = Store::table_id(table);
+    std::vector<Store::Id> ids;
+    if (held > 0) ids.push_back(Store::field_id(table, column));   // put back AFTER the table, on undo
+    ids.push_back(tid);
+    return j.run("Delete Field " + curly(column) + " from " + curly(table), ids, [&](Store& s) {
+        auto t = live_table(s, table);
+        if (!t) return;
+        std::erase_if(t->columns, [&](const ColumnDef& c) { return c.name == column; });
+        std::erase_if(t->indexes, [&](const IndexDef& ix) {
+            return std::find(ix.columns.begin(), ix.columns.end(), column) != ix.columns.end();
+        });
+        s.put(tid, *t);
+    });
+}
+
+std::expected<void, Error> new_index(Journal& j, const std::string& table, const IndexDef& ix) {
+    if (auto why = check_name("The index", ix.name); !why.empty())
+        return std::unexpected(Error{Error::Code::Unsupported, why});
+    const auto id = Store::table_id(table);
+    return j.run("New Index " + curly(ix.name) + " on " + curly(table), {id}, [&](Store& s) {
+        auto t = live_table(s, table);
+        if (!t) return;
+        auto all = s.connection().introspect();
+        if (!all) { s.refuse(all.error()); return; }
+        if (index_name_taken(*all, ix.name)) {
+            s.refuse(Error{Error::Code::Exists, "there is already an index named " + curly(ix.name)});
+            return;
+        }
+        IndexDef x = ix;
+        x.partial = false;
+        t->indexes.push_back(x);
+        std::sort(t->indexes.begin(), t->indexes.end(), [](auto& a, auto& b) { return a.name < b.name; });
+        s.put(id, *t);
+    });
+}
+
+std::expected<void, Error> delete_index(Journal& j, const std::string& table, const std::string& index) {
+    const auto id = Store::table_id(table);
+    return j.run("Delete Index " + curly(index) + " from " + curly(table), {id}, [&](Store& s) {
+        auto t = live_table(s, table);
+        if (!t) return;
+        const auto n = t->indexes.size();
+        std::erase_if(t->indexes, [&](const IndexDef& x) { return x.name == index; });
+        if (t->indexes.size() == n) { s.refuse(Error{Error::Code::NotFound, curly(table) + " has no index " + curly(index)}); return; }
+        s.put(id, *t);
+    });
+}
+
+std::string design_label(const TableDef& live, const TableDef& want) {
+    const std::string t = curly(live.name);
+    auto df = diff_tables(live, want);
+    if (!df) return "Change Table " + t;
+    const auto& d = *df;
+    const bool fields = d.rename || !d.dropped.empty() || !d.added.empty();
+    if (d.rename && d.dropped.empty() && d.added.empty() && d.idx_drop.empty() && d.idx_make.empty())
+        return "Rename Field " + curly(d.rename->first) + " to " + curly(d.rename->second);
+    if (!d.rename && d.dropped.size() == 1 && d.added.empty() && d.idx_make.empty()) {
+        bool only_its = true;   // the indexes that go are the field's own
+        for (const auto& n : d.idx_drop)
+            for (const auto& lx : live.indexes)
+                if (lx.name == n && std::find(lx.columns.begin(), lx.columns.end(), d.dropped[0]->name) == lx.columns.end())
+                    only_its = false;
+        if (only_its) return "Delete Field " + curly(d.dropped[0]->name) + " from " + t;
+    }
+    if (!d.rename && d.dropped.empty() && d.added.size() == 1 && d.idx_drop.empty() && d.idx_make.empty())
+        return "New Field " + curly(d.added[0]->name) + " in " + t;
+    if (!fields && d.idx_make.size() == 1 && d.idx_drop.empty()) return "New Index " + curly(d.idx_make[0]->name) + " on " + t;
+    if (!fields && d.idx_drop.size() == 1 && d.idx_make.empty()) return "Delete Index " + curly(d.idx_drop[0]) + " from " + t;
+    return "Change Table " + t;
+}
+
+namespace {
+// The live table and the fields `want` drops, read outside a step.
+struct Dropping {
+    TableDef                 live;
+    std::vector<std::string> names;
+    std::vector<std::int64_t> held;   // non-NULL values in each
+    bool                     keyless = false;
+};
+std::expected<Dropping, Error> dropping(Journal& j, const TableDef& want) {
+    Store& st = j.store();
+    st.forget_schema();
+    auto got = st.get(Store::table_id(want.name));
+    if (st.failed()) { Error e = st.error(); st.clear_failed(); return std::unexpected(e); }
+    if (!got) return std::unexpected(Error{Error::Code::NotFound, "there is no table " + curly(want.name)});
+    Dropping out;
+    out.live = std::get<TableDef>(*got);
+    auto df = diff_tables(out.live, want);
+    if (!df) return std::unexpected(Error{Error::Code::Unsupported, df.error()});
+    // One field gone + one come of the same kind is how a RENAME looks to the
+    // planner (pictures carry no field identity). As a delete + add it would
+    // be read back as a rename on redo -- so it is two steps. (Compared by
+    // Acorn's field type: an engine reads its own type names back.)
+    if (!df->rename && df->dropped.size() == 1 && df->added.size() == 1) {
+        const ColumnDef& a = *df->dropped[0];
+        const ColumnDef& b = *df->added[0];
+        const Dialect dl = st.dialect();
+        if (map_type(dl, a.decl_type) == map_type(dl, b.decl_type) && a.nullable == b.nullable &&
+            a.default_sql == b.default_sql && a.pk_position == b.pk_position && a.auto_increment == b.auto_increment)
+            return std::unexpected(Error{Error::Code::Unsupported,
+                "deleting " + curly(a.name) + " and adding " + curly(b.name) +
+                " (the same kind of field) in one step would read as a rename -- apply the delete first"});
+    }
+    out.keyless = true;
+    for (const auto& c : out.live.columns) if (c.pk_position > 0) out.keyless = false;
+    for (const auto* c : df->dropped) {
+        const std::int64_t n = count_values(st.connection(), want.name, c->name);
+        if (n < 0) return std::unexpected(Error{Error::Code::Internal, "could not count " + curly(c->name) + "'s values"});
+        out.names.push_back(c->name);
+        out.held.push_back(n);
+    }
+    return out;
+}
+}  // namespace
+
+std::expected<std::vector<std::string>, Error> design_losses(Journal& j, const TableDef& want) {
+    auto dr = dropping(j, want);
+    if (!dr) return std::unexpected(dr.error());
+    std::vector<std::string> out;
+    for (std::size_t i = 0; i < dr->names.size(); ++i)
+        if (dr->held[i] > 0)
+            out.push_back(curly(dr->names[i]) + " holds " + std::to_string(dr->held[i]) + " value" +
+                          (dr->held[i] == 1 ? "" : "s") + " -- they go with the field");
+    return out;
+}
+
+std::expected<void, Error> design_table(Journal& j, const TableDef& want) {
+    auto dr = dropping(j, want);
+    if (!dr) return std::unexpected(dr.error());
+    const auto tid = Store::table_id(want.name);
+    std::vector<Store::Id> ids;
+    for (std::size_t i = 0; i < dr->names.size(); ++i) {
+        if (dr->held[i] == 0) continue;
+        if (dr->keyless)
+            return std::unexpected(Error{Error::Code::Unsupported, curly(want.name) + " has no primary key -- Acorn can't keep " +
+                                         curly(dr->names[i]) + "'s values to bring them back, so it won't delete it"});
+        ids.push_back(Store::field_id(want.name, dr->names[i]));   // put back AFTER the table, on undo
+    }
+    ids.push_back(tid);
+    TableDef w = want;
+    w.rows = dr->live.rows;
+    const std::string label = design_label(dr->live, w);
+    return j.run(label, ids, [&](Store& s) {
+        auto t = live_table(s, want.name);
+        if (!t) return;
+        if (*t == w) return;   // nothing to do: no step
+        w.rows = t->rows;
+        s.put(tid, w);
+    });
+}
+
+std::expected<std::vector<std::string>, Error> preview(Journal& j, const TableDef& want) {
+    Store& st = j.store();
+    st.forget_schema();
+    auto got = st.get(Store::table_id(want.name));
+    if (st.failed()) { Error e = st.error(); st.clear_failed(); return std::unexpected(e); }
+    const char q = st.connection().quote_ident("x").front();
+    if (!got) {
+        std::vector<std::string> out{create_table_sql(st.dialect(), q, want)};
+        for (const auto& ix : want.indexes) out.push_back(create_index_sql(st.dialect(), q, want.name, ix));
+        return out;
+    }
+    auto plan = plan_alter(st.dialect(), q, std::get<TableDef>(*got), want);
+    if (!plan) return std::unexpected(Error{Error::Code::Unsupported, plan.error()});
+    return *plan;
+}
+
+namespace {
+// The walk's fixture for the designer verbs: a keyed table with an index and
+// a few records holding values -- made through the door.
+constexpr const char* kDesign = "acorn_verb_design";
+std::expected<void, Error> design_fixture(Journal& j) {
+    const Dialect d = j.store().dialect();
+    j.store().forget_schema();
+    if (!j.store().table_info(kDesign)) {
+        j.store().clear_failed();
+        TableDef t;
+        t.name = kDesign;
+        t.columns = {
+            {"id", decl_for(d, FieldType::Integer), false, std::nullopt, 1, true},
+            {"title", decl_for(d, FieldType::Text), true, std::nullopt, 0, false},
+            {"n", decl_for(d, FieldType::Integer), true, std::nullopt, 0, false},
+            {"note", decl_for(d, FieldType::Text), true, std::nullopt, 0, false},
+        };
+        t.indexes = {{"acorn_verb_design_n", {"n"}, false, false}};
+        if (auto r = new_table(j, t); !r) return r;
+        for (int i = 1; i <= 2; ++i)
+            if (auto r = new_record(j, kDesign, {"title", "n"}, {Value("t" + std::to_string(i)), Value(i * 10)}); !r)
+                return std::unexpected(r.error());
+    }
+    // Always one more record (a step), like the records fixture.
+    if (auto r = new_record(j, kDesign, {"title", "n"}, {Value("seed"), Value(7)}); !r) return std::unexpected(r.error());
+    return {};
+}
+}  // namespace
+
 namespace {
 // The walk's fixture for the record verbs: a table with a counting key and one
 // record in it -- made through the door, like everything else.
@@ -752,6 +1362,28 @@ const std::vector<Verb>& all() {
              if (!row) return std::unexpected(row.error());
              return delete_record(j, *row);
          }, rows_fixture},
+        // s007 -- the table designer
+        {"New Field", [](Journal& j) {
+             return new_field(j, kDesign, {"added", decl_for(j.store().dialect(), FieldType::Text), true,
+                                           std::nullopt, 0, false});
+         }, design_fixture},
+        {"Rename Field", [](Journal& j) { return rename_field(j, kDesign, "n", "amount"); }, design_fixture},
+        {"Delete Field", [](Journal& j) { return delete_field(j, kDesign, "n"); }, design_fixture},
+        {"New Index", [](Journal& j) {
+             return new_index(j, kDesign, {"acorn_verb_design_title", {"title"}, false, false});
+         }, design_fixture},
+        {"Delete Index", [](Journal& j) { return delete_index(j, kDesign, "acorn_verb_design_n"); }, design_fixture},
+        {"Design Table", [](Journal& j) -> std::expected<void, Error> {   // s007b: several changes, one step
+             j.store().forget_schema();
+             const Table* t = j.store().table_info(kDesign);
+             if (!t) return std::unexpected(Error{Error::Code::NotFound, "no fixture"});
+             TableDef w = TableDef::from(*t);
+             std::erase_if(w.columns, [](const ColumnDef& c) { return c.name == "n"; });   // holds values
+             w.indexes.clear();
+             w.columns.push_back({"extra", decl_for(j.store().dialect(), FieldType::Text), true, std::nullopt, 0, false});
+             w.indexes.push_back({"acorn_verb_design_title", {"title"}, false, false});
+             return design_table(j, w);
+         }, design_fixture},
     };
     return kVerbs;
 }

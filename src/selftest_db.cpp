@@ -12,6 +12,7 @@
 #include "db/NewFile.hpp"
 #include "db/Types.hpp"
 
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -411,6 +412,105 @@ void test_suite(const Target& T) {
 }
 
 // ── s005b: the door -- pure parts ─────────────────────────────────────────────
+// ── s007: the designer's SQL ─────────────────────────────────────────────────
+void test_design_pure() {
+    TableDef live;
+    live.name = "people";
+    live.columns = {{"id", "INTEGER", false, std::nullopt, 1, true},
+                    {"name", "TEXT", true, std::nullopt, 0, false},
+                    {"age", "INTEGER", true, std::nullopt, 0, false}};
+    live.indexes = {{"people_age", {"age"}, false, false}};
+
+    TableDef add = live;
+    add.columns.push_back({"email", "TEXT", true, std::nullopt, 0, false});
+    auto pa = plan_alter(Dialect::SQLite, '"', live, add);
+    check("design: a new field is ADD COLUMN, one statement",
+          pa && pa->size() == 1 && (*pa)[0] == "ALTER TABLE \"people\" ADD COLUMN \"email\" TEXT",
+          pa && !pa->empty() ? (*pa)[0] : (pa ? "" : pa.error()));
+
+    TableDef ren = live;
+    ren.columns[2].name = "years";
+    ren.indexes[0].columns = {"years"};
+    auto pr = plan_alter(Dialect::PostgreSQL, '"', live, ren);
+    check("design: a field whose name alone changed is a RENAME; its index follows, no index SQL",
+          pr && pr->size() == 1 && (*pr)[0] == "ALTER TABLE \"people\" RENAME COLUMN \"age\" TO \"years\"",
+          pr && !pr->empty() ? (*pr)[0] : (pr ? "" : pr.error()));
+
+    TableDef del = live;
+    del.columns.erase(del.columns.begin() + 2);
+    del.indexes.clear();
+    auto pd = plan_alter(Dialect::SQLite, '"', live, del);
+    check("design: delete a field -- its index dropped FIRST, then the column",
+          pd && pd->size() == 2 && (*pd)[0] == "DROP INDEX \"people_age\"" &&
+          (*pd)[1] == "ALTER TABLE \"people\" DROP COLUMN \"age\"", "");
+    auto pm = plan_alter(Dialect::MariaDB, '`', live, del);
+    check("design: MariaDB gets ONE ALTER TABLE (can't roll DDL back)",
+          pm && pm->size() == 1 && (*pm)[0] == "ALTER TABLE `people`\n  DROP INDEX `people_age`,\n  DROP COLUMN `age`",
+          pm && !pm->empty() ? (*pm)[0] : "");
+    // ... and undo of it is the mirror: column back, then the index.
+    auto pu = plan_alter(Dialect::SQLite, '"', del, live);
+    check("design: undo of delete -- the column added back, then its index made",
+          pu && pu->size() == 2 && (*pu)[0].find("ADD COLUMN \"age\" INTEGER") != std::string::npos &&
+          (*pu)[1] == "CREATE INDEX \"people_age\" ON \"people\" (\"age\")", "");
+
+    TableDef keep_ix = del;
+    keep_ix.indexes = live.indexes;
+    auto pk = plan_alter(Dialect::SQLite, '"', live, keep_ix);
+    check("design: refused -- an index kept on a field that is going",
+          !pk && pk.error().find("people_age") != std::string::npos, pk ? "planned!" : pk.error());
+
+    TableDef req = live;
+    req.columns.push_back({"code", "TEXT", false, std::nullopt, 0, false});
+    auto pq = plan_alter(Dialect::SQLite, '"', live, req);
+    TableDef reqd = live;
+    reqd.columns.push_back({"code", "TEXT", false, std::string("'x'"), 0, false});
+    auto pq2 = plan_alter(Dialect::SQLite, '"', live, reqd);
+    check("design: a required new field needs a default -- refused without, written with",
+          !pq && pq.error().find("needs a default") != std::string::npos && pq2 &&
+          (*pq2)[0].ends_with("\"code\" TEXT NOT NULL DEFAULT 'x'"), pq ? "planned!" : pq.error());
+
+    TableDef typ = live;
+    typ.columns[1].decl_type = "INTEGER";
+    auto pt = plan_alter(Dialect::SQLite, '"', live, typ);
+    TableDef key = live;
+    key.columns.erase(key.columns.begin());
+    auto pky = plan_alter(Dialect::SQLite, '"', live, key);
+    TableDef two = live;
+    two.columns[1].name = "nm";
+    two.columns.push_back({"more", "TEXT", true, std::nullopt, 0, false});
+    auto p2 = plan_alter(Dialect::SQLite, '"', live, two);
+    check("design: refused in words -- a type change, the key",
+          !pt && pt.error().find("type") != std::string::npos && !pky && pky.error().find("key") != std::string::npos, "");
+    check("design: a name changed AND a field added is not a rename -- drop + adds",
+          p2 && p2->size() == 3 && (*p2)[0].find("DROP COLUMN \"name\"") != std::string::npos, p2 ? "" : p2.error());
+
+    TableDef ix = live;
+    ix.indexes.push_back({"people_name", {"name", "age"}, true, false});
+    auto pi = plan_alter(Dialect::PostgreSQL, '"', live, ix);
+    TableDef part = live;
+    part.indexes.push_back({"people_p", {"name"}, false, true});
+    auto pp = plan_alter(Dialect::SQLite, '"', live, part);
+    TableDef same = live;
+    std::reverse(same.columns.begin(), same.columns.end());
+    auto ps = plan_alter(Dialect::SQLite, '"', live, same);
+    check("design: CREATE UNIQUE INDEX in key order; a partial one refused; same fields reordered = nothing to do",
+          pi && pi->size() == 1 && (*pi)[0] == "CREATE UNIQUE INDEX \"people_name\" ON \"people\" (\"name\", \"age\")" &&
+          !pp && ps && ps->empty() && same == live, "");
+    check("design: drop index per dialect",
+          drop_index_sql(Dialect::MariaDB, '`', "t", "i") == "DROP INDEX `i` ON `t`" &&
+          drop_index_sql(Dialect::SQLite, '"', "t", "i") == "DROP INDEX \"i\"", "");
+    check("design: labels -- one change gets its own name, more is Change Table",
+          verbs::design_label(live, add) == "New Field \u201Cemail\u201D in \u201Cpeople\u201D" &&
+          verbs::design_label(live, ren) == "Rename Field \u201Cage\u201D to \u201Cyears\u201D" &&
+          verbs::design_label(live, del) == "Delete Field \u201Cage\u201D from \u201Cpeople\u201D" &&
+          verbs::design_label(live, ix) == "New Index \u201Cpeople_name\u201D on \u201Cpeople\u201D" &&
+          verbs::design_label(live, two) == "Change Table \u201Cpeople\u201D", verbs::design_label(live, del));
+    std::string t, c;
+    check("design: field ids round-trip (odd names, a ':' in both)",
+          Store::parse_field_id(Store::field_id("a:b", "c:d"), t, c) && t == "a:b" && c == "c:d" &&
+          !Store::parse_field_id("field:9:ab:c", t, c) && !Store::parse_field_id("row:1:a:i1;", t, c), t + "|" + c);
+}
+
 void test_journal_pure() {
     std::cout << "\n-- db: the change journal (pure) --\n";
     const char* reads[]  = {"SELECT 1", "  select * from t", "-- note\nSELECT 1", "/* x */ SHOW TABLES",
@@ -689,6 +789,167 @@ void test_browse(Journal& j, Gate& g, Engine* e, const std::string& P) {
     j.clear();
 }
 
+// ── s007: the designer, live -- every engine ──────────────────────────────────
+void test_design(Journal& j, Gate& g, Engine* e, const std::string& P) {
+    const Dialect d = e->dialect();
+    const std::string T = "acorn_design";
+    TableDef t;
+    t.name = T;
+    t.columns = {{"id", decl_for(d, FieldType::Integer), false, std::nullopt, 1, true},
+                 {"name", decl_for(d, FieldType::Text), true, std::nullopt, 0, false},
+                 {"age", decl_for(d, FieldType::Integer), true, std::nullopt, 0, false},
+                 {"city", decl_for(d, FieldType::Text), true, std::nullopt, 0, false}};
+    t.indexes = {{"acorn_design_age", {"age"}, false, false}};
+    if (auto mk = verbs::new_table(j, t); !mk) { check(P + "design: fixture", false, mk.error().message); return; }
+    const std::pair<const char*, int> people[] = {{"Ada", 36}, {"Grace", 85}, {"Linus", 0}};
+    for (auto [n, a] : people)
+        (void)verbs::new_record(j, T, {"name", "age"}, {Value(n), a ? Value(a) : Value()});
+    // Postgres and MariaDB list the key's own index; Acorn's indexes are the rest.
+    auto info = [&] {
+        auto s = g.introspect();
+        if (!s || !s->table(T)) return std::optional<Table>();
+        Table x = *s->table(T);
+        std::erase_if(x.indexes, [](const Index& ix) { return ix.primary; });
+        return std::optional<Table>(x);
+    };
+    auto ages = [&](const std::string& col) {
+        std::vector<Value> v;
+        if (auto r = g.query("SELECT " + g.quote_ident(col) + " FROM " + g.quote_ident(T) + " ORDER BY " + g.quote_ident("id")))
+            for (auto& row : r->rows) v.push_back(row[0]);
+        return v;
+    };
+    const std::vector<Value> want_ages = {Value(36), Value(85), Value()};
+
+    // The preview is what runs.
+    TableDef w = TableDef::from(*info());
+    w.columns.push_back({"email", decl_for(d, FieldType::Text), true, std::nullopt, 0, false});
+    auto pv = verbs::preview(j, w);
+    auto nf = verbs::new_field(j, T, w.columns.back());
+    auto after = verbs::preview(j, TableDef::from(*info()));
+    check(P + "design: New Field -- previewed as one statement, made, NULL everywhere; preview then empty",
+          pv && pv->size() == 1 && nf && info() && info()->column("email") && after && after->empty() &&
+          ages("email") == std::vector<Value>{Value(), Value(), Value()} &&
+          j.undo_label() == "New Field \u201Cemail\u201D in \u201C" + T + "\u201D",
+          nf ? j.undo_label() : nf.error().message);
+
+    // Another tool fills the new field: undo of New Field is refused (it would
+    // drop data), nothing touched.
+    (void)g.inner().query("UPDATE " + g.quote_ident(T) + " SET " + g.quote_ident("email") + " = 'x@y'");
+    auto un = j.undo();
+    check(P + "design: undo New Field refused once the field holds values -- they stay",
+          !un && info() && info()->column("email") && ages("email")[0] == Value("x@y"), un ? "undone!" : un.error().message);
+    (void)g.inner().query("UPDATE " + g.quote_ident(T) + " SET " + g.quote_ident("email") + " = NULL");
+    auto un2 = j.undo();
+    check(P + "design: emptied again, undo removes the field", un2 && info() && !info()->column("email"),
+          un2 ? "" : un2.error().message);
+
+    // Rename: values and the index go with it.
+    auto rn = verbs::rename_field(j, T, "age", "years");
+    auto ri = info();
+    bool ix_follows = false;
+    if (ri) for (auto& ix : ri->indexes) if (ix.name == "acorn_design_age") ix_follows = ix.columns == std::vector<std::string>{"years"};
+    check(P + "design: Rename Field -- values kept, the index follows",
+          rn && ri && ri->column("years") && !ri->column("age") && ages("years") == want_ages && ix_follows,
+          rn ? "" : rn.error().message);
+    auto dup = verbs::rename_field(j, T, "years", "NAME");
+    check(P + "design: rename onto another field's name (any case) refused", !dup && dup.error().code == Error::Code::Exists,
+          dup ? "renamed!" : dup.error().message);
+    (void)j.undo();
+
+    // Delete Field: its index goes, its values are KEPT; undo brings them back.
+    auto df = verbs::delete_field(j, T, "age");
+    auto di = info();
+    check(P + "design: Delete Field -- gone, its index gone too, one step",
+          df && di && !di->column("age") && di->indexes.size() == 0 &&
+          j.undo_label() == "Delete Field \u201Cage\u201D from \u201C" + T + "\u201D",
+          df ? "" : df.error().message);
+    auto ud = j.undo();
+    auto ui = info();
+    check(P + "design: undo Delete Field -- the field back (last), every value back, the index back",
+          ud && ui && ui->column("age") && ui->columns.back().name == "age" && ages("age") == want_ages &&
+          ui->indexes.size() == 1 && ui->indexes[0].columns == std::vector<std::string>{"age"},
+          ud ? "" : ud.error().message);
+    auto rd = j.redo();
+    check(P + "design: redo Delete Field -- gone again", rd && info() && !info()->column("age"), rd ? "" : rd.error().message);
+    (void)j.undo();
+    // A record changed while the field was gone: undo is refused, nothing touched.
+    (void)verbs::delete_field(j, T, "age");
+    (void)g.inner().query("DELETE FROM " + g.quote_ident(T) + " WHERE " + g.quote_ident("name") + " = 'Grace'");
+    auto gone = j.undo();
+    check(P + "design: undo refused when a record that held a value is gone -- no field half-restored",
+          !gone && info() && !info()->column("age"), gone ? "undone!" : gone.error().message);
+    j.clear();
+    (void)g.inner().query("DROP TABLE " + g.quote_ident(T));
+    if (auto mk = verbs::new_table(j, t); !mk) { check(P + "design: fixture again", false, mk.error().message); return; }
+    for (auto [n, a] : people)
+        (void)verbs::new_record(j, T, {"name", "age"}, {Value(n), a ? Value(a) : Value()});
+
+    // The data rule, in the store: a step that drops a field holding values
+    // without keeping them is refused.
+    auto raw = j.run("Raw drop", {Store::table_id(T)}, [&](Store& s) {
+        TableDef x = std::get<TableDef>(*s.get(Store::table_id(T)));
+        std::erase_if(x.columns, [](auto& c) { return c.name == "age"; });
+        x.indexes.clear();
+        s.put(Store::table_id(T), x);
+    });
+    check(P + "design: the store never drops a field with data unless the step keeps it",
+          !raw && raw.error().code == Error::Code::Constraint && info() && info()->column("age") && ages("age") == want_ages,
+          raw ? "dropped!" : raw.error().message);
+    auto dk = verbs::delete_field(j, T, "id");
+    check(P + "design: the key field is never deleted", !dk && info() && info()->column("id"), dk ? "deleted!" : dk.error().message);
+
+    // Indexes.
+    const auto n1 = j.size();
+    auto bad = verbs::new_index(j, T, {"acorn_design_city", {"city"}, true, false});   // NULLs: fine
+    (void)j.undo();
+    (void)g.inner().query("UPDATE " + g.quote_ident(T) + " SET " + g.quote_ident("city") + " = 'Paris'");
+    auto clash = verbs::new_index(j, T, {"acorn_design_city", {"city"}, true, false});
+    check(P + "design: a UNIQUE index over duplicates -- the engine refuses, rolled back, no step",
+          bad && !clash && j.size() == n1 + 1 && info() && info()->indexes.size() == 1, clash ? "made!" : clash.error().message);
+    auto taken = verbs::new_index(j, T, {"acorn_design_age", {"name"}, false, false});
+    check(P + "design: an index name already used is refused", !taken && taken.error().code == Error::Code::Exists, "");
+    auto mi = verbs::new_index(j, T, {"acorn_design_nm", {"name", "city"}, false, false});
+    auto mii = info();
+    bool two_cols = false;
+    if (mii) for (auto& ix : mii->indexes) if (ix.name == "acorn_design_nm") two_cols = ix.columns == std::vector<std::string>{"name", "city"};
+    auto dx = verbs::delete_index(j, T, "acorn_design_age");
+    check(P + "design: New Index (two fields, in order), Delete Index",
+          mi && two_cols && dx && info() && info()->indexes.size() == 1, mi ? (dx ? "" : dx.error().message) : mi.error().message);
+    auto ux = j.undo();
+    check(P + "design: undo Delete Index makes it again", ux && info() && info()->indexes.size() == 2, ux ? "" : ux.error().message);
+    // s007b: the designer's whole picture as one step, with its words first.
+    TableDef dw = TableDef::from(*info());
+    std::erase_if(dw.columns, [](auto& c) { return c.name == "age"; });
+    std::erase_if(dw.indexes, [](auto& x) { return std::find(x.columns.begin(), x.columns.end(), "age") != x.columns.end(); });
+    dw.columns.push_back({"phone", decl_for(d, FieldType::Text), true, std::nullopt, 0, false});
+    auto loss = verbs::design_losses(j, dw);
+    auto dt = verbs::design_table(j, dw);
+    auto dti = info();
+    check(P + "design: Design Table -- the loss said in words first, then delete + add as ONE step",
+          loss && loss->size() == 1 && (*loss)[0] == "\u201Cage\u201D holds 2 values -- they go with the field" &&
+          dt && dti && !dti->column("age") && dti->column("phone") && j.undo_label() == "Change Table \u201C" + T + "\u201D",
+          loss && !loss->empty() ? (*loss)[0] : (dt ? j.undo_label() : dt.error().message));
+    auto dtu = j.undo();
+    check(P + "design: one Ctrl+Z undoes all of it, values back",
+          dtu && info() && info()->column("age") && !info()->column("phone") && ages("age") == want_ages,
+          dtu ? "" : dtu.error().message);
+    // Delete one field and add one of the same kind: reads as a rename -- refused.
+    TableDef amb = TableDef::from(*info());
+    std::erase_if(amb.columns, [](auto& c) { return c.name == "city"; });
+    std::erase_if(amb.indexes, [](auto& x) { return std::find(x.columns.begin(), x.columns.end(), "city") != x.columns.end(); });
+    amb.columns.push_back({"town", "VARCHAR(40)", true, std::nullopt, 0, false});   // Text, spelled otherwise
+    const auto na = j.size();
+    auto am = verbs::design_table(j, amb);
+    check(P + "design: delete + add of the same kind in one step is refused (it would read as a rename)",
+          !am && am.error().message.find("rename") != std::string::npos && j.size() == na && info()->column("city"),
+          am ? "applied!" : am.error().message);
+    auto none = verbs::design_table(j, TableDef::from(*info()));
+    check(P + "design: nothing changed -- no step", none && j.can_redo(), none ? "" : none.error().message);
+    check(P + "design: nothing wrote outside the door", j.strays() == 1, std::to_string(j.strays()));
+    (void)g.inner().query("DROP TABLE " + g.quote_ident(T));
+    j.clear();
+}
+
 // ── s005b: the door, on a live fixture -- every engine ────────────────────────
 std::vector<TableDef> tables_of(Connection& c) {
     std::vector<TableDef> out;
@@ -706,8 +967,17 @@ struct Snapshot {
 Snapshot snapshot(Connection& c) {
     Snapshot s;
     s.tables = tables_of(c);
+    // Fields by NAME (s007: a field undo puts back comes back last -- the same
+    // table), rows in the order of those fields.
     for (const auto& t : s.tables) {
-        auto r = c.query("SELECT * FROM " + c.quote_ident(t.name) + " ORDER BY 1");
+        std::vector<std::string> cols;
+        for (const auto& col : t.columns) cols.push_back(col.name);
+        std::sort(cols.begin(), cols.end());
+        std::string list;
+        for (std::size_t i = 0; i < cols.size(); ++i) list += (i ? ", " : "") + c.quote_ident(cols[i]);
+        std::string order;
+        for (std::size_t i = 1; i <= cols.size(); ++i) order += (i > 1 ? ", " : "") + std::to_string(i);
+        auto r = c.query("SELECT " + list + " FROM " + c.quote_ident(t.name) + " ORDER BY " + order);
         s.rows.push_back(r ? r->rows : std::vector<Row>{});
     }
     return s;
@@ -852,6 +1122,7 @@ void test_journal(Engine* e, const ConnectParams& rw, const ConnectParams& ro, c
     (void)g.inner().query("DROP TABLE " + g.quote_ident("notes"));
     test_records(j, g, e, ro, P);
     test_browse(j, g, e, P);
+    test_design(j, g, e, P);
 }
 
 // SQLite-only behaviour: files.
@@ -945,6 +1216,7 @@ void db_tests(CheckFn fn, int& skip_count) {
 
     test_types();
     test_journal_pure();
+    test_design_pure();
     test_row_ids();
     test_browse_pure();
     test_loader();

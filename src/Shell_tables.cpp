@@ -181,9 +181,11 @@ void Shell::show_table(const std::string& name) {  // tables: paint one table's 
         empty->add_css_class("acorn-status");
         empty->set_margin(24);
         m_table_detail.append(*empty);
+        sync_undo();   // s007b: Design Table follows the shown table
         return;
     }
     m_table_sel = name;
+    sync_undo();
     if (auto lg = log::get(log::Area::Shell)) lg->info("tables: show '{}'", name);
 
     // Title line.
@@ -208,6 +210,16 @@ void Shell::show_table(const std::string& name) {  // tables: paint one table's 
         const std::string n = t->name;
         br->signal_clicked().connect([this, n] { open_browse(n); });
         top->append(*br);
+        if (t->kind == db::Table::Kind::Table) {   // s007b: the designer
+            auto ds = Gtk::make_managed<Gtk::Button>("Design\u2026");
+            ds->set_valign(Gtk::Align::CENTER);
+            ds->set_name("shell.tables.design");
+            ds->set_action_name("win.design-table");
+            ds->set_tooltip_text(m_writable && m_journal
+                ? "Add, rename and delete fields and indexes -- the SQL is shown before it runs"
+                : "For now Acorn changes only database files it made itself (New Database File, Ctrl+N)");
+            top->append(*ds);
+        }
     }
     m_table_detail.append(*top);
 
