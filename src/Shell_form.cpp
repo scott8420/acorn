@@ -6,6 +6,7 @@
 #include <gtkmm/checkbutton.h>
 #include <gtkmm/entry.h>
 #include <gtkmm/eventcontrollerfocus.h>
+#include <gtkmm/drawingarea.h>
 #include <gtkmm/fixed.h>
 #include <gtkmm/label.h>
 #include <gtkmm/menubutton.h>
@@ -128,13 +129,45 @@ void Shell::paint_form() {  // form: the picked record through its layout
 
     auto fixed = Gtk::make_managed<Gtk::Fixed>();
     fixed->add_css_class("acorn-form");
-    fixed->set_size_request(L.width, L.height);
+    // s010d: the Form shows the body -- the header / footer wait for the list
+    // view and reports.
+    fixed->set_size_request(L.width, std::max(1, L.height - L.header - L.footer));
     fixed->set_name("shell.browse.form");
     Gtk::Widget* focus_back = nullptr;
 
-    for (const auto& o : L.objects) {
+    // s010c: lines and boxes first -- drawn behind the fields and words.
+    std::vector<const core::LayoutObject*> order;
+    for (const auto& o : L.objects)
+        if ((o.kind == core::ObjectKind::Line || o.kind == core::ObjectKind::Box) && core::part_of(L, o) == core::Part::Body)
+            order.push_back(&o);
+    for (const auto& o : L.objects)
+        if (o.kind != core::ObjectKind::Line && o.kind != core::ObjectKind::Box && core::part_of(L, o) == core::Part::Body)
+            order.push_back(&o);
+
+    for (const auto* op : order) {
+        const auto& o = *op;
         Gtk::Widget* w = nullptr;
-        if (o.kind == core::ObjectKind::Text) {
+        if (o.kind == core::ObjectKind::Line || o.kind == core::ObjectKind::Box) {
+            auto da = Gtk::make_managed<Gtk::DrawingArea>();
+            da->set_can_target(false);
+            da->add_css_class("acorn-form-drawing");
+            const bool line = o.kind == core::ObjectKind::Line;
+            da->set_draw_func([da, line](const Cairo::RefPtr<Cairo::Context>& cr, int w, int h) {
+                GdkRGBA ink{};
+                gtk_widget_get_color(GTK_WIDGET(da->gobj()), &ink);
+                cr->set_source_rgba(ink.red, ink.green, ink.blue, line ? 0.45 : 0.30);
+                if (line) {
+                    cr->set_line_width(1);
+                    if (w >= h) { cr->move_to(0, h / 2 + 0.5); cr->line_to(w, h / 2 + 0.5); }
+                    else        { cr->move_to(w / 2 + 0.5, 0); cr->line_to(w / 2 + 0.5, h); }
+                } else {
+                    cr->set_line_width(1);
+                    cr->rectangle(0.5, 0.5, w - 1, h - 1);
+                }
+                cr->stroke();
+            });
+            w = da;
+        } else if (o.kind == core::ObjectKind::Text) {
             auto l = form_label(o.text, "acorn-field-name");
             l->set_xalign(1.0f);   // toward its box
             l->set_tooltip_text(o.text);
@@ -215,7 +248,7 @@ void Shell::paint_form() {  // form: the picked record through its layout
             }
         }
         w->set_size_request(o.w, o.h);
-        fixed->put(*w, o.x, o.y);
+        fixed->put(*w, o.x, o.y - L.header);
     }
     outer->append(*fixed);
 

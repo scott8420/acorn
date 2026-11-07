@@ -1953,6 +1953,85 @@ void test_layouts_pure(const fs::path& dir) {
     check("layouts: the body fits its objects plus the margin, up to the grid (the default already does)",
           fl.width == d.width && fl.height == d.height && fl2.width == 168 + 401 + 16 + 7 && empty.width == 32,
           std::to_string(fl2.width));
+    // s010c: Add, and the drawing kinds.
+    auto ad = d;
+    const int added = core::add_object(ad, ObjectKind::Field, "email");
+    const auto& albl = ad.objects[ad.objects.size() - 2];
+    const auto& abox = ad.objects.back();
+    check("layouts: Add Field -- its words left and its box right, a row under everything, the body fitted",
+          added == 2 && albl.kind == ObjectKind::Text && albl.text == "email" && albl.x == 16 && albl.y == 112 &&
+          abox.kind == ObjectKind::Field && abox.field == "email" && abox.x == 168 && abox.y == 112 &&
+          ad.height == 112 + 24 + 16 && core::check_layout(ad).empty(),
+          std::to_string(albl.y) + " h " + std::to_string(ad.height));
+    auto aw = d;
+    core::add_object(aw, ObjectKind::Text, "Who");
+    core::add_object(aw, ObjectKind::Line);
+    core::add_object(aw, ObjectKind::Box);
+    const auto& ln = aw.objects[aw.objects.size() - 2];
+    const auto& bx = aw.objects.back();
+    check("layouts: Add Words / Line / Box -- each under the last, on the grid, a line across the body",
+          aw.objects[aw.objects.size() - 3].text == "Who" && ln.kind == ObjectKind::Line && ln.y == 144 &&
+          ln.w == d.width - 32 && ln.h == 8 && bx.kind == ObjectKind::Box && bx.y == 160 && bx.w == 160 &&
+          core::check_layout(aw).empty(), std::to_string(ln.y) + "/" + std::to_string(bx.y));
+    core::Layout none{"t", "n", 32, 32, {}};
+    core::add_object(none, ObjectKind::Text, "x");
+    check("layouts: the first object on an empty layout sits at the margin", none.objects[0].y == 16, "");
+    check("layouts: the fields a layout doesn't show yet, in the table's order",
+          core::fields_not_on(d, {"id", "email", "first_name", "fax"}) == std::vector<std::string>{"email", "fax"}, "");
+    {
+        core::Solution ls;
+        ls.layouts["contacts"][aw.name] = aw;
+        const auto lp = dir / "drawing.acorn";
+        core::save_solution(lp.string(), ls);
+        auto lb = core::load_solution(lp.string());
+        check("layouts: a line and a box round-trip in the .acorn", lb && *lb == ls, "");
+    }
+    // s010d: parts.
+    {
+        auto pl = d;   // 504 x 112: rows at 16, 48, 80
+        const bool h1 = core::move_part_line(pl, core::Part::Header, 45);
+        check("layouts: the top edge dragged down makes a header -- snapped, everything below moves with it",
+              h1 && pl.header == 48 && pl.height == d.height + 48 && pl.objects[0].y == 64 && pl.objects[5].y == 128 &&
+              core::part_of(pl, pl.objects[0]) == core::Part::Body && core::check_layout(pl).empty(),
+              std::to_string(pl.header) + " " + std::to_string(pl.height));
+        pl.objects.push_back({ObjectKind::Text, "", "Title", 16, 8, 144, 24});   // in the header
+        check("layouts: an object whose top is in the header belongs to it",
+              core::part_of(pl, pl.objects.back()) == core::Part::Header, "");
+        core::move_part_line(pl, core::Part::Header, 0);
+        check("layouts: a header line can't cut its own objects off (stops under them)",
+              pl.header == 32 && pl.objects.back().y == 8 && pl.objects[0].y == 48, std::to_string(pl.header));
+        const int h0 = pl.height;
+        const bool f1 = core::move_part_line(pl, core::Part::Footer, h0 + 40);
+        check("layouts: the bottom edge dragged down makes a footer below", f1 && pl.footer == 40 && pl.height == h0 + 40,
+              std::to_string(pl.footer));
+        pl.objects.push_back({ObjectKind::Text, "", "Page", 16, core::footer_top(pl) + 8, 144, 24});
+        auto big = core::default_layout("t", {"a"});
+        const int ft = core::footer_top(pl);
+        core::add_object(pl, ObjectKind::Field, "email");
+        const auto& added = pl.objects[pl.objects.size() - 2];
+        check("layouts: Add lands in the body; the footer moves down with its objects to make room",
+              core::part_of(pl, added) == core::Part::Body && core::footer_top(pl) > ft &&
+              pl.objects[pl.objects.size() - 3].y == core::footer_top(pl) + 8 && pl.footer == 40 &&
+              core::check_layout(pl).empty(), std::to_string(added.y) + " ft " + std::to_string(core::footer_top(pl)));
+        const int fb = core::footer_top(pl);
+        core::move_part_line(pl, core::Part::Footer, 0);
+        check("layouts: the footer line stops under the body's objects, with the room fit() keeps",
+              core::footer_top(pl) <= fb && core::footer_top(pl) >= added.y + added.h + core::kFormGap,
+              std::to_string(core::footer_top(pl)));
+        core::move_layout_bottom(pl, 0);
+        check("layouts: the bottom edge stops under the footer's objects",
+              pl.height - core::footer_top(pl) == 8 + 24 + 0 || pl.objects[pl.objects.size() - 3].y + 24 <= pl.height, "");
+        core::Solution ps;
+        ps.layouts[pl.table][pl.name] = pl;
+        const auto pp = dir / "parts.acorn";
+        core::save_solution(pp.string(), ps);
+        auto pb = core::load_solution(pp.string());
+        check("layouts: parts round-trip in the .acorn", pb && *pb == ps, core::check_layout(pl) + " h" + std::to_string(pl.height) + " f" + std::to_string(pl.footer) + " hd" + std::to_string(pl.header));
+        auto bad = d;
+        bad.header = 60; bad.footer = 60;
+        check("layouts: header + footer leaving no body -- refused in words", !core::check_layout(bad).empty(), "");
+        (void)big;
+    }
     check("layouts: a free name -- contacts Form 2, 3 ...",
           core::unique_layout_name("contacts Form", {"x"}) == "contacts Form" &&
           core::unique_layout_name("contacts Form", {"contacts Form", "contacts Form 2"}) == "contacts Form 3", "");

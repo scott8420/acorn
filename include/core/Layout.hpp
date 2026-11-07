@@ -25,7 +25,10 @@ namespace acorn::core {
 
 inline constexpr int kLayoutGrid = 8;
 
-enum class ObjectKind { Field, Text };
+// s010c: + Line (a rule: horizontal when wider than tall, else vertical,
+// through the middle of its place) and Box (a rectangle) -- drawing, drawn
+// behind the fields in the Form.
+enum class ObjectKind { Field, Text, Line, Box };
 
 struct LayoutObject {
     ObjectKind  kind = ObjectKind::Field;
@@ -38,7 +41,11 @@ struct LayoutObject {
 struct Layout {
     std::string table;                  // the table it shows
     std::string name;                   // unique within the table
-    int width = 0, height = 0;          // the body's size
+    int width = 0, height = 0;          // the whole layout's size
+    // s010d: parts -- the header's and the footer's heights (0 = none). The
+    // body is what is between: [header, height - footer). An object belongs
+    // to the part its top sits in.
+    int header = 0, footer = 0;
     std::vector<LayoutObject> objects;  // drawn in order (later on top)
     bool operator==(const Layout&) const = default;
 };
@@ -80,7 +87,39 @@ void fit(Layout& l);
 // `base`, or "base 2", "base 3" ... -- the first not in `taken`.
 std::string unique_layout_name(const std::string& base, const std::vector<std::string>& taken);
 
-// "first_name" / "the words “Who”" -- what the editor's notes call an object.
+// "first_name" / "the words “Who”" / "a line" / "a box" -- what the editor's
+// notes call an object.
 std::string object_label(const LayoutObject& o);
+
+// ── s010d: parts ────────────────────────────────────────────────────────────
+enum class Part { Header, Body, Footer };
+inline int footer_top(const Layout& l) { return l.height - l.footer; }
+Part part_of(const Layout& l, const LayoutObject& o);
+// Drag the line between two parts to `y` (snapped to the grid, clamped so no
+// object is cut off and the body keeps one grid row):
+//   Header -- the header/body line: everything below it moves with it (a
+//             line dragged down from the top edge MAKES a header; dragged
+//             back to 0, an empty header is gone);
+//   Footer -- the body/footer line: the footer grows or shrinks, nothing
+//             moves (dragged up from the bottom edge MAKES a footer).
+// Returns false when nothing changed.
+bool move_part_line(Layout& l, Part line, int y);
+// The bottom edge, when there is a footer: the footer grows or shrinks
+// (never past its objects). With no footer it is the footer line.
+bool move_layout_bottom(Layout& l, int y);
+
+// ── s010c: Add ──────────────────────────────────────────────────────────────
+// Where the next object goes: the first free row under everything (the
+// margin on an empty layout), on the grid.
+int next_row_y(const Layout& l);
+// `l` with one thing added under everything, last (so on top, and picked):
+//   Field -- the field's words on the left and its box on the right, as the
+//            default lays a row (two objects; `what` = the field);
+//   Text  -- words (`what`), label-sized;  Line -- a rule across the body;
+//   Box   -- a rectangle.
+// The body is fitted. Returns how many objects were added.
+int add_object(Layout& l, ObjectKind kind, const std::string& what = {});
+// The table's fields this layout doesn't show yet, in the table's order.
+std::vector<std::string> fields_not_on(const Layout& l, const std::vector<std::string>& fields);
 
 }  // namespace acorn::core

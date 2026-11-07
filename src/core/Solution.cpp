@@ -86,6 +86,10 @@ std::optional<Solution> load_solution(const std::string& file) {
                     l.name = name;
                     l.width = num_or_0(lj, "width");
                     l.height = num_or_0(lj, "height");
+                    if (auto pj = lj.find("parts"); pj != lj.end() && pj->is_object()) {   // s010d
+                        l.header = num_or_0(*pj, "header");
+                        l.footer = num_or_0(*pj, "footer");
+                    }
                     if (auto ob = lj.find("objects"); ob != lj.end() && ob->is_array())
                         for (const auto& oj : *ob) {
                             if (!oj.is_object()) continue;
@@ -93,6 +97,8 @@ std::optional<Solution> load_solution(const std::string& file) {
                             const std::string kind = str_or_empty(oj, "kind");
                             if (kind == "field") o.kind = ObjectKind::Field;
                             else if (kind == "text") o.kind = ObjectKind::Text;
+                            else if (kind == "line") o.kind = ObjectKind::Line;   // s010c
+                            else if (kind == "box")  o.kind = ObjectKind::Box;
                             else continue;   // a kind this Acorn doesn't know: not drawn, not invented
                             o.field = str_or_empty(oj, "field");
                             o.text = str_or_empty(oj, "text");
@@ -135,12 +141,15 @@ bool save_solution(const std::string& file, const Solution& s) {
             nlohmann::json objects = nlohmann::json::array();
             for (const auto& o : l.objects) {
                 nlohmann::json oj;
-                if (o.kind == ObjectKind::Field) { oj["kind"] = "field"; oj["field"] = o.field; }
-                else                             { oj["kind"] = "text";  oj["text"] = o.text; }
+                if (o.kind == ObjectKind::Field)     { oj["kind"] = "field"; oj["field"] = o.field; }
+                else if (o.kind == ObjectKind::Text) { oj["kind"] = "text";  oj["text"] = o.text; }
+                else oj["kind"] = o.kind == ObjectKind::Line ? "line" : "box";   // s010c: drawing has only a place
                 oj["x"] = o.x; oj["y"] = o.y; oj["w"] = o.w; oj["h"] = o.h;
                 objects.push_back(std::move(oj));
             }
             layouts[table][name] = {{"width", l.width}, {"height", l.height}, {"objects", std::move(objects)}};
+            if (l.header || l.footer)   // s010d: only when there are parts (an older Acorn reads it as all body)
+                layouts[table][name]["parts"] = {{"header", l.header}, {"footer", l.footer}};
         }
     j["layouts"] = std::move(layouts);
     std::error_code ec;

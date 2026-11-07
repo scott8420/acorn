@@ -36,6 +36,8 @@ std::string check_layout(const Layout& l) {
         if (ch < 0x20) return "a layout's name can't hold control characters";
     if (l.name.size() > 120) return "a layout's name is at most 120 bytes";
     if (l.width <= 0 || l.height <= 0) return "a layout needs a size";
+    if (l.header < 0 || l.footer < 0 || l.header + l.footer >= l.height)
+        return "a layout's header and footer leave no room for its body";
     for (const auto& o : l.objects) {
         if (o.x < 0 || o.y < 0 || o.w <= 0 || o.h <= 0) return "an object needs a place and a size";
         if (o.kind == ObjectKind::Field && o.field.empty()) return "a field object needs a field";
@@ -79,15 +81,88 @@ LayoutObject dragged(const LayoutObject& from, Grab g, int dx, int dy, int grid)
     return o;
 }
 
+namespace {
+int up8(int v) { return ((v + kLayoutGrid - 1) / kLayoutGrid) * kLayoutGrid; }
+}  // namespace
+
 void fit(Layout& l) {
     int r = 0, b = 0;
-    for (const auto& o : l.objects) {
-        r = std::max(r, o.x + o.w);
-        b = std::max(b, o.y + o.h);
+    for (const auto& o : l.objects) r = std::max(r, o.x + o.w);
+    l.width = l.objects.empty() ? 2 * kFormMargin : up8(r + kFormMargin);
+    if (l.header == 0 && l.footer == 0) {   // no parts: the body hugs its objects
+        for (const auto& o : l.objects) b = std::max(b, o.y + o.h);
+        l.height = l.objects.empty() ? 2 * kFormMargin : up8(b + kFormMargin);
+        return;
     }
-    auto up = [](int v) { return ((v + kLayoutGrid - 1) / kLayoutGrid) * kLayoutGrid; };
-    l.width  = l.objects.empty() ? 2 * kFormMargin : up(r + kFormMargin);
-    l.height = l.objects.empty() ? 2 * kFormMargin : up(b + kFormMargin);
+    // Parts: grow only (a dragged line stays where it was put). The body
+    // makes room for what's in it, the footer moving down with its objects;
+    // then the footer for what's in it.
+    const int ft = footer_top(l);
+    int fb = 0;
+    for (const auto& o : l.objects)
+        if (o.y < ft) b = std::max(b, o.y + o.h);
+    const int need = std::max(up8(b + kFormGap), l.header + kLayoutGrid);
+    if (need > ft) {
+        for (auto& o : l.objects) if (o.y >= ft) o.y += need - ft;
+        l.height += need - ft;
+    }
+    for (const auto& o : l.objects)
+        if (o.y >= footer_top(l)) fb = std::max(fb, o.y + o.h);
+    if (fb + kFormGap > l.height) {
+        l.footer += up8(fb + kFormGap) - l.height;
+        l.height = up8(fb + kFormGap);
+    }
+}
+
+Part part_of(const Layout& l, const LayoutObject& o) {
+    if (l.header > 0 && o.y < l.header) return Part::Header;
+    if (l.footer > 0 && o.y >= footer_top(l)) return Part::Footer;
+    return Part::Body;
+}
+
+bool move_part_line(Layout& l, Part line, int y) {
+    y = snap(y);
+    const int ft = footer_top(l);
+    if (line == Part::Header) {
+        int lo = 0;   // the header's own objects stay whole
+        for (const auto& o : l.objects) if (l.header > 0 && o.y < l.header) lo = std::max(lo, up8(o.y + o.h));
+        y = std::max(y, lo);
+        const int d = y - l.header;
+        if (d == 0) return false;
+        for (auto& o : l.objects) if (!(l.header > 0 && o.y < l.header)) o.y += d;
+        l.header = y;
+        l.height += d;
+        return true;
+    }
+    if (line == Part::Footer && l.footer == 0 && y > l.height) {   // down from the bottom edge: a footer below
+        l.footer = y - l.height;
+        l.height = y;
+        return true;
+    }
+    if (line == Part::Footer) {
+        int lo = l.header + kLayoutGrid, hi = l.height;   // the body keeps a row; the footer its objects
+        for (const auto& o : l.objects) {
+            if (o.y < ft) lo = std::max(lo, up8(o.y + o.h + kFormGap));   // the room fit() keeps under the body
+            else hi = std::min(hi, o.y);
+        }
+        y = std::clamp(y, lo, std::max(lo, hi));
+        if (y == ft) return false;
+        l.footer = l.height - y;
+        return true;
+    }
+    return false;
+}
+
+bool move_layout_bottom(Layout& l, int y) {
+    if (l.footer == 0) return move_part_line(l, Part::Footer, y);
+    const int ft = footer_top(l);
+    int lo = ft + kLayoutGrid;
+    for (const auto& o : l.objects) if (o.y >= ft) lo = std::max(lo, up8(o.y + o.h));
+    y = std::max(snap(y), lo);
+    if (y == l.height) return false;
+    l.footer = y - ft;
+    l.height = y;
+    return true;
 }
 
 std::string unique_layout_name(const std::string& base, const std::vector<std::string>& taken) {
@@ -98,8 +173,56 @@ std::string unique_layout_name(const std::string& base, const std::vector<std::s
 }
 
 std::string object_label(const LayoutObject& o) {
-    if (o.kind == ObjectKind::Field) return "“" + o.field + "”";
-    return "the words “" + o.text + "”";
+    switch (o.kind) {
+        case ObjectKind::Field: return "“" + o.field + "”";
+        case ObjectKind::Line:  return "a line";
+        case ObjectKind::Box:   return "a box";
+        default:                return "the words “" + o.text + "”";
+    }
+}
+
+int next_row_y(const Layout& l) {   // s010d: in the body -- under its objects, never into the footer
+    int b = 0;
+    for (const auto& o : l.objects)
+        if (part_of(l, o) != Part::Footer) b = std::max(b, o.y + o.h);
+    if (b <= l.header) return l.header + kFormMargin;
+    return ((b + kFormGap + kLayoutGrid - 1) / kLayoutGrid) * kLayoutGrid;
+}
+
+int add_object(Layout& l, ObjectKind kind, const std::string& what) {
+    const int y = next_row_y(l);
+    const int boxx = kFormMargin + kFormLabelW + kFormGap;
+    int n = 1;
+    switch (kind) {
+        case ObjectKind::Field:
+            l.objects.push_back({ObjectKind::Text, "", what, kFormMargin, y, kFormLabelW, kFormRowH});
+            l.objects.push_back({ObjectKind::Field, what, "", boxx, y, kFormBoxW, kFormRowH});
+            n = 2;
+            break;
+        case ObjectKind::Text:
+            l.objects.push_back({ObjectKind::Text, "", what, kFormMargin, y, kFormLabelW, kFormRowH});
+            break;
+        case ObjectKind::Line: {
+            const int w = std::max(8 * kLayoutGrid, l.width - 2 * kFormMargin);
+            l.objects.push_back({ObjectKind::Line, "", "", kFormMargin, y, (w / kLayoutGrid) * kLayoutGrid, kLayoutGrid});
+            break;
+        }
+        case ObjectKind::Box:
+            l.objects.push_back({ObjectKind::Box, "", "", kFormMargin, y, 20 * kLayoutGrid, 8 * kLayoutGrid});
+            break;
+    }
+    fit(l);
+    return n;
+}
+
+std::vector<std::string> fields_not_on(const Layout& l, const std::vector<std::string>& fields) {
+    std::vector<std::string> out;
+    for (const auto& f : fields) {
+        bool on = false;
+        for (const auto& o : l.objects) on = on || (o.kind == ObjectKind::Field && o.field == f);
+        if (!on) out.push_back(f);
+    }
+    return out;
 }
 
 }  // namespace acorn::core

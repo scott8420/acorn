@@ -380,6 +380,8 @@ private:
     int                             m_lay_sel = -1;  // the picked object
     core::Grab                      m_lay_grab = core::Grab::None;
     core::LayoutObject              m_lay_from;      // the picked object as the drag began
+    int                             m_lay_line = 0;  // s010d: a part line under the drag -- 1 header, 2 footer, 3 the bottom edge
+    core::Layout                    m_lay_line_from; // the layout as that drag began
     bool                            m_lay_painting = false;
     unsigned                        m_lay_gen = 0;   // an inspector box from an older paint never saves
     std::string                     m_lay_focus;     // the inspector box last focused (kept across a repaint)

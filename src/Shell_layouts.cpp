@@ -12,10 +12,12 @@
 #include <gtkmm/grid.h>
 #include <gtkmm/label.h>
 #include <gtkmm/spinbutton.h>
+#include <gtkmm/viewport.h>
 #include <pangomm/layout.h>
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
 
 // Shell_layouts.cpp -- the LAYOUTS area (s010b): the layout editor.
 //
@@ -66,6 +68,18 @@ const char* cursor_for(core::Grab g) {
         case G::NE: case G::SW: return "nesw-resize";
         default: return "default";
     }
+}
+
+// s010d: the part line near (px, py): 1 the header line (the top edge when
+// there's no header), 2 the footer line (the bottom edge when there's no
+// footer), 3 the bottom edge under a footer; 0 none.
+int line_at(const core::Layout& l, double px, double py) {
+    if (px < 0 || px > l.width) return 0;
+    auto near = [py](int y) { return std::abs(py - y) <= 4.0; };
+    if (l.footer > 0 && near(l.height)) return 3;
+    if (near(core::footer_top(l))) return 2;
+    if (near(l.header)) return 1;
+    return 0;
 }
 
 Gtk::Label* side_label(const std::string& s, const char* css = nullptr) {
@@ -207,6 +221,10 @@ void Shell::build_layouts_page() {  // layouts: the Layouts area
     m_lay_scroll.set_hexpand(true);
     m_lay_scroll.set_vexpand(true);
     m_lay_scroll.set_child(m_lay_overlay);
+    // s010d drive: the canvas takes the focus on a press, and a viewport that
+    // scrolls to its focus child jumps to the canvas's top mid-drag -- the
+    // content slides under the pointer (a footer dragged 40 px came out 16).
+    if (auto* vp = dynamic_cast<Gtk::Viewport*>(m_lay_scroll.get_child())) vp->set_scroll_to_focus(false);
 
     // Press: pick (a handle of the picked object first, then the top-most
     // object under the pointer). Drag: move / resize, live. Let go: one step.
@@ -219,6 +237,12 @@ void Shell::build_layouts_page() {  // layouts: the Layouts area
         if (m_lay_sel >= 0 && static_cast<std::size_t>(m_lay_sel) < m_lay.objects.size())
             for (const auto& [g, p] : handles(m_lay.objects[static_cast<std::size_t>(m_lay_sel)]))
                 if (std::abs(px - p.first) <= kHit && std::abs(py - p.second) <= kHit) m_lay_grab = g;
+        m_lay_line = 0;
+        if (m_lay_grab == core::Grab::None && m_journal && (m_lay_line = line_at(m_lay, px, py)) != 0) {
+            m_lay_line_from = m_lay;   // a part line: no object is grabbed
+            m_lay_canvas.queue_draw();
+            return;
+        }
         if (m_lay_grab == core::Grab::None) {
             int hit = -1;
             for (int i = static_cast<int>(m_lay.objects.size()) - 1; i >= 0 && hit < 0; --i) {
@@ -234,6 +258,17 @@ void Shell::build_layouts_page() {  // layouts: the Layouts area
         m_lay_canvas.queue_draw();
     });
     drag->signal_drag_update().connect([this, dg](double dx, double dy) {
+        if (m_lay_line) {   // s010d: a part line, live
+            m_lay = m_lay_line_from;
+            const int dyi = static_cast<int>(std::lround(dy));
+            if (m_lay_line == 1) core::move_part_line(m_lay, core::Part::Header, m_lay_line_from.header + dyi);
+            else if (m_lay_line == 2) core::move_part_line(m_lay, core::Part::Footer, core::footer_top(m_lay_line_from) + dyi);
+            else core::move_layout_bottom(m_lay, m_lay_line_from.height + dyi);
+            m_lay_paper.set_size_request(std::max(1, m_lay.width), std::max(1, m_lay.height));
+            m_lay_fixed.set_size_request(m_lay.width + kRoom, m_lay.height + kRoom);
+            m_lay_canvas.queue_draw();
+            return;
+        }
         if (m_lay_grab == core::Grab::None || m_lay_sel < 0 || !m_journal) return;
         const bool fine = (dg->get_current_event_state() & Gdk::ModifierType::SHIFT_MASK) == Gdk::ModifierType::SHIFT_MASK;
         m_lay.objects[static_cast<std::size_t>(m_lay_sel)] =
@@ -242,6 +277,13 @@ void Shell::build_layouts_page() {  // layouts: the Layouts area
         m_lay_canvas.queue_draw();
     });
     drag->signal_drag_end().connect([this](double, double) {
+        if (const int line = std::exchange(m_lay_line, 0); line) {
+            if (m_lay == m_lay_line_from) return;
+            const std::string what = line == 1 ? (m_lay.header == 0 ? "Removed the header" : m_lay_line_from.header == 0 ? "Made a header" : "Moved the header line")
+                                   : (m_lay.footer == 0 ? "Removed the footer" : m_lay_line_from.footer == 0 ? "Made a footer" : "Sized the footer");
+            Glib::signal_idle().connect_once([this, what] { keep_layout(m_lay, what); });
+            return;
+        }
         const core::Grab g = m_lay_grab;
         m_lay_grab = core::Grab::None;
         if (g == core::Grab::None || m_lay_sel < 0 || static_cast<std::size_t>(m_lay_sel) >= m_lay.objects.size()) return;
@@ -261,6 +303,10 @@ void Shell::build_layouts_page() {  // layouts: the Layouts area
         if (m_lay_sel >= 0 && static_cast<std::size_t>(m_lay_sel) < m_lay.objects.size())
             for (const auto& [h, p] : handles(m_lay.objects[static_cast<std::size_t>(m_lay_sel)]))
                 if (std::abs(px - p.first) <= kHit && std::abs(py - p.second) <= kHit) g = h;
+        if (g == core::Grab::None && line_at(m_lay, px, py)) {
+            gtk_widget_set_cursor_from_name(GTK_WIDGET(m_lay_canvas.gobj()), m_journal ? "ns-resize" : "default");
+            return;
+        }
         if (g == core::Grab::None)
             for (const auto& o : m_lay.objects)
                 if (px >= o.x && px < o.x + o.w && py >= o.y && py < o.y + o.h) g = core::Grab::Move;
@@ -320,7 +366,7 @@ void Shell::layouts_note(const std::string& text, const char* kind) {  // layout
 }
 
 void Shell::paint_layouts() {  // layouts: pickers, canvas and inspector from the solution
-    if (!m_lay_tables || m_lay_grab != core::Grab::None) return;   // not built yet / never under a drag
+    if (!m_lay_tables || m_lay_grab != core::Grab::None || m_lay_line) return;   // not built yet / never under a drag
     m_lay_painting = true;
     // The table: the one shown, else Browse's, else the first.
     std::vector<Glib::ustring> tnames;
@@ -405,6 +451,31 @@ void Shell::draw_layout(const Cairo::RefPtr<Cairo::Context>& cr, int w, int h) {
             cr->rectangle(x - 0.5, y - 0.5, 1, 1);
     cr->fill();
 
+    // s010d: the parts -- the header and footer shaded, a dashed line between
+    // each, its name at the right.
+    auto band = [&](int y0, int y1, const char* name) {
+        set(0.035);
+        cr->rectangle(0, y0, m_lay.width, y1 - y0);
+        cr->fill();
+        auto pl = m_lay_canvas.create_pango_layout(name);
+        int tw = 0, th = 0;
+        pl->get_pixel_size(tw, th);
+        set(0.40);
+        cr->move_to(m_lay.width - tw - 8, y0 + 2);
+        pl->show_in_cairo_context(cr);
+    };
+    auto rule = [&](int y) {
+        set(0.40);
+        cr->set_line_width(1);
+        cr->set_dash(std::vector<double>{6, 4}, 0);
+        cr->move_to(0, y + 0.5);
+        cr->line_to(m_lay.width, y + 0.5);
+        cr->stroke();
+        cr->unset_dash();
+    };
+    if (m_lay.header > 0) { band(0, m_lay.header, "header"); rule(m_lay.header); }
+    if (m_lay.footer > 0) { band(core::footer_top(m_lay), m_lay.height, "footer"); rule(core::footer_top(m_lay)); }
+
     auto text_in = [&](const std::string& s, const core::LayoutObject& o, bool right, double alpha) {
         auto pl = m_lay_canvas.create_pango_layout(s);
         pl->set_width(std::max(0, o.w - 12) * PANGO_SCALE);
@@ -423,7 +494,18 @@ void Shell::draw_layout(const Cairo::RefPtr<Cairo::Context>& cr, int w, int h) {
 
     for (const auto& o : m_lay.objects) {
         const double x = o.x + 0.5, y = o.y + 0.5, ow = o.w - 1, oh = o.h - 1;
-        if (o.kind == core::ObjectKind::Text) {
+        if (o.kind == core::ObjectKind::Line) {   // s010c: a rule through the middle
+            set(0.65);
+            cr->set_line_width(2);
+            if (o.w >= o.h) { cr->move_to(o.x, o.y + o.h / 2.0); cr->line_to(o.x + o.w, o.y + o.h / 2.0); }
+            else            { cr->move_to(o.x + o.w / 2.0, o.y); cr->line_to(o.x + o.w / 2.0, o.y + o.h); }
+            cr->stroke();
+        } else if (o.kind == core::ObjectKind::Box) {
+            set(0.55);
+            cr->set_line_width(1.5);
+            cr->rectangle(o.x + 0.75, o.y + 0.75, o.w - 1.5, o.h - 1.5);
+            cr->stroke();
+        } else if (o.kind == core::ObjectKind::Text) {
             cr->set_line_width(1);
             set(0.18);
             cr->set_dash(std::vector<double>{2, 3}, 0);
@@ -480,6 +562,63 @@ void Shell::paint_inspector() {  // layouts: the picked object's field / words /
                                            std::to_string(m_lay.objects.size()) + " objects", "acorn-status"));
         m_lay_inspector.append(*side_label("Click an object to pick it. Its field, its words and its place show here.",
                                            "acorn-status"));
+        // s010d: the parts, and how to change them.
+        m_lay_inspector.append(*side_label(
+            "Parts: header " + std::to_string(m_lay.header) + " · body " +
+            std::to_string(m_lay.height - m_lay.header - m_lay.footer) + " · footer " + std::to_string(m_lay.footer) +
+            " px. Drag the top edge down for a header, the bottom edge for a footer; drag a line back to remove an empty one. "
+            "The Form shows the body.", "acorn-status"));
+        // s010c: Add -- each lands under everything, picked; one step.
+        auto add_head = side_label("Add", "acorn-field-name");
+        add_head->set_margin_top(10);
+        m_lay_inspector.append(*add_head);
+        const auto missing = core::fields_not_on(m_lay, fields_of(m_lay_table));
+        auto names = std::make_shared<std::vector<std::string>>(missing);
+        std::vector<Glib::ustring> shown(missing.begin(), missing.end());
+        auto dd = Gtk::make_managed<Gtk::DropDown>(Gtk::StringList::create(shown));
+        dd->set_name("layouts.add_pick");
+        dd->set_tooltip_text("A field this layout doesn't show yet");
+        dd->set_sensitive(can && !missing.empty());
+        auto addf = Gtk::make_managed<Gtk::Button>(missing.empty() ? "Every field is on it" : "Add Field");
+        addf->set_name("layouts.add_field");
+        addf->set_sensitive(can && !missing.empty());
+        addf->set_tooltip_text("The field's name on the left and its box on the right, under everything");
+        addf->signal_clicked().connect([this, dd, names, gen] {
+            if (gen != m_lay_gen) return;
+            const auto i = dd->get_selected();
+            if (i == GTK_INVALID_LIST_POSITION || i >= names->size()) return;
+            auto l = m_lay;
+            core::add_object(l, core::ObjectKind::Field, (*names)[i]);
+            m_lay_sel = static_cast<int>(l.objects.size()) - 1;
+            const std::string what = "Added " + curly((*names)[i]);
+            // The canvas takes the keys: the arrows / Esc / Delete act on what was added.
+            Glib::signal_idle().connect_once([this, l, what] { m_lay_focus.clear(); keep_layout(l, what); m_lay_canvas.grab_focus(); });
+        });
+        if (!missing.empty()) m_lay_inspector.append(*dd);
+        m_lay_inspector.append(*addf);
+        auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
+        row->set_homogeneous(true);
+        const struct { const char* label; const char* name; core::ObjectKind kind; const char* tip; } adds[] = {
+            {"Words", "layouts.add_words", core::ObjectKind::Text, "Words of your own -- change them in the inspector"},
+            {"Line", "layouts.add_line", core::ObjectKind::Line, "A rule -- across when wider than tall, else down"},
+            {"Box", "layouts.add_box", core::ObjectKind::Box, "A rectangle, drawn behind the fields"}};
+        for (const auto& a : adds) {
+            auto b = Gtk::make_managed<Gtk::Button>(a.label);
+            b->set_name(a.name);
+            b->set_sensitive(can);
+            b->set_tooltip_text(a.tip);
+            const auto kind = a.kind;
+            b->signal_clicked().connect([this, kind, gen] {
+                if (gen != m_lay_gen) return;
+                auto l = m_lay;
+                core::add_object(l, kind, kind == core::ObjectKind::Text ? "Words" : "");
+                m_lay_sel = static_cast<int>(l.objects.size()) - 1;
+                const std::string what = "Added " + core::object_label(l.objects.back());
+                Glib::signal_idle().connect_once([this, l, what] { m_lay_focus.clear(); keep_layout(l, what); m_lay_canvas.grab_focus(); });
+            });
+            row->append(*b);
+        }
+        m_lay_inspector.append(*row);
         return;
     }
     const auto idx = static_cast<std::size_t>(m_lay_sel);
@@ -492,7 +631,9 @@ void Shell::paint_inspector() {  // layouts: the picked object's field / words /
         w.add_controller(f);
     };
 
-    m_lay_inspector.append(*side_label(o.kind == core::ObjectKind::Field ? "Field box" : "Words", "acorn-field-name"));
+    m_lay_inspector.append(*side_label(o.kind == core::ObjectKind::Field ? "Field box"
+                                       : o.kind == core::ObjectKind::Text ? "Words"
+                                       : o.kind == core::ObjectKind::Line ? "Line" : "Box", "acorn-field-name"));
 
     if (o.kind == core::ObjectKind::Field) {
         // The field it shows -- a missing one listed first, so it can be
@@ -522,7 +663,7 @@ void Shell::paint_inspector() {  // layouts: the picked object's field / words /
         m_lay_inspector.append(*side_label("Shows", "acorn-status"));
         m_lay_inspector.append(*dd);
         if (m_lay_focus == "layouts.field") focus_back = dd;
-    } else {
+    } else if (o.kind == core::ObjectKind::Text) {
         auto e = Gtk::make_managed<Gtk::Entry>();
         e->set_text(o.text);
         e->set_sensitive(can);
