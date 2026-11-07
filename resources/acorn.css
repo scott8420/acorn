@@ -162,6 +162,26 @@ window.acorn .acorn-view-toggle button:not(.acorn-primary):not(.titlebutton):che
 window.acorn button:not(.acorn-primary):not(.titlebutton):disabled { opacity: 0.45; }
 .acorn-field-entry { min-height: 30px; }
 
+/* s010a -- the Form view: a record drawn through its layout. Objects sit at
+   their layout's pixel places, so boxes are as tall as the layout says. */
+.acorn-form {
+    background: @acorn_panel;
+    border-radius: 12px;
+}
+.acorn-form entry.acorn-form-entry { min-height: 24px; padding-top: 0; padding-bottom: 0; }
+.acorn-form menubutton > button { min-height: 24px; min-width: 24px; padding: 0 4px; }
+.acorn-form-static {
+    padding: 0 8px;
+    border-bottom: 1px solid alpha(@acorn_ink, 0.12);
+}
+.acorn-missing {
+    padding: 0 8px;
+    border: 1px dashed alpha(@acorn_ink, 0.45);
+    border-radius: 6px;
+    color: @acorn_ink_dim;
+    font-style: italic;
+}
+
 /* s008b -- the Graph: tables as boxes, links as lines, a handle on each. */
 .acorn-graph-box {
     background: @acorn_panel;

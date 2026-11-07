@@ -167,7 +167,9 @@ struct BoxDef {
     bool operator==(const BoxDef&) const = default;
 };
 
-using Record = std::variant<TableDef, RowDef, FieldData, BoxDef>;
+// s010: a layout -- also kept in the solution, never the database. Its own
+// table and name say which (core::Layout).
+using Record = std::variant<TableDef, RowDef, FieldData, BoxDef, core::Layout>;
 
 // ── the DDL writer: one place, per dialect, shared by preview and act ─────────
 // The New Table window shows exactly the string the store will run.
@@ -257,8 +259,16 @@ public:
     // s009: a table's box in the Graph -- a record of the solution, not the database.
     static Id box_id(const std::string& table) { return "box:" + table; }
     static bool is_box(const Id& id) { return id.rfind("box:", 0) == 0; }
-    // The solution the box records live in, and how to save it (false: not
-    // saved -- the step is refused). None set: a box step is refused.
+    // s010: a layout, by table and name -- "layout:<bytes in table>:<table>/<name>"
+    // (the length lets either hold a '/').
+    static Id layout_id(const std::string& table, const std::string& name);
+    static bool parse_layout_id(const Id& id, std::string& table, std::string& name);
+    static bool is_layout(const Id& id) { return id.rfind("layout:", 0) == 0; }
+    // A record of the solution, not the database: a step of only these needs
+    // no transaction and works on a read-only connection.
+    static bool is_local(const Id& id) { return is_box(id) || is_layout(id); }
+    // The solution the box / layout records live in, and how to save it
+    // (false: not saved -- the step is refused). None set: such a step is refused.
     void set_solution(core::Solution* s, std::function<bool()> save) { m_solution = s; m_save_solution = std::move(save); }
     // "“customers” record 7" -- for messages.
     static std::string describe(const Id& id);
@@ -310,6 +320,7 @@ private:
     void put_row(const Id& id, const RowDef* v);
     std::optional<Record> get_field(const Id& id) const;
     void put_field(const Id& id, const FieldData* v);
+    void put_local(const Id& id, const std::optional<Record>& v);   // s009 / s010: the solution
     bool exec_all(const std::vector<std::string>& sql);
     std::int64_t count_where(const std::string& table, const std::string& column, const char* cond) const;   // -1: failed
     std::vector<std::string> primary_key_of(const std::string& table) const;
@@ -490,6 +501,16 @@ std::expected<std::vector<Store::Id>, Error> unmatched(Journal& j, const std::st
 // solution, not the database: works on a read-only connection too. Moving it
 // where it already is: no step.
 std::expected<void, Error> move_box(Journal& j, const std::string& table, double x, double y);
+
+// s010 -- layouts, kept in the solution like the boxes (read-only connections
+// too). Save Layout puts `l` under its table and name: "New Layout “n”" when
+// there was none by that name, else "Change Layout “n”". The layout editor
+// (s010b) sends every edit through it, so each is a step on the same Ctrl+Z
+// list. Saving what is already kept: no step. Refused in words: a bad name,
+// an object with no place or size (core::check_layout).
+std::expected<void, Error> save_layout(Journal& j, const core::Layout& l);
+// Delete Layout “n”. Refused in words when there's none by that name.
+std::expected<void, Error> delete_layout(Journal& j, const std::string& table, const std::string& name);
 
 // What a design step would do to the live table, as the SQL put() will run
 // (the designer's preview): `want` is the table as the designer has it.

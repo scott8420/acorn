@@ -73,7 +73,8 @@ void Shell::paint_record() {  // records: the panel
     const db::Table* t = browse_info();
     const bool picked = m_browse_sel_index >= 0 &&
                         static_cast<std::size_t>(m_browse_sel_index) < m_browse_data.rows.size();
-    if (!t || (!picked && !m_record_new)) {
+    // s010a: the Form IS the record's editor -- the panel only for a new one.
+    if (!t || (!picked && !m_record_new) || (m_browse_view == BrowseView::Form && !m_record_new)) {
         m_record_scroll.set_visible(false);
         m_record_scroll.unset_child();
         return;
@@ -149,48 +150,7 @@ void Shell::paint_record() {  // records: the panel
                 m_record_inputs.emplace_back(col.name, e);
                 e->signal_activate().connect([this] { on_add_record(); });
             } else {
-                const std::string colname = col.name;
-                e->signal_activate().connect([this, e, row_id, colname, gen] {
-                    if (gen != m_record_gen) return;
-                    commit_field(row_id, colname, e->get_text());
-                });
-                auto focus = Gtk::EventControllerFocus::create();
-                focus->signal_leave().connect([this, e, row_id, colname, gen] {
-                    if (m_browse_painting || gen != m_record_gen) return;
-                    commit_field(row_id, colname, e->get_text());
-                });
-                e->add_controller(focus);
-                // The box has no undo of its own (GTK's would take Ctrl+Z
-                // before the window hears it, and leaving the box would then
-                // save the half-undone text). Instead: Esc -- or Ctrl+Z with
-                // typing pending -- puts the box back to what is saved; Ctrl+Z
-                // with nothing pending undoes the step (win.undo).
-                e->set_enable_undo(false);
-                auto keys = Gtk::EventControllerKey::create();
-                keys->signal_key_pressed().connect(
-                    [this, e, colname, gen](guint keyval, guint, Gdk::ModifierType state) -> bool {
-                        if (gen != m_record_gen) return false;
-                        const bool ctrl_z = (keyval == GDK_KEY_z || keyval == GDK_KEY_Z) &&
-                            (state & Gdk::ModifierType::CONTROL_MASK) == Gdk::ModifierType::CONTROL_MASK &&
-                            (state & Gdk::ModifierType::SHIFT_MASK) != Gdk::ModifierType::SHIFT_MASK;
-                        if (keyval != GDK_KEY_Escape && !ctrl_z) return false;
-                        const auto* t2 = browse_info();
-                        const auto* c2 = t2 ? t2->column(colname) : nullptr;
-                        const auto* v2 = browse_value(colname);
-                        const std::string saved = c2 && v2 ? db::cell_text(*v2, c2->type) : std::string{};
-                        if (ctrl_z && std::string(e->get_text()) == saved) {   // nothing pending: undo the step
-                            activate_action("win.undo");
-                            return true;
-                        }
-                        e->set_text(saved);
-                        e->set_position(-1);
-                        return true;
-                    },
-                    false);
-                // CAPTURE: the box's inner text widget would otherwise take the
-                // key first (s006c drive: Ctrl+Z never bubbled out of it).
-                keys->set_propagation_phase(Gtk::PropagationPhase::CAPTURE);
-                e->add_controller(keys);
+                wire_field_entry(e, row_id, col.name, &m_record_gen, gen);
             }
             w = e;
         }
@@ -207,6 +167,7 @@ void Shell::paint_record() {  // records: the panel
         cancel->signal_clicked().connect([this] {
             m_record_new = false;
             browse_note("", "");
+            if (m_browse_view == BrowseView::Form) { load_browse_page(); return; }   // s010a: back to a record
             paint_record();
             sync_undo();
         });
@@ -227,6 +188,52 @@ void Shell::paint_record() {  // records: the panel
         for (auto& [c, w] : m_record_inputs)
             if (dynamic_cast<Gtk::Entry*>(w)) { w->grab_focus(); break; }
     }
+}
+
+void Shell::wire_field_entry(Gtk::Entry* e, const std::string& row_id, const std::string& column,
+                             const unsigned* counter, unsigned gen) {  // records: Enter / leave saves; Esc puts back
+    const std::string colname = column;
+    e->signal_activate().connect([this, e, row_id, colname, counter, gen] {
+        if (gen != *counter) return;
+        commit_field(row_id, colname, e->get_text());
+    });
+    auto focus = Gtk::EventControllerFocus::create();
+    focus->signal_leave().connect([this, e, row_id, colname, counter, gen] {
+        if (m_browse_painting || gen != *counter) return;
+        commit_field(row_id, colname, e->get_text());
+    });
+    e->add_controller(focus);
+    // The box has no undo of its own (GTK's would take Ctrl+Z
+    // before the window hears it, and leaving the box would then
+    // save the half-undone text). Instead: Esc -- or Ctrl+Z with
+    // typing pending -- puts the box back to what is saved; Ctrl+Z
+    // with nothing pending undoes the step (win.undo).
+    e->set_enable_undo(false);
+    auto keys = Gtk::EventControllerKey::create();
+    keys->signal_key_pressed().connect(
+        [this, e, colname, counter, gen](guint keyval, guint, Gdk::ModifierType state) -> bool {
+            if (gen != *counter) return false;
+            const bool ctrl_z = (keyval == GDK_KEY_z || keyval == GDK_KEY_Z) &&
+                (state & Gdk::ModifierType::CONTROL_MASK) == Gdk::ModifierType::CONTROL_MASK &&
+                (state & Gdk::ModifierType::SHIFT_MASK) != Gdk::ModifierType::SHIFT_MASK;
+            if (keyval != GDK_KEY_Escape && !ctrl_z) return false;
+            const auto* t2 = browse_info();
+            const auto* c2 = t2 ? t2->column(colname) : nullptr;
+            const auto* v2 = browse_value(colname);
+            const std::string saved = c2 && v2 ? db::cell_text(*v2, c2->type) : std::string{};
+            if (ctrl_z && std::string(e->get_text()) == saved) {   // nothing pending: undo the step
+                activate_action("win.undo");
+                return true;
+            }
+            e->set_text(saved);
+            e->set_position(-1);
+            return true;
+        },
+        false);
+    // CAPTURE: the box's inner text widget would otherwise take the
+    // key first (s006c drive: Ctrl+Z never bubbled out of it).
+    keys->set_propagation_phase(Gtk::PropagationPhase::CAPTURE);
+    e->add_controller(keys);
 }
 
 void Shell::commit_field(const std::string& row, const std::string& column, const std::string& typed) {  // records: -> set_field
@@ -314,8 +321,13 @@ void Shell::on_delete_record() {  // records: -> delete_record
         lg->info("journal: delete {}: {}", db::Store::describe(id), r ? "deleted" : r.error().message);
     if (r) {
         browse_note("Deleted " + db::Store::describe(id) + ". Ctrl+Z brings it back.", "ok");
+        // s010a: the Form moves on to the next record (the one before, at the end).
+        const int i = m_browse_sel_index;
+        const auto n = static_cast<int>(m_browse_data.ids.size());
         m_browse_sel.clear();
         m_browse_sel_index = -1;
+        if (m_browse_view == BrowseView::Form && i >= 0 && n > 1)
+            m_browse_sel = m_browse_data.ids[static_cast<std::size_t>(i + 1 < n ? i + 1 : i - 1)];
     } else {
         browse_note("Not deleted: " + r.error().message + ".", "error");
     }

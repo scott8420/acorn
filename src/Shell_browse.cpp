@@ -86,19 +86,32 @@ void Shell::build_browse_page() {  // browse: the Browse area
     m_browse_grid_btn.set_label("Grid");
     m_browse_grid_btn.set_tooltip_text("A dense grid -- click a heading to sort");
     m_browse_grid_btn.set_group(m_browse_cards_btn);
+    // s010a: Form -- one record through its layout, edited in place.
+    m_browse_form_btn.set_label("Form");
+    m_browse_form_btn.set_tooltip_text("One record at a time, through its layout -- edit it in place");
+    m_browse_form_btn.set_group(m_browse_cards_btn);
     m_browse_cards_btn.set_active(true);
-    m_browse_cards_btn.signal_toggled().connect([this] {
-        if (!m_browse_cards_btn.get_active() || m_browse_as_cards) return;
-        m_browse_as_cards = true;
-        paint_browse();
-    });
-    m_browse_grid_btn.signal_toggled().connect([this] {
-        if (!m_browse_grid_btn.get_active() || !m_browse_as_cards) return;
-        m_browse_as_cards = false;
-        paint_browse();
-    });
+    auto to_view = [this](Gtk::ToggleButton& b, BrowseView v) {
+        b.signal_toggled().connect([this, &b, v] {
+            if (!b.get_active() || m_browse_view == v) return;
+            m_browse_view = v;
+            m_form_focus.clear();
+            // The Form shows one record: the picked one, else the page's first.
+            if (v == BrowseView::Form && m_browse_sel_index < 0 && !m_browse_data.ids.empty() && !m_record_new) {
+                m_browse_sel_index = 0;
+                m_browse_sel = m_browse_data.ids[0];
+            }
+            paint_browse();
+            paint_record();
+            sync_undo();
+        });
+    };
+    to_view(m_browse_cards_btn, BrowseView::Cards);
+    to_view(m_browse_grid_btn, BrowseView::Grid);
+    to_view(m_browse_form_btn, BrowseView::Form);
     views->append(m_browse_cards_btn);
     views->append(m_browse_grid_btn);
+    views->append(m_browse_form_btn);
     bar->append(*views);
     // s006c: the record verbs (greyed by sync_undo when the table can't take them).
     m_browse_new.set_label("New Record");
@@ -120,11 +133,13 @@ void Shell::build_browse_page() {  // browse: the Browse area
     m_browse_next.set_icon_name("go-next-symbolic");
     m_browse_next.set_tooltip_text("The next page");
     m_browse_prev.signal_clicked().connect([this] {
+        if (m_browse_view == BrowseView::Form) { form_step(-1); return; }   // s010a: a record at a time
         m_browse_req.offset = std::max<std::int64_t>(0, m_browse_req.offset - m_browse_req.limit);
         m_browse_sel_index = -1;
         load_browse_page();
     });
     m_browse_next.signal_clicked().connect([this] {
+        if (m_browse_view == BrowseView::Form) { form_step(+1); return; }
         if (m_browse_req.offset + m_browse_req.limit >= m_browse_data.total) return;
         m_browse_req.offset += m_browse_req.limit;
         m_browse_sel_index = -1;
@@ -183,6 +198,7 @@ void Shell::rebuild_browse_pick() {  // browse: the picker, after a connect / a 
 void Shell::browse_table(const std::string& name) {  // browse: this table's first page
     if (name == m_browse_table) return;
     m_browse_table = name;
+    m_form_focus.clear();
     m_browse_req = {0, kPage};
     m_browse_sel.clear();
     m_browse_sel_index = -1;
@@ -246,6 +262,18 @@ void Shell::load_browse_page(bool keep_panel) {  // browse: read the page, repai
     m_browse_sel_index = -1;
     for (std::size_t i = 0; i < m_browse_data.ids.size(); ++i)
         if (!m_browse_sel.empty() && m_browse_data.ids[i] == m_browse_sel) m_browse_sel_index = static_cast<int>(i);
+    // s010a: the Form always shows a record -- the picked one gone (deleted,
+    // another page), the page's first.
+    if (m_browse_view == BrowseView::Form && m_browse_sel_index < 0 && !m_browse_data.ids.empty() && !m_record_new) {
+        m_browse_sel_index = 0;
+        m_browse_sel = m_browse_data.ids[0];
+    }
+    // s010a: a field just saved from the Form keeps its boxes (the one Tab
+    // moved to holds the focus); the values under them are fresh.
+    if (keep_panel && m_browse_view == BrowseView::Form) {
+        sync_undo();
+        return;
+    }
     paint_browse();
     if (!keep_panel) paint_record();
     sync_undo();
@@ -257,8 +285,17 @@ void Shell::paint_browse() {  // browse: cards or grid
     m_browse_prev.set_sensitive(m_browse_req.offset > 0);
     m_browse_next.set_sensitive(m_browse_req.offset + static_cast<std::int64_t>(m_browse_data.rows.size()) <
                                 m_browse_data.total);
+    m_browse_prev.set_tooltip_text(m_browse_view == BrowseView::Form ? "The previous record" : "The previous page");
+    m_browse_next.set_tooltip_text(m_browse_view == BrowseView::Form ? "The next record" : "The next page");
+    if (m_browse_view == BrowseView::Form && browse_info() && m_browse_sel_index >= 0) {   // s010a: "Record 7 of 312"
+        const auto at = m_browse_req.offset + m_browse_sel_index;
+        m_browse_range.set_text("Record " + std::to_string(at + 1) + " of " + std::to_string(m_browse_data.total));
+        m_browse_prev.set_sensitive(at > 0);
+        m_browse_next.set_sensitive(at + 1 < m_browse_data.total);
+    }
     m_browse_cards_btn.set_sensitive(browse_info() != nullptr);
     m_browse_grid_btn.set_sensitive(browse_info() != nullptr);
+    m_browse_form_btn.set_sensitive(browse_info() != nullptr);
     if (!browse_info() || m_browse_data.rows.empty()) {
         auto empty = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 8);
         empty->add_css_class("acorn-panel");
@@ -267,8 +304,11 @@ void Shell::paint_browse() {  // browse: cards or grid
         m_browse_scroll.set_child(*empty);
         return;
     }
-    if (m_browse_as_cards) paint_cards();
-    else                   paint_grid();
+    switch (m_browse_view) {
+        case BrowseView::Cards: paint_cards(); break;
+        case BrowseView::Grid:  paint_grid();  break;
+        case BrowseView::Form:  paint_form();  break;
+    }
 }
 
 void Shell::paint_cards() {  // browse: one calm card per record

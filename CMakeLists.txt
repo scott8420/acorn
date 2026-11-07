@@ -91,6 +91,7 @@ add_library(acorn_core STATIC
     src/core/Connections.cpp
     # s009: the .acorn solution document -- where it lives, its JSON pump.
     src/core/Solution.cpp
+    src/core/Layout.cpp
     # s005c: the skin's base colour -- presets, the recipe, the saved choice.
     src/core/Ground.cpp
     src/core/TextMap.cpp
@@ -185,6 +186,7 @@ add_executable(acorn
     # s004c: the Tables area -- the read-only schema browser.
     src/Shell_tables.cpp
     src/Shell_browse.cpp
+    src/Shell_form.cpp
     src/Shell_records.cpp
     src/Shell_graph.cpp
     src/AboutWindow.cpp

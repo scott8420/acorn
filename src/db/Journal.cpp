@@ -1028,6 +1028,26 @@ bool Store::parse_row_id(const Id& id, std::string& table, std::vector<std::stri
     return !key.empty();
 }
 
+Store::Id Store::layout_id(const std::string& table, const std::string& name) {
+    return "layout:" + std::to_string(table.size()) + ":" + table + "/" + name;
+}
+
+bool Store::parse_layout_id(const Id& id, std::string& table, std::string& name) {
+    if (!is_layout(id)) return false;
+    const auto c = id.find(':', 7);
+    if (c == std::string::npos || c == 7) return false;
+    std::size_t n = 0;
+    for (std::size_t k = 7; k < c; ++k) {
+        if (!std::isdigit(static_cast<unsigned char>(id[k]))) return false;
+        n = n * 10 + static_cast<std::size_t>(id[k] - '0');
+        if (n > id.size()) return false;
+    }
+    if (c + 1 + n >= id.size() || id[c + 1 + n] != '/') return false;
+    table = id.substr(c + 1, n);
+    name  = id.substr(c + 2 + n);
+    return !table.empty() && !name.empty();
+}
+
 Store::Id Store::field_id(const std::string& table, const std::string& column) {
     return "field:" + std::to_string(table.size()) + ":" + table + ":" + column;
 }
@@ -1064,6 +1084,8 @@ std::string Store::describe(const Id& id) {
     std::string column;
     if (parse_field_id(id, table, column)) return "the values of " + curly(table) + "." + curly(column);
     if (is_box(id)) return curly(id.substr(4)) + "'s place in the Graph";
+    std::string name;
+    if (parse_layout_id(id, table, name)) return "the layout " + curly(name) + " of " + curly(table);
     return curly(name_of(id));
 }
 
@@ -1099,6 +1121,12 @@ std::optional<Record> Store::get(const Id& id) const {
         auto it = m_solution->boxes.find(t);
         if (it == m_solution->boxes.end()) return std::nullopt;
         return BoxDef{t, it->second.x, it->second.y};
+    }
+    if (is_layout(id)) {   // s010: from the solution
+        std::string t, n;
+        if (!m_solution || !parse_layout_id(id, t, n)) return std::nullopt;
+        if (const auto* l = m_solution->layout(t, n)) return *l;
+        return std::nullopt;
     }
     return std::nullopt;   // "new:..." -- a declaration, never a record
 }
@@ -1367,20 +1395,41 @@ void Store::put(const Id& id, const std::optional<Record>& v) {
         put_field(id, v ? &std::get<FieldData>(*v) : nullptr);
         return;
     }
-    if (is_box(id)) {   // s009: the solution, saved whole; the database is never touched
-        if (v && !std::holds_alternative<BoxDef>(*v)) { fail(Error::Code::Internal, id + " given a table or record"); return; }
-        if (!m_solution) { fail(Error::Code::Unsupported, "there is no solution to keep the Graph's boxes in"); return; }
-        const std::string t = id.substr(4);
-        const auto before = m_solution->boxes;
-        if (v) m_solution->boxes[t] = {std::get<BoxDef>(*v).x, std::get<BoxDef>(*v).y};
-        else   m_solution->boxes.erase(t);
-        if (m_solution->boxes != before && m_save_solution && !m_save_solution()) {
-            m_solution->boxes = before;
-            fail(Error::Code::Internal, "could not save the solution file");
-        }
+    if (is_local(id)) { put_local(id, v); return; }
+    fail(Error::Code::Internal, "unknown record " + id);
+}
+
+// s009 / s010: the solution, saved whole; the database is never touched. A
+// save that fails puts the solution back as it was -- no step.
+void Store::put_local(const Id& id, const std::optional<Record>& v) {
+    if (!m_solution) {
+        fail(Error::Code::Unsupported, is_box(id) ? "there is no solution to keep the Graph's boxes in"
+                                                  : "there is no solution to keep layouts in");
         return;
     }
-    fail(Error::Code::Internal, "unknown record " + id);
+    const core::Solution before = *m_solution;
+    if (is_box(id)) {
+        if (v && !std::holds_alternative<BoxDef>(*v)) { fail(Error::Code::Internal, id + " given a table or record"); return; }
+        const std::string t = id.substr(4);
+        if (v) m_solution->boxes[t] = {std::get<BoxDef>(*v).x, std::get<BoxDef>(*v).y};
+        else   m_solution->boxes.erase(t);
+    } else {
+        std::string t, n;
+        if (!parse_layout_id(id, t, n)) { fail(Error::Code::Internal, "not a layout: " + id); return; }
+        if (v && !std::holds_alternative<core::Layout>(*v)) { fail(Error::Code::Internal, id + " given something else"); return; }
+        if (v) {
+            const auto& l = std::get<core::Layout>(*v);
+            if (l.table != t || l.name != n) { fail(Error::Code::Internal, id + " given another layout"); return; }
+            m_solution->layouts[t][n] = l;
+        } else if (auto it = m_solution->layouts.find(t); it != m_solution->layouts.end()) {
+            it->second.erase(n);
+            if (it->second.empty()) m_solution->layouts.erase(it);
+        }
+    }
+    if (*m_solution != before && m_save_solution && !m_save_solution()) {
+        *m_solution = before;
+        fail(Error::Code::Internal, "could not save the solution file");
+    }
 }
 
 void Store::put_table(const Id& id, const std::optional<TableDef>& v) {
@@ -1640,9 +1689,9 @@ std::size_t not_fields(const std::vector<Store::Id>& ids) {
 }  // namespace
 
 std::expected<void, Error> Journal::begin(const std::vector<Store::Id>& ids) {
-    // s009: a step of box places touches only the solution -- no transaction,
-    // and a read-only database doesn't stop it.
-    const bool local = !ids.empty() && std::all_of(ids.begin(), ids.end(), [](const auto& id) { return Store::is_box(id); });
+    // s009 / s010: a step of box places / layouts touches only the solution --
+    // no transaction, and a read-only database doesn't stop it.
+    const bool local = !ids.empty() && std::all_of(ids.begin(), ids.end(), [](const auto& id) { return Store::is_local(id); });
     if (local) {
         m_store.clear_failed();
         m_txn = true;
@@ -2456,6 +2505,21 @@ std::expected<void, Error> move_box(Journal& j, const std::string& table, double
     return j.run("Move " + curly(table), {id}, [&](Store& s) { s.put(id, BoxDef{table, x, y}); });
 }
 
+std::expected<void, Error> save_layout(Journal& j, const core::Layout& l) {
+    if (auto why = core::check_layout(l); !why.empty()) return std::unexpected(Error{Error::Code::Unsupported, why});
+    const auto id = Store::layout_id(l.table, l.name);
+    const auto now = j.store().get(id);
+    if (now && std::get<core::Layout>(*now) == l) return {};   // already kept: no step
+    return j.run((now ? "Change Layout " : "New Layout ") + curly(l.name), {id}, [&](Store& s) { s.put(id, l); });
+}
+
+std::expected<void, Error> delete_layout(Journal& j, const std::string& table, const std::string& name) {
+    const auto id = Store::layout_id(table, name);
+    if (!j.store().get(id))
+        return std::unexpected(Error{Error::Code::NotFound, curly(table) + " has no layout " + curly(name)});
+    return j.run("Delete Layout " + curly(name), {id}, [&](Store& s) { s.put(id, std::nullopt); });
+}
+
 std::expected<std::vector<std::string>, Error> preview(Journal& j, const TableDef& want) {
     Store& st = j.store();
     st.forget_schema();
@@ -2689,6 +2753,16 @@ const std::vector<Verb>& all() {
          }, [](Journal& j) { return link_fixture(j, OnDelete::Cascade); }},
         // s009 -- the solution: a box moved in the Graph (no database write).
         {"Move Box", [](Journal& j) { return move_box(j, kDesign, 40, 80); }, design_fixture, true},
+        // s010 -- layouts, in the solution too.
+        {"Save Layout", [](Journal& j) {
+             return save_layout(j, core::default_layout(kDesign, {"id", "title", "n"}));
+         }, design_fixture, true},
+        {"Delete Layout", [](Journal& j) { return delete_layout(j, kDesign, "walk"); },
+         [](Journal& j) -> std::expected<void, Error> {
+             auto l = core::default_layout(kDesign, {"title"});
+             l.name = "walk";
+             return save_layout(j, l);
+         }, true},
         {"Delete Record (Set Empty)", [](Journal& j) -> std::expected<void, Error> {
              auto row = newest_parent(j);
              if (!row) return std::unexpected(row.error());

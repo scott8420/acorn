@@ -1853,6 +1853,137 @@ void test_boxes(Engine* e, const ConnectParams& ro, const std::string& P) {
 }
 
 
+// ── s010: layouts ────────────────────────────────────────────────────────────
+void test_layouts_pure(const fs::path& dir) {
+    using core::ObjectKind;
+    const auto d = core::default_layout("contacts", {"id", "first_name", "birthday"});
+    const bool shape = d.name == "contacts Form" && d.table == "contacts" && d.objects.size() == 6 &&
+        d.objects[0] == core::LayoutObject{ObjectKind::Text, "", "id", 16, 16, 144, 24} &&
+        d.objects[1] == core::LayoutObject{ObjectKind::Field, "id", "", 168, 16, 320, 24} &&
+        d.objects[4].text == "birthday" && d.objects[5].field == "birthday" && d.objects[5].y == 80 &&
+        d.width == 504 && d.height == 80 + 24 + 16;
+    check("layouts: the default -- \"contacts Form\", a label left and a box right per field, in order", shape,
+          d.name + " " + std::to_string(d.width) + "x" + std::to_string(d.height));
+    bool on_grid = true;
+    for (const auto& o : d.objects)
+        on_grid = on_grid && o.x % core::kLayoutGrid == 0 && o.y % core::kLayoutGrid == 0 &&
+                  o.w % core::kLayoutGrid == 0 && o.h % core::kLayoutGrid == 0;
+    check("layouts: the default sits on the 8 px grid", on_grid && d.width % 8 == 0 && d.height % 8 == 0, "");
+    check("layouts: a field the table no longer has is missing (labels never are)",
+          core::missing_field(d.objects[5], {"id", "first_name"}) && !core::missing_field(d.objects[5], {"birthday"}) &&
+          !core::missing_field(d.objects[4], {}), "");
+    check("layouts: the default is a valid layout; a table of no fields still has one",
+          core::check_layout(d).empty() && core::check_layout(core::default_layout("t", {})).empty(),
+          core::check_layout(d));
+    auto bad = d;
+    bad.name = " x";
+    auto bad2 = d;
+    bad2.objects[1].w = 0;
+    auto bad3 = d;
+    bad3.objects[1].field.clear();
+    check("layouts: refused in words -- a name with a space at the end, an object with no size, a field object with no field",
+          !core::check_layout(bad).empty() && !core::check_layout(bad2).empty() && !core::check_layout(bad3).empty(), "");
+
+    // Ids: a '/' in the table or the name reads back.
+    std::string t, n;
+    check("layouts: ids round-trip, a '/' in the table or the name kept",
+          Store::parse_layout_id(Store::layout_id("a/b", "c/d Form"), t, n) && t == "a/b" && n == "c/d Form" &&
+          !Store::parse_layout_id("layout:9:ab/c", t, n) && !Store::parse_layout_id("box:x", t, n) &&
+          Store::is_local(Store::layout_id("x", "y")) && Store::is_local(Store::box_id("x")) &&
+          !Store::is_local(Store::table_id("x")), t + "|" + n);
+
+    // In the .acorn: round-trip; a broken layout skipped, the rest still read.
+    core::Solution s;
+    s.points_at.engine = "sqlite";
+    s.points_at.path = (dir / "lay.sqlite").string();
+    s.boxes["contacts"] = {8, 8};
+    auto l2 = d;
+    l2.name = "“odd” / name";
+    s.layouts["contacts"][d.name] = d;
+    s.layouts["contacts"][l2.name] = l2;
+    const auto file = (dir / "lay.acorn").string();
+    auto back = core::save_solution(file, s) ? core::load_solution(file) : std::nullopt;
+    check("layouts: round-trip in the .acorn (by table, by name, objects in order)", back && *back == s, "");
+    {
+        std::ofstream g(dir / "half.acorn");
+        g << R"({"acorn": 1, "boxes": {"a": {"x": 1, "y": 2}}, "layouts": {"a": {)"
+             R"("good": {"width": 64, "height": 32, "objects": [{"kind": "field", "field": "f", "x": 8, "y": 8, "w": 48, "h": 16},)"
+             R"( {"kind": "sparkle", "x": 1, "y": 1, "w": 1, "h": 1}]},)"
+             R"("bad": {"width": "wide", "height": 32, "objects": []}}}})";
+    }
+    auto half = core::load_solution((dir / "half.acorn").string());
+    check("layouts: a broken layout is skipped, an unknown object kind not drawn -- the rest of the file reads",
+          half && half->boxes.count("a") && half->layout("a", "good") && !half->layout("a", "bad") &&
+          half->layout("a", "good")->objects.size() == 1, "");
+    { std::ofstream g(dir / "s009.acorn"); g << R"({"acorn": 1, "boxes": {"a": {"x": 1, "y": 2}}})"; }
+    auto old = core::load_solution((dir / "s009.acorn").string());
+    check("layouts: an s009 file (no layouts) reads -- no layouts", old && old->layouts.empty() && old->boxes.size() == 1, "");
+}
+
+// s010: Save / Delete Layout -- steps on the same list, kept in the solution,
+// on a read-only connection too; the database never touched.
+void test_layouts(Engine* e, const ConnectParams& ro, const std::string& P) {
+    auto c = e->open(ro);
+    if (!c) { check(P + "layouts: open read-only", false, c.error().message); return; }
+    Gate g(std::move(*c));
+    Journal j(g, e->dialect(), e->caps());
+    core::Solution sol;
+    int saves = 0;
+    bool fail_save = false;
+    j.store().set_solution(&sol, [&] { ++saves; return !fail_save; });
+    auto l = core::default_layout("customers", {"id", "name"});
+    auto m = verbs::save_layout(j, l);
+    check(P + "layouts: Save on a READ-ONLY connection -- \"New Layout\", a step, saved, nothing written to the database",
+          m && sol.layout("customers", "customers Form") && *sol.layout("customers", "customers Form") == l && saves == 1 &&
+          j.undo_label() == "New Layout “customers Form”" && g.strays() == 0, m ? j.undo_label() : m.error().message);
+    auto moved = l;
+    moved.objects[1].x += 16;
+    auto m2 = verbs::save_layout(j, moved);
+    check(P + "layouts: an edit is \"Change Layout\"", m2 && j.undo_label() == "Change Layout “customers Form”" &&
+          *sol.layout("customers", "customers Form") == moved, m2 ? j.undo_label() : m2.error().message);
+    const auto n = j.size();
+    auto same = verbs::save_layout(j, moved);
+    check(P + "layouts: saving what is kept -- no step", same && j.size() == n, "");
+    auto u = j.undo();
+    check(P + "layouts: Ctrl+Z puts the layout back as it was", u && *sol.layout("customers", "customers Form") == l,
+          u ? "" : u.error().message);
+    auto u2 = j.undo();
+    check(P + "layouts: ... and again: none kept (the default is computed again)", u2 && sol.layouts.empty(),
+          u2 ? "" : u2.error().message);
+    auto r = j.redo();
+    check(P + "layouts: redo keeps it again", r && sol.layout("customers", "customers Form"), r ? "" : r.error().message);
+    auto del = verbs::delete_layout(j, "customers", "customers Form");
+    check(P + "layouts: Delete Layout -- gone from the solution, one step",
+          del && !sol.layout("customers", "customers Form") && j.undo_label() == "Delete Layout “customers Form”",
+          del ? j.undo_label() : del.error().message);
+    auto ud = j.undo();
+    check(P + "layouts: ... Ctrl+Z brings it back exactly", ud && sol.layout("customers", "customers Form") &&
+          *sol.layout("customers", "customers Form") == l, ud ? "" : ud.error().message);
+    auto none = verbs::delete_layout(j, "customers", "nope");
+    check(P + "layouts: deleting a layout that isn't there -- refused in words", !none && none.error().code == Error::Code::NotFound &&
+          none.error().message.find("nope") != std::string::npos, none ? "deleted!" : none.error().message);
+    auto badl = l;
+    badl.name = "";
+    const auto n2 = j.size();
+    auto b = verbs::save_layout(j, badl);
+    check(P + "layouts: a layout with no name -- refused in words, no step", !b && j.size() == n2, b ? "saved!" : b.error().message);
+    fail_save = true;
+    auto lost = verbs::save_layout(j, moved);
+    check(P + "layouts: a save that fails -- no step, the layout kept as it was",
+          !lost && j.size() == n2 && *sol.layout("customers", "customers Form") == l, lost ? "saved!" : lost.error().message);
+    fail_save = false;
+    sol.boxes["customers"] = {1, 2};
+    auto both = verbs::move_box(j, "customers", 3, 4);
+    auto ub = j.undo();
+    check(P + "layouts: a box's undo leaves the layouts alone", both && ub && sol.boxes["customers"] == core::BoxPlace{1, 2} &&
+          *sol.layout("customers", "customers Form") == l, "");
+    Journal nosol(g, e->dialect(), e->caps());
+    auto ns = verbs::save_layout(nosol, l);
+    check(P + "layouts: no solution -- refused in words", !ns && ns.error().code == Error::Code::Unsupported, ns ? "saved!" : "");
+    check(P + "layouts: the database untouched throughout", g.strays() == 0, std::to_string(g.strays()));
+}
+
+
 // ── s009b: the Address Book starter ──────────────────────────────────────────
 void test_starter(Journal& j, Gate& g, const std::string& P) {
     auto count = [&](const std::string& t) {
@@ -2112,6 +2243,7 @@ void test_server(Engine* e, const char* env_name, const char* admin_db) {
     test_suite(T);
     test_journal(e, T.rw, T.ro, e->id());   // s005b: the door, in the same throwaway database
     test_boxes(e, T.ro, std::string(e->id()) + ": ");   // s009
+    test_layouts(e, T.ro, std::string(e->id()) + ": "); // s010
 
     auto a2 = e->open(admin);
     std::string why = a2 ? "" : a2.error().message;
@@ -2161,6 +2293,8 @@ void db_tests(CheckFn fn, int& skip_count) {
         test_suite(T);
         test_solution_pure(tmp.p);            // s009
         test_boxes(e, T.ro, "sqlite: ");      // s009: boxes move on a read-only connection
+        test_layouts_pure(tmp.p);             // s010
+        test_layouts(e, T.ro, "sqlite: ");    // s010: layouts kept on a read-only connection
         {   // s005b: the door, on its own fresh fixture file
             Target J = T;
             J.rw.path = (tmp.p / "journal.sqlite").string();

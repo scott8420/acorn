@@ -11,6 +11,7 @@
 #include "db/Browse.hpp"    // s006b: a table's records, a page at a time
 #include <gtkmm/togglebutton.h>
 #include <gtkmm/popover.h>
+#include <gtkmm/entry.h>
 #include <map>
 
 #include <glibmm/dispatcher.h>
@@ -140,6 +141,10 @@ private:
     void paint_browse();                         // category: browse: cards or grid from m_browse_data
     void paint_cards();                          // category: browse: one calm card per record
     void paint_grid();                           // category: browse: the dense grid, sortable headers
+    // s010a -- the Form view: the picked record through its layout (src/Shell_form.cpp).
+    void paint_form();                           // category: form: the picked record, drawn from its layout, editable in place
+    core::Layout form_layout(bool* kept = nullptr) const;  // category: form: the shown table's layout -- kept in the solution, else the default
+    void form_step(int delta);                   // category: form: the previous / next record (across pages)
     void browse_select(int index);               // category: browse: the picked record (kept across views / pages)
     const db::Table* browse_info() const;        // category: browse: the shown table in m_schema (nullptr: none)
 
@@ -154,6 +159,11 @@ private:
     bool browse_writable() const;                // category: records: Acorn-made + a table with a key
     void browse_note(const std::string& text, const char* kind);  // category: records: what a step did, under the Browse title
     const db::Value* browse_value(const std::string& column) const;  // category: records: the picked record's field as last read
+    // s010a: Enter / leave saves, Esc (or Ctrl+Z with typing pending) puts the
+    // box back -- the panel's and the Form's boxes alike. `counter` / `gen`:
+    // a box from an older paint never saves.
+    void wire_field_entry(Gtk::Entry* e, const std::string& row_id, const std::string& column,
+                          const unsigned* counter, unsigned gen);
 
     // ── graph (s008b) -- src/Shell_graph.cpp ────────────────────────────────
     // Tables as boxes, links as lines; a drag makes a link, a line's handle
@@ -271,7 +281,7 @@ private:
     widgets::Label                  m_browse_where;   // "Connect to a database first" / "“people” -- 312 records"
     Glib::RefPtr<Gtk::StringList>   m_browse_names;
     Gtk::DropDown                   m_browse_pick;
-    widgets::Named<Gtk::ToggleButton> m_browse_cards_btn, m_browse_grid_btn;
+    widgets::Named<Gtk::ToggleButton> m_browse_cards_btn, m_browse_grid_btn, m_browse_form_btn;
     widgets::Button                 m_browse_prev, m_browse_next;
     widgets::Label                  m_browse_range;   // "51–100 of 312"
     widgets::ScrolledWindow         m_browse_scroll;
@@ -280,7 +290,9 @@ private:
     db::Page                        m_browse_data;
     std::string                     m_browse_sel;     // the picked record's journal id ("" = none)
     int                             m_browse_sel_index = -1;
-    bool                            m_browse_as_cards = true;
+    enum class BrowseView { Cards, Grid, Form };
+    BrowseView                      m_browse_view = BrowseView::Cards;   // s010a: + Form
+    std::string                     m_form_focus;     // s010a: the Form box last focused (kept across a repaint)
     bool                            m_browse_painting = false;
     // s006c -- the record panel and its verbs.
     widgets::Label                  m_browse_note;    // "Changed “age”. Ctrl+Z undoes it." / a refusal
