@@ -98,10 +98,16 @@ DesignTableWindow::DesignTableWindow(Gtk::Window& parent)
     m_add_field.set_label("New Field");
     m_add_field.set_halign(Gtk::Align::START);
     m_add_field.set_tooltip_text("Add a field at the end -- empty in every record");
-    m_add_field.signal_clicked().connect([this] {
+    m_add_field.signal_clicked().connect([this, fscroll] {
         add_field_row(nullptr);
         if (!m_fields.empty()) m_fields.back().name->grab_focus();
         refresh();
+        // The list is a fixed height: show the new row (Scott, s007c -- with
+        // five fields the sixth landed out of sight, looking like nothing).
+        Glib::signal_idle().connect_once([fscroll] {
+            auto adj = fscroll->get_vadjustment();
+            adj->set_value(adj->get_upper() - adj->get_page_size());
+        });
     });
     page->append(m_add_field);
 
@@ -162,9 +168,9 @@ DesignTableWindow::DesignTableWindow(Gtk::Window& parent)
     m_understand.signal_toggled().connect([this] { refresh(); });
     page->append(m_understand);
 
-    auto* note = label("One Apply is one step: Ctrl+Z, or Undo in the menu, undoes all of it.", "dim-label");
-    note->set_wrap(true);
-    page->append(*note);
+    m_note = label("One Apply is one step: Ctrl+Z, or Undo in the menu, undoes all of it.", "dim-label");
+    m_note->set_wrap(true);
+    page->append(*m_note);
 
     m_reason.set_xalign(0.0f);
     m_reason.set_wrap(true);
@@ -436,6 +442,35 @@ db::TableDef DesignTableWindow::want() const {
     return w;
 }
 
+// Pictures carry no field identity: one field gone + one of the same kind come
+// IS a rename to the planner (and the store refuses it as one step). So Apply
+// runs it as two: the delete (and any other change), then the new field.
+bool DesignTableWindow::two_steps() const {
+    const db::ColumnDef* gone = nullptr;
+    const FieldRow* fresh = nullptr;
+    int deleted = 0, added = 0;
+    for (const auto& f : m_fields) {
+        if (f.orig.empty() && f.name->get_text().empty()) continue;
+        if (f.deleted) { ++deleted; gone = m_live.column(f.orig); }
+        else if (f.orig.empty()) { ++added; fresh = &f; }
+    }
+    if (deleted != 1 || added != 1 || !gone || !fresh) return false;
+    auto fx = field_of(*fresh);
+    return fx && db::map_type(m_dialect, gone->decl_type) == db::map_type(m_dialect, fx->decl_type) &&
+           gone->nullable == fx->nullable && gone->default_sql == fx->default_sql;
+}
+
+db::TableDef DesignTableWindow::first_step() const {
+    std::vector<std::string> fresh;   // the new fields' names
+    for (const auto& f : m_fields)
+        if (f.orig.empty()) fresh.push_back(f.name->get_text());
+    db::TableDef w = want();
+    std::erase_if(w.columns, [&](const db::ColumnDef& c) {
+        return std::find(fresh.begin(), fresh.end(), c.name) != fresh.end();
+    });
+    return w;
+}
+
 std::string DesignTableWindow::why_not() const {
     std::vector<std::string> seen;
     int renames = 0, deleted = 0, added = 0, changed = 0;
@@ -464,15 +499,6 @@ std::string DesignTableWindow::why_not() const {
     if (renames > 1) return "Rename one field at a time -- Apply, then the next.";
     if (renames == 1 && (deleted || added || changed))
         return "A rename is a step of its own -- Apply it, then the rest.";
-    // Pictures carry no field identity: one field gone + one of the same kind
-    // come would read as a rename. Two steps.
-    if (deleted == 1 && added == 1 && gone && fresh) {
-        auto fx = field_of(*fresh);
-        if (fx && db::map_type(m_dialect, gone->decl_type) == db::map_type(m_dialect, fx->decl_type) &&
-            gone->nullable == fx->nullable && gone->default_sql == fx->default_sql)
-            return "Deleting " + curly(gone->name) + " and adding a field of the same kind in one step would read as a "
-                   "rename -- Apply the delete first (or rename " + curly(gone->name) + " instead).";
-    }
     for (const auto& r : m_indexes) {
         if (!r.made) continue;
         for (const auto& x : m_indexes)
@@ -503,16 +529,28 @@ void DesignTableWindow::refresh() {
     const auto w = want();
     std::string why = why_not();
     std::vector<std::string> plan;
+    const bool two = why.empty() && two_steps();
+    m_note->set_text(two ? "This Apply is two steps (the delete, then the new field): two Ctrl+Z undo all of it."
+                         : "One Apply is one step: Ctrl+Z, or Undo in the menu, undoes all of it.");
+    const db::TableDef first = two ? first_step() : w;
     if (why.empty() && m_preview_fn) {
-        auto p = m_preview_fn(w);
+        auto p = m_preview_fn(first);
         if (!p) why = sentence(p.error().message);
         else plan = *p;
+    }
+    if (why.empty() && two) {   // the second step, read off the first's picture
+        auto p2 = db::plan_alter(m_dialect, m_dialect == db::Dialect::MariaDB ? '`' : '"', first, w);
+        if (!p2) why = sentence(p2.error());
+        else {
+            plan.push_back("-- then a second step (two Ctrl+Z undo it all):");
+            plan.insert(plan.end(), p2->begin(), p2->end());
+        }
     }
     // The words before the SQL box: a refusal about the DATA (required with
     // empty records and no default ...) shows there like any other (s007c).
     std::vector<std::string> losses;
     if (why.empty() && !plan.empty() && m_losses_fn) {
-        auto l = m_losses_fn(w);
+        auto l = m_losses_fn(first);
         if (!l) why = sentence(l.error().message);
         else losses = *l;
     }
@@ -534,14 +572,33 @@ void DesignTableWindow::refresh() {
 
     const bool ok = why.empty() && !plan.empty() && (losses.empty() || m_understand.get_active());
     m_ok.set_sensitive(ok);
-    m_ok.set_tooltip_text(ok ? "Run it -- one step" : !why.empty() ? why
+    m_ok.set_tooltip_text(ok ? (two ? "Run it -- two steps" : "Run it -- one step") : !why.empty() ? why
                               : plan.empty() ? "Nothing to change yet" : "Tick “I understand” first");
     m_reason.set_text("");   // a refusal from the last Apply; any edit clears it
 }
 
 void DesignTableWindow::on_apply() {
     if (!m_ok.get_sensitive() || !m_apply_fn) return;
-    auto r = m_apply_fn(want());
+    const auto w = want();
+    if (two_steps()) {
+        if (auto r1 = m_apply_fn(first_step()); !r1) {
+            m_reason.add_css_class("error");
+            m_reason.set_text("Not changed: " + sentence(r1.error().message));
+            return;
+        }
+        if (auto r2 = m_apply_fn(w); !r2) {
+            // The first step stands (Ctrl+Z undoes it); this window's picture
+            // is stale now, so it closes on the next look.
+            m_reason.add_css_class("error");
+            m_reason.set_text("The first step was applied; the new field was not: " + sentence(r2.error().message) +
+                              " Cancel, and open Design… again.");
+            m_ok.set_sensitive(false);
+            return;
+        }
+        set_visible(false);
+        return;
+    }
+    auto r = m_apply_fn(w);
     if (!r) {
         m_reason.add_css_class("error");
         m_reason.set_text("Not changed: " + sentence(r.error().message));

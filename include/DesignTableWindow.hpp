@@ -71,6 +71,10 @@ private:
     bool field_going(const std::string& orig) const;
     db::TableDef want() const;
     std::string why_not() const;           // the window's own refusals, in words ("" = fine)
+    // A delete + a same-kind add reads as a rename -- Apply runs it as two
+    // steps: first_step() (everything but the new fields), then want().
+    bool two_steps() const;
+    db::TableDef first_step() const;
     // s007c: the field a row asks for (its type, required, default); the
     // reason in words when the typed default won't do.
     std::expected<db::ColumnDef, std::string> field_of(const FieldRow& f) const;
@@ -86,6 +90,7 @@ private:
     std::vector<IndexRow>   m_indexes;
     std::vector<std::string> m_pick_names;   // the New Index picker's rows
     bool                    m_resetting = false;
+    Gtk::Label*             m_note = nullptr;
 
     widgets::Label          m_title;
     widgets::Box            m_field_box;
