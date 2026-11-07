@@ -1777,6 +1777,80 @@ void test_links(Journal& j, Gate& g, Engine* e, const std::string& P) {
     }
 }
 
+
+// ── s009: the solution document ──────────────────────────────────────────────
+void test_solution_pure(const fs::path& dir) {
+    core::SavedConnection f;
+    f.engine = "sqlite";
+    f.path = (dir / "shop.sqlite").string();
+    check("solution: a file's sits beside it (shop.sqlite -> shop.acorn)",
+          core::solution_path(f, "/x/acorn", true) == (dir / "shop.acorn").string(), core::solution_path(f, "/x/acorn", true));
+    const auto away = core::solution_path(f, "/x/acorn", false);
+    check("solution: ... in Acorn's own folder when its folder can't be written",
+          away.rfind("/x/acorn/solutions/shop-", 0) == 0 && away.size() > 6 && away.substr(away.size() - 6) == ".acorn", away);
+    core::SavedConnection srv;
+    srv.engine = "postgres"; srv.host = "db.lan"; srv.port = 5433; srv.database = "shop"; srv.user = "scott";
+    const auto sp = core::solution_path(srv, "/x/acorn", true);
+    check("solution: a server's in Acorn's own folder, a safe name from its key",
+          sp.rfind("/x/acorn/solutions/", 0) == 0 && sp.find(' ') == std::string::npos && sp.find(':', 1) == std::string::npos, sp);
+
+    core::Solution s;
+    s.points_at = srv;
+    s.boxes["orders"] = {400.5, 24};
+    s.boxes["“odd” name"] = {24, 300};
+    const auto file = (dir / "round.acorn").string();
+    const bool saved = core::save_solution(file, s);
+    auto back = core::load_solution(file);
+    check("solution: round-trips (points at a server, boxes by table, odd names)", saved && back && *back == s, "");
+    const std::string text = slurp(file);
+    check("solution: holds no password field", text.find("password") == std::string::npos && text.find("\"acorn\": 1") != std::string::npos, text);
+    { std::ofstream g(dir / "garbage.acorn"); g << "{ not json"; }
+    { std::ofstream g(dir / "newer.acorn"); g << "{\"acorn\": 99, \"boxes\": {}}"; }
+    check("solution: garbage / a newer version / no file -> none (never half-read)",
+          !core::load_solution((dir / "garbage.acorn").string()) && !core::load_solution((dir / "newer.acorn").string()) &&
+          !core::load_solution((dir / "missing.acorn").string()), "");
+    check("solution: a missing folder is made on save (Acorn's solutions/)",
+          core::save_solution((dir / "deep" / "solutions" / "a.acorn").string(), s) && fs::exists(dir / "deep" / "solutions" / "a.acorn"), "");
+    check("solution: folder_writable", core::folder_writable(dir.string()) && !core::folder_writable((dir / "nope").string()), "");
+}
+
+// s009: Move “t” -- the solution changes, saved; the database is never touched;
+// a read-only connection can still place boxes.
+void test_boxes(Engine* e, const ConnectParams& ro, const std::string& P) {
+    auto c = e->open(ro);
+    if (!c) { check(P + "boxes: open read-only", false, c.error().message); return; }
+    Gate g(std::move(*c));
+    Journal j(g, e->dialect(), e->caps());
+    core::Solution sol;
+    int saves = 0;
+    bool fail_save = false;
+    j.store().set_solution(&sol, [&] { ++saves; return !fail_save; });
+    auto m = verbs::move_box(j, "customers", 400, 24);
+    check(P + "boxes: Move on a READ-ONLY connection -- a step, saved, nothing written to the database",
+          m && sol.boxes.count("customers") && sol.boxes["customers"] == core::BoxPlace{400, 24} && saves == 1 &&
+          j.undo_label() == "Move “customers”" && g.strays() == 0, m ? j.undo_label() : m.error().message);
+    auto m2 = verbs::move_box(j, "customers", 500, 60);
+    auto u = j.undo();
+    check(P + "boxes: Ctrl+Z moves it back to where it was", u && sol.boxes["customers"] == core::BoxPlace{400, 24},
+          u ? "" : u.error().message);
+    auto u2 = j.undo();
+    check(P + "boxes: ... and again: not placed (the automatic layout has it)", u2 && !sol.boxes.count("customers"),
+          u2 ? "" : u2.error().message);
+    auto r = j.redo();
+    check(P + "boxes: redo places it again", r && sol.boxes.count("customers"), r ? "" : r.error().message);
+    const auto n = j.size();
+    auto same = verbs::move_box(j, "customers", 400, 24);
+    check(P + "boxes: moved where it already is -- no step", same && j.size() == n, "");
+    fail_save = true;
+    auto bad = verbs::move_box(j, "customers", 1, 1);
+    check(P + "boxes: a save that fails -- no step, the place kept as it was",
+          !bad && j.size() == n && sol.boxes["customers"] == core::BoxPlace{400, 24}, bad ? "moved!" : bad.error().message);
+    Journal none(g, e->dialect(), e->caps());
+    auto ns = verbs::move_box(none, "customers", 1, 1);
+    check(P + "boxes: no solution -- refused in words", !ns && ns.error().code == Error::Code::Unsupported, ns ? "moved!" : "");
+    (void)m2;
+}
+
 void test_journal(Engine* e, const ConnectParams& rw, const ConnectParams& ro, const std::string& P0) {
     const std::string P = P0 + ": journal: ";
     auto opened = e->open(rw);
@@ -1793,6 +1867,11 @@ void test_journal(Engine* e, const ConnectParams& rw, const ConnectParams& ro, c
           !has_table(g, "acorn_stray"), stray ? "written!" : stray.error().message);
     check(P + "the gate lets reads through", g.query("SELECT 1").has_value(), "");
 
+    // s009: the walk's journal keeps its boxes in a solution of its own.
+    core::Solution walk_solution;
+    int walk_saves = 0;
+    j.store().set_solution(&walk_solution, [&] { ++walk_saves; return true; });
+
     // Walk every verb the UI offers: a step, nothing strays, undo puts it back
     // exactly, redo reproduces it exactly.
     for (const auto& v : verbs::all()) {
@@ -1801,18 +1880,26 @@ void test_journal(Engine* e, const ConnectParams& rw, const ConnectParams& ro, c
             check(P + "verb " + v.name + ": its fixture, through the door", su.has_value(), su ? "" : su.error().message);
         }
         const auto before = snapshot(g);
+        const auto sol_before = walk_solution;
         const auto steps = j.size();
         auto r = v.run(j);
         const auto after = snapshot(g);
-        check(P + "verb " + v.name + ": runs, is one step, changes the database",
-              r.has_value() && j.size() == steps + 1 && j.can_undo() && after != before,
-              r ? "" : r.error().message);
+        const auto sol_after = walk_solution;
+        if (v.local) {   // s009: the solution changes, the database never does
+            check(P + "verb " + v.name + ": runs, is one step, changes the solution -- not the database",
+                  r.has_value() && j.size() == steps + 1 && j.can_undo() && after == before && sol_after != sol_before,
+                  r ? "" : r.error().message);
+        } else {
+            check(P + "verb " + v.name + ": runs, is one step, changes the database",
+                  r.has_value() && j.size() == steps + 1 && j.can_undo() && after != before,
+                  r ? "" : r.error().message);
+        }
         auto u = j.undo();
         check(P + "verb " + v.name + ": undo puts the schema back exactly",
-              u.has_value() && snapshot(g) == before && j.can_redo(), u ? "" : u.error().message);
+              u.has_value() && snapshot(g) == before && walk_solution == sol_before && j.can_redo(), u ? "" : u.error().message);
         auto re = j.redo();
         check(P + "verb " + v.name + ": redo reproduces it exactly",
-              re.has_value() && snapshot(g) == after, re ? "" : re.error().message);
+              re.has_value() && snapshot(g) == after && walk_solution == sol_after, re ? "" : re.error().message);
         (void)j.undo();
     }
     check(P + "no verb wrote outside the door", j.strays() == 1, std::to_string(j.strays()) + " strays");
@@ -1988,6 +2075,7 @@ void test_server(Engine* e, const char* env_name, const char* admin_db) {
     T.ro.read_only = true;
     test_suite(T);
     test_journal(e, T.rw, T.ro, e->id());   // s005b: the door, in the same throwaway database
+    test_boxes(e, T.ro, std::string(e->id()) + ": ");   // s009
 
     auto a2 = e->open(admin);
     std::string why = a2 ? "" : a2.error().message;
@@ -2035,6 +2123,8 @@ void db_tests(CheckFn fn, int& skip_count) {
         T.rw.create = true; T.rw.read_only = false;
         T.ro.path = T.rw.path;                       // read_only defaults to true
         test_suite(T);
+        test_solution_pure(tmp.p);            // s009
+        test_boxes(e, T.ro, "sqlite: ");      // s009: boxes move on a read-only connection
         {   // s005b: the door, on its own fresh fixture file
             Target J = T;
             J.rw.path = (tmp.p / "journal.sqlite").string();

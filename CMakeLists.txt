@@ -89,6 +89,8 @@ target_include_directories(acorn-engine-badabi PRIVATE include)
 add_library(acorn_core STATIC
     # s004b: recent connections (no passwords) + their JSON pump.
     src/core/Connections.cpp
+    # s009: the .acorn solution document -- where it lives, its JSON pump.
+    src/core/Solution.cpp
     # s005c: the skin's base colour -- presets, the recipe, the saved choice.
     src/core/Ground.cpp
     src/core/TextMap.cpp
@@ -183,6 +185,7 @@ add_executable(acorn
     src/Shell_tables.cpp
     src/Shell_browse.cpp
     src/Shell_records.cpp
+    src/Shell_graph.cpp
     src/AboutWindow.cpp
     src/NewTableWindow.cpp
     src/DesignTableWindow.cpp

@@ -53,6 +53,7 @@ void Shell::bind_journal() {  // journal: win.undo / win.redo / win.new-table + 
 void Shell::attach_journal(db::Engine* e) {  // journal: a new connection -> a fresh journal
     m_conn_engine = e;
     m_journal.reset();
+    m_marks.clear();   // s008b: marks belong to the connection
     if (m_conn && e) {
         m_journal = std::make_unique<db::Journal>(*m_conn, e->dialect(), e->caps());
         m_journal->set_on_change([this] { sync_undo(); });
@@ -97,6 +98,7 @@ void Shell::journal_note(const std::string& text, const char* kind) {  // journa
     if (kind && *kind) m_journal_note.add_css_class(kind);
     if (!text.empty()) set_status(text, kind);   // the Connect page says it too
     browse_note(text, kind);                      // s006c: and Browse
+    graph_note(text, kind);                       // s008b: and the Graph
 }
 
 void Shell::reload_schema(const std::string& show) {  // journal: re-read, repaint, select `show`
@@ -109,6 +111,7 @@ void Shell::reload_schema(const std::string& show) {  // journal: re-read, repai
         return;
     }
     m_schema = std::move(*s);
+    refresh_marks();   // s008b: a fixed record drops its mark
     if (!show.empty()) m_table_sel = show;
     show_schema();
     rebuild_table_list();

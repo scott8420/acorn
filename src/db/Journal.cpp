@@ -1063,6 +1063,7 @@ std::string Store::describe(const Id& id) {
     if (id.rfind("new:", 0) == 0) return "a new record in " + curly(id.substr(4));
     std::string column;
     if (parse_field_id(id, table, column)) return "the values of " + curly(table) + "." + curly(column);
+    if (is_box(id)) return curly(id.substr(4)) + "'s place in the Graph";
     return curly(name_of(id));
 }
 
@@ -1092,6 +1093,13 @@ std::optional<Record> Store::get(const Id& id) const {
     if (id.rfind("table:", 0) == 0) return get_table(name_of(id));
     if (id.rfind("row:", 0) == 0) return get_row(id);
     if (id.rfind("field:", 0) == 0) return get_field(id);
+    if (is_box(id)) {   // s009: from the solution, not the database
+        if (!m_solution) return std::nullopt;
+        const std::string t = id.substr(4);
+        auto it = m_solution->boxes.find(t);
+        if (it == m_solution->boxes.end()) return std::nullopt;
+        return BoxDef{t, it->second.x, it->second.y};
+    }
     return std::nullopt;   // "new:..." -- a declaration, never a record
 }
 
@@ -1205,6 +1213,11 @@ void Store::put_field(const Id& id, const FieldData* v) {
     if (!v->values.empty() && !same_key(table, *t, v->key_fields)) return;
     const auto got = get_field(id);
     if (failed()) return;
+    // get_field re-reads the schema: `t` pointed into the old one (s009 fix --
+    // a use-after-free the MariaDB suite hit now and then).
+    t = table_info(table);
+    if (failed()) return;
+    if (!t || !t->column(column)) { fail(Error::Code::Changed, curly(table) + "." + curly(column) + " is not there"); return; }
     const FieldData live = got ? std::get<FieldData>(*got) : FieldData{table, column, pk, {}, {}};
     if (live == *v) return;
     // s007c: values kept from another kind of field (redo of a type change puts
@@ -1268,6 +1281,9 @@ bool Store::write_back(const std::string& table, const ColumnDef& from, const Co
     const FieldType ft = map_type(m_dialect, from.decl_type), tt = map_type(m_dialect, to.decl_type);
     const auto now = get_field(field_id(table, to.name));
     if (failed()) return false;
+    t = table_info(table);   // get_field re-read the schema; `t` pointed into the old one (s009 fix)
+    if (failed()) return false;
+    if (!t || !t->column(to.name)) { fail(Error::Code::Changed, curly(table) + "." + curly(to.name) + " is not there"); return false; }
     const FieldData live = now ? std::get<FieldData>(*now) : FieldData{table, to.name, t->primary_key(), {}, {}};
     auto find = [](const FieldData& f, const std::vector<db::Value>& key) -> const db::Value* {
         for (std::size_t i = 0; i < f.keys.size(); ++i) if (f.keys[i] == key) return &f.values[i];
@@ -1349,6 +1365,19 @@ void Store::put(const Id& id, const std::optional<Record>& v) {
     if (id.rfind("field:", 0) == 0) {
         if (v && !std::holds_alternative<FieldData>(*v)) { fail(Error::Code::Internal, id + " given a table or record"); return; }
         put_field(id, v ? &std::get<FieldData>(*v) : nullptr);
+        return;
+    }
+    if (is_box(id)) {   // s009: the solution, saved whole; the database is never touched
+        if (v && !std::holds_alternative<BoxDef>(*v)) { fail(Error::Code::Internal, id + " given a table or record"); return; }
+        if (!m_solution) { fail(Error::Code::Unsupported, "there is no solution to keep the Graph's boxes in"); return; }
+        const std::string t = id.substr(4);
+        const auto before = m_solution->boxes;
+        if (v) m_solution->boxes[t] = {std::get<BoxDef>(*v).x, std::get<BoxDef>(*v).y};
+        else   m_solution->boxes.erase(t);
+        if (m_solution->boxes != before && m_save_solution && !m_save_solution()) {
+            m_solution->boxes = before;
+            fail(Error::Code::Internal, "could not save the solution file");
+        }
         return;
     }
     fail(Error::Code::Internal, "unknown record " + id);
@@ -1611,6 +1640,14 @@ std::size_t not_fields(const std::vector<Store::Id>& ids) {
 }  // namespace
 
 std::expected<void, Error> Journal::begin(const std::vector<Store::Id>& ids) {
+    // s009: a step of box places touches only the solution -- no transaction,
+    // and a read-only database doesn't stop it.
+    const bool local = !ids.empty() && std::all_of(ids.begin(), ids.end(), [](const auto& id) { return Store::is_box(id); });
+    if (local) {
+        m_store.clear_failed();
+        m_txn = true;
+        return {};
+    }
     if (m_gate.read_only())
         return std::unexpected(Error{Error::Code::ReadOnly, "this database is open read-only"});
     m_store.clear_failed();
@@ -2414,6 +2451,11 @@ std::expected<std::vector<Store::Id>, Error> unmatched(Journal& j, const std::st
     return out;
 }
 
+std::expected<void, Error> move_box(Journal& j, const std::string& table, double x, double y) {
+    const auto id = Store::box_id(table);
+    return j.run("Move " + curly(table), {id}, [&](Store& s) { s.put(id, BoxDef{table, x, y}); });
+}
+
 std::expected<std::vector<std::string>, Error> preview(Journal& j, const TableDef& want) {
     Store& st = j.store();
     st.forget_schema();
@@ -2645,6 +2687,8 @@ const std::vector<Verb>& all() {
              if (!row) return std::unexpected(row.error());
              return delete_record(j, *row);
          }, [](Journal& j) { return link_fixture(j, OnDelete::Cascade); }},
+        // s009 -- the solution: a box moved in the Graph (no database write).
+        {"Move Box", [](Journal& j) { return move_box(j, kDesign, 40, 80); }, design_fixture, true},
         {"Delete Record (Set Empty)", [](Journal& j) -> std::expected<void, Error> {
              auto row = newest_parent(j);
              if (!row) return std::unexpected(row.error());

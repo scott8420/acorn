@@ -462,6 +462,7 @@ void Shell::on_connect_done() {  // connect: back on the UI thread
     m_conn = std::make_unique<db::Gate>(std::move(conn));
     m_writable = writable && !m_conn->read_only();
     attach_journal(m_pending_engine);
+    open_solution(m_pending);   // s009: its .acorn -- box places in the Graph
 
     // It worked: remember the connection (never the password), and settle the
     // keyring the way the checkbox says.
@@ -499,6 +500,7 @@ void Shell::on_connect_done() {  // connect: back on the UI thread
 }
 
 void Shell::show_schema() {  // connect: paint the table list
+    paint_graph();   // s008b: the graph follows the schema
     while (auto* child = m_tables.get_first_child()) m_tables.remove(*child);
     if (m_schema.tables.empty()) {
         auto empty = Gtk::make_managed<Gtk::Label>(

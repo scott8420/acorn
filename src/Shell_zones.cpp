@@ -51,12 +51,16 @@ void Shell::build_pages() {  // zone: Acorn's areas
     build_connect_page();
     build_tables_page();    // s004c
     build_browse_page();    // s006b
+    build_graph_page();     // s008b
 
     // Per-area tint hooks (REQUIREMENTS §2): the window carries .page-<area>
     // for whichever area is showing.
     m_stack.property_visible_child_name().signal_changed().connect([this] {
-        for (const char* a : {"page-connect", "page-tables", "page-browse"}) remove_css_class(a);
+        for (const char* a : {"page-connect", "page-tables", "page-browse", "page-graph"}) remove_css_class(a);
         add_css_class("page-" + std::string(m_stack.get_visible_child_name()));
+        // s008b: the graph is painted fresh when it comes into view (marks
+        // and records may have changed in Browse since).
+        if (m_stack.get_visible_child_name() == "graph") paint_graph();
     });
 }
 

@@ -49,11 +49,16 @@ Shell::Shell()
       m_browse_note("shell.browse.note"),
       m_browse_new("shell.browse.new_record"),
       m_browse_delete("shell.browse.delete_record"),
-      m_record_scroll("shell.browse.record") {
+      m_record_scroll("shell.browse.record"),
+      m_graph_page("shell.graph.page", Gtk::Orientation::VERTICAL, 12),
+      m_graph_where("shell.graph.where"),
+      m_graph_note("shell.graph.note"),
+      m_graph_scroll("shell.graph.scroll") {
     set_name("shell.window");
 }
 
 Shell::~Shell() {
+    m_graph_pop.unparent();   // s008b: parented by hand, so let go by hand
     *m_alive = false;   // keyring callbacks still in flight become no-ops
     // A connect in flight finishes on its own (it has a timeout); wait for it
     // so no thread outlives the loader whose plugin code it is running.

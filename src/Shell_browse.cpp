@@ -235,6 +235,12 @@ void Shell::load_browse_page(bool keep_panel) {  // browse: read the page, repai
                         (m_browse_data.total == 1 ? "" : "s");
     if (!m_writable)       where += " · read-only";
     else if (!why.empty()) where += " · read-only: " + why;
+    // s008b: records that stop a link are marked -- say so, and how to read
+    // them. Re-read each time: a record fixed in the panel drops its mark.
+    if (m_marks.count(t->name)) refresh_marks();
+    if (auto m = m_marks.find(t->name); m != m_marks.end() && !m->second.ids.empty())
+        where += " · ⚠ " + std::to_string(m->second.ids.size()) + (m->second.ids.size() == 1 ? " record points" : " records point") +
+                 " at a “" + m->second.parent + "” record that isn't there (marked -- hover one to see why)";
     m_browse_where.set_text(where);
     // Keep the picked record if it is on this page.
     m_browse_sel_index = -1;
@@ -284,7 +290,20 @@ void Shell::paint_cards() {  // browse: one calm card per record
         card->add_css_class("acorn-card");
         auto head = text(db::card_title(*t, row), "acorn-card-title");
         head->set_ellipsize(Pango::EllipsizeMode::END);
-        card->append(*head);
+        const std::string mark = r < m_browse_data.ids.size() ? mark_of(t->name, m_browse_data.ids[r]) : std::string{};
+        if (!mark.empty()) {   // s008b: an amber edge and a hint
+            card->add_css_class("acorn-marked");
+            auto line = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
+            head->set_hexpand(true);
+            line->append(*head);
+            auto m = text("⚠", "acorn-mark");
+            m->set_tooltip_text(mark);
+            line->append(*m);
+            line->set_tooltip_text(mark);
+            card->append(*line);
+        } else {
+            card->append(*head);
+        }
         auto g = Gtk::make_managed<Gtk::Grid>();
         g->set_column_spacing(10);
         g->set_row_spacing(3);
@@ -357,8 +376,14 @@ void Shell::paint_grid() {  // browse: the dense grid, sortable headers
     list->set_selection_mode(Gtk::SelectionMode::SINGLE);
     list->add_css_class("acorn-grid-rows");
     list->set_name("shell.browse.grid_view");
-    for (const auto& row : m_browse_data.rows) {
+    for (std::size_t r = 0; r < m_browse_data.rows.size(); ++r) {
+        const auto& row = m_browse_data.rows[r];
         auto line = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 0);
+        const std::string mark = r < m_browse_data.ids.size() ? mark_of(t->name, m_browse_data.ids[r]) : std::string{};
+        if (!mark.empty()) {   // s008b: an amber edge and a hint
+            line->add_css_class("acorn-marked");
+            line->set_tooltip_text(mark);
+        }
         for (std::size_t c = 0; c < t->columns.size() && c < row.size(); ++c) {
             const std::string shown = db::cell_text(row[c], t->columns[c].type);
             auto v = value_label(shown, 24);

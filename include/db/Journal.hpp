@@ -61,6 +61,7 @@
 #pragma once
 
 #include "core/Undo.hpp"
+#include "core/Solution.hpp"
 #include "db/Engine.hpp"
 
 #include <cstdint>
@@ -157,7 +158,16 @@ struct FieldData {
     bool operator==(const FieldData&) const = default;
 };
 
-using Record = std::variant<TableDef, RowDef, FieldData>;
+// s009: where a table's box sits in the Graph -- kept in the SOLUTION (the
+// .acorn file), never in the database. A step like any other, so Ctrl+Z
+// moves it back; absent = not placed (the automatic layout places it).
+struct BoxDef {
+    std::string table;
+    double      x = 0, y = 0;
+    bool operator==(const BoxDef&) const = default;
+};
+
+using Record = std::variant<TableDef, RowDef, FieldData, BoxDef>;
 
 // ── the DDL writer: one place, per dialect, shared by preview and act ─────────
 // The New Table window shows exactly the string the store will run.
@@ -244,6 +254,12 @@ public:
     // One field's values (s007): what Delete Field declares to keep them.
     static Id field_id(const std::string& table, const std::string& column);
     static bool parse_field_id(const Id& id, std::string& table, std::string& column);
+    // s009: a table's box in the Graph -- a record of the solution, not the database.
+    static Id box_id(const std::string& table) { return "box:" + table; }
+    static bool is_box(const Id& id) { return id.rfind("box:", 0) == 0; }
+    // The solution the box records live in, and how to save it (false: not
+    // saved -- the step is refused). None set: a box step is refused.
+    void set_solution(core::Solution* s, std::function<bool()> save) { m_solution = s; m_save_solution = std::move(save); }
     // "“customers” record 7" -- for messages.
     static std::string describe(const Id& id);
 
@@ -311,6 +327,8 @@ private:
     std::function<bool()> m_settle;
     std::vector<Id>       m_allowed;
     int                   m_strays = 0;
+    core::Solution*       m_solution = nullptr;   // s009
+    std::function<bool()> m_save_solution;
 };
 
 // ── the journal ───────────────────────────────────────────────────────────────
@@ -468,6 +486,11 @@ std::expected<std::vector<Store::Id>, Error> unmatched(Journal& j, const std::st
                                                        const std::vector<std::string>& fields,
                                                        const std::string& parent, std::size_t limit = 1000);
 
+// s009 -- Move “t”: the table's box to (x, y) in the Graph. Kept in the
+// solution, not the database: works on a read-only connection too. Moving it
+// where it already is: no step.
+std::expected<void, Error> move_box(Journal& j, const std::string& table, double x, double y);
+
 // What a design step would do to the live table, as the SQL put() will run
 // (the designer's preview): `want` is the table as the designer has it.
 std::expected<std::vector<std::string>, Error> preview(Journal& j, const TableDef& want);
@@ -479,6 +502,7 @@ struct Verb {
     // What the fixture needs first (a table, a record) -- run through the door
     // before the walk counts. Optional.
     std::function<std::expected<void, Error>(Journal&)> setup = {};
+    bool local = false;   // s009: changes the solution, not the database (the walk checks the solution)
 };
 const std::vector<Verb>& all();
 }  // namespace verbs

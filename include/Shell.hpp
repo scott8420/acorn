@@ -3,12 +3,15 @@
 #include "core/Connections.hpp"  // s004b: recent connections
 #include "Keyring.hpp"             // s004b: passwords in the GNOME keyring
 #include "core/Ground.hpp"         // s005c: the skin's base colour
+#include "core/Solution.hpp"       // s009: the .acorn solution document
 #include <gtkmm/cssprovider.h>
 #include "db/Loader.hpp"     // s004: engine plugins
 #include "db/Schema.hpp"
 #include "db/Journal.hpp"   // s005b: the door
 #include "db/Browse.hpp"    // s006b: a table's records, a page at a time
 #include <gtkmm/togglebutton.h>
+#include <gtkmm/popover.h>
+#include <map>
 
 #include <glibmm/dispatcher.h>
 #include <gtkmm/dropdown.h>
@@ -59,6 +62,7 @@
 //   "Where is a table's detail drawn?"  -> Shell_tables.cpp   (show_table)
 //   "Where does a write go / undo run?" -> Shell_journal.cpp  (on_new_table / on_undo)
 //   "Where are records shown?"          -> Shell_browse.cpp   (paint_browse)
+//   "Where are links drawn / made?"     -> Shell_graph.cpp    (paint_graph / on_graph_drop)
 // ─────────────────────────────────────────────────────────────────────────────
 namespace acorn {
 
@@ -147,6 +151,24 @@ private:
     bool browse_writable() const;                // category: records: Acorn-made + a table with a key
     void browse_note(const std::string& text, const char* kind);  // category: records: what a step did, under the Browse title
     const db::Value* browse_value(const std::string& column) const;  // category: records: the picked record's field as last read
+
+    // ── graph (s008b) -- src/Shell_graph.cpp ────────────────────────────────
+    // Tables as boxes, links as lines; a drag makes a link, a line's handle
+    // changes or unlinks it. Every change is a verb through m_journal.
+    void build_graph_page();                     // category: graph: the Graph area
+    void paint_graph();                          // category: graph: boxes laid out by depth, lines drawn
+    void graph_note(const std::string& text, const char* kind);  // category: graph: under the Graph title
+    void on_graph_drop(const std::string& st, const std::string& sf, const std::string& dt, const std::string& df,
+                       Gtk::Widget& anchor);     // category: graph: a drop -- which table is the parent?
+    void offer_link(const std::string& child, const std::string& field, const std::string& parent,
+                    Gtk::Widget& anchor);        // category: graph: the popover for a new link
+    void offer_line(std::size_t idx);            // category: graph: a line's handle -> change / unlink
+    void build_link_popover(const std::string& child, const std::vector<std::string>& fields, const std::string& parent,
+                            db::OnDelete rule, bool existing);  // category: graph: the popover's body
+    void refresh_marks();                        // category: graph: marked records re-read (fixed ones drop off)
+    std::string mark_of(const std::string& table, const std::string& id) const;  // category: graph: why a record is marked ("" = not)
+    void paint_marks_note();                     // category: graph: Browse shows the marks
+    void open_solution(const core::SavedConnection& c);  // category: graph: s009 -- the connection's .acorn, read (or a fresh one)
 
     // ── ground (s005c) -- src/Shell_ground.cpp ──────────────────────────────
     void bind_ground();                          // category: ground: win.ground (radio) + the saved choice + the provider
@@ -266,6 +288,32 @@ private:
     unsigned                        m_view_gen = 0;   // the same, for the cards / grid (a torn-down list says "nothing selected")
     std::vector<std::pair<std::string, Gtk::Widget*>> m_record_inputs;  // new mode: column -> Entry / CheckButton
     Glib::RefPtr<Gio::SimpleAction> m_new_record_action, m_delete_record_action;
+
+    // s008b -- the Graph area.
+    struct GraphLine {
+        std::string child, parent;
+        std::vector<std::string> fields, refs;
+        db::OnDelete rule = db::OnDelete::Restrict;
+        struct { double x = 0, y = 0, w = 0, h = 0; } mutable hit;   // the handle, as last drawn (canvas coords)
+    };
+    // Records that stop a link: by child table, the records and why.
+    struct Mark {
+        std::vector<std::string> ids;
+        std::string parent;
+        std::vector<std::string> fields;
+        std::string why;
+    };
+    widgets::Box                    m_graph_page;
+    widgets::Label                  m_graph_where, m_graph_note;
+    widgets::ScrolledWindow         m_graph_scroll;
+    Gtk::Popover                    m_graph_pop;
+    std::vector<GraphLine>          m_graph_lines;
+    std::map<std::pair<std::string, std::string>, Gtk::Widget*> m_graph_rows;   // (table, field) -> its row
+    std::map<std::string, Mark>     m_marks;
+    core::Solution                  m_solution;        // s009: the open connection's .acorn (box places)
+    std::string                     m_solution_path;
+    unsigned                        m_graph_gen = 0;
+    Gtk::Widget*                    m_graph_canvas = nullptr;   // the Fixed of boxes (handles are hit on it)
 
     // s005b -- the Edit section of the menu (re-labelled per step) and the
     // actions held so they can be greyed.
