@@ -78,7 +78,22 @@ Glib::RefPtr<Gio::Menu> Shell::build_menu() {  // zone: hamburger model
     diag->append("Dump registry", "win.dump-registry");
     menu->append_section(diag);
 
+    // s005c: the ground colour -- GNOME's accent presets (a radio on
+    // win.ground) and Custom..., which opens the colour picker.
+    auto ground = Gio::Menu::create();
+    auto presets = Gio::Menu::create();
+    for (const auto& p : core::ground_presets()) {
+        auto item = Gio::MenuItem::create(p.name, "");
+        item->set_action_and_target("win.ground", Glib::Variant<Glib::ustring>::create(p.id));
+        presets->append_item(item);
+    }
+    ground->append_section(presets);
+    auto custom = Gio::MenuItem::create("Custom\u2026", "");
+    custom->set_action_and_target("win.ground", Glib::Variant<Glib::ustring>::create("custom"));
+    ground->append_item(custom);
+
     auto app = Gio::Menu::create();
+    app->append_submenu("Base Color", ground);
     app->append("About Acorn", "win.about");
     app->append("Quit", "win.quit");
     menu->append_section(app);

@@ -2,6 +2,8 @@
 #include "widgets/Widgets.hpp"
 #include "core/Connections.hpp"  // s004b: recent connections
 #include "Keyring.hpp"             // s004b: passwords in the GNOME keyring
+#include "core/Ground.hpp"         // s005c: the skin's base colour
+#include <gtkmm/cssprovider.h>
 #include "db/Loader.hpp"     // s004: engine plugins
 #include "db/Schema.hpp"
 #include "db/Journal.hpp"   // s005b: the door
@@ -117,6 +119,12 @@ private:
     bool focus_is_text() const;                  // category: journal: a text box keeps its own Ctrl+Z
     void journal_note(const std::string& text, const char* kind);  // category: journal: what a step did, under the Tables title
 
+    // ── ground (s005c) -- src/Shell_ground.cpp ──────────────────────────────
+    void bind_ground();                          // category: ground: win.ground (radio) + the saved choice + the provider
+    void apply_ground();                         // category: ground: the choice -> the style provider
+    void on_ground(const std::string& id);       // category: ground: a preset, or "custom" -> the colour picker
+    std::string ground_file() const;             // category: ground: ~/.config/acorn/ground.json
+
     // ── helpers ────────────────────────────────────────────────────────────
     std::string connections_file() const;        // category: helper: the XDG path (UI-side resolution)
     void remember_connection(const core::SavedConnection& c);  // category: helper: push + persist + repaint
@@ -205,6 +213,12 @@ private:
     Glib::RefPtr<Gio::Menu>         m_edit_menu;
     Glib::RefPtr<Gio::SimpleAction> m_undo_action, m_redo_action, m_new_table_action;
     std::unique_ptr<NewTableWindow> m_new_table_win;
+
+    // s005c -- the ground: the saved choice, its radio action, and a style
+    // provider one step above the skin that redefines the skin's colours.
+    core::GroundChoice              m_ground;
+    Glib::RefPtr<Gio::SimpleAction> m_ground_action;
+    Glib::RefPtr<Gtk::CssProvider>  m_ground_css;
     std::string                     m_table_sel;     // the shown table ("" = none)
     bool                            m_table_painting = false;
 

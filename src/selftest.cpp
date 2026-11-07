@@ -13,6 +13,7 @@
 //   cmake --build build --target acorn_selftest && ./build/acorn_selftest
 
 #include "core/Connections.hpp"
+#include "core/Ground.hpp"
 #include "Keyring.hpp"
 
 #include <glib.h>
@@ -31,6 +32,8 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include <unistd.h>
+#include <cmath>
 
 namespace core = acorn::core;
 
@@ -420,6 +423,58 @@ int main() {
         std::vector<core::FlatLine> no_prose = {{"Title", false, false}};
         check("textmap: no prose -> false", !core::map_range(no_prose, 0, 3, s, e));
     }
+    // -- Ground: the skin's base colour (s005c) ---------------------------------
+    {
+        std::cout << "\n-- ground --\n";
+        namespace c = acorn::core;
+        check("ground: hex round-trips, junk refused",
+              c::parse_hex("#3584e4") == c::Rgb{0x35, 0x84, 0xe4} && c::to_hex({0x35, 0x84, 0xe4}) == "#3584e4" &&
+              c::parse_hex("3584E4").has_value() && !c::parse_hex("#35x4e4") && !c::parse_hex("#fff"));
+        bool presets_ok = c::ground_presets().size() == 9 && c::ground_preset(c::kDefaultGround);
+        for (auto& p : c::ground_presets()) presets_ok = presets_ok && c::ground_preset(p.id) == &p;
+        check("ground: nine GNOME presets, default slate", presets_ok);
+        // The recipe reproduces the s004 Forest skin from a forest base.
+        const auto f = c::derive({0x1f, 0x5a, 0x3a});
+        const auto near = [](c::Rgb a, c::Rgb b) {
+            return std::abs(a.r - b.r) <= 6 && std::abs(a.g - b.g) <= 6 && std::abs(a.b - b.b) <= 6; };
+        check("ground: the recipe reproduces Forest's gradient + panel",
+              near(f.hi, {0x1f, 0x5a, 0x3a}) && near(f.lo, {0x0b, 0x22, 0x16}) && near(f.panel, {0x14, 0x27, 0x1c}),
+              c::to_hex(f.hi) + " " + c::to_hex(f.lo) + " " + c::to_hex(f.panel));
+        // Legible on every preset: ink far lighter than the panel, gradient dark.
+        bool legible = true; std::string bad;
+        const auto lum = [](c::Rgb x) { return 0.2126 * x.r + 0.7152 * x.g + 0.0722 * x.b; };
+        for (auto& p : c::ground_presets()) {
+            const auto pal = c::derive(p.base);
+            if (lum(pal.ink) - lum(pal.panel) < 180 || lum(pal.ink_dim) - lum(pal.panel) < 110 || lum(pal.hi) > 90) {
+                legible = false; bad = p.id;
+            }
+        }
+        check("ground: every preset keeps ink legible on its panel", legible, bad);
+        const auto grey = c::derive({0x80, 0x80, 0x80});
+        check("ground: a grey base gives a grey skin", grey.hi.r == grey.hi.g && grey.hi.g == grey.hi.b);
+        const auto css = c::ground_css(c::derive({0x35, 0x84, 0xe4}));
+        check("ground: css overrides the five skin names",
+              css.find("@define-color acorn_forest_hi #") != std::string::npos &&
+              css.find("acorn_forest_lo") != std::string::npos && css.find("acorn_panel ") != std::string::npos &&
+              css.find("acorn_ink ") != std::string::npos && css.find("acorn_ink_dim") != std::string::npos);
+
+        const auto dir = std::filesystem::temp_directory_path() / ("acorn-ground-" + std::to_string(::getpid()));
+        const auto file = (dir / "sub" / "ground.json").string();
+        check("ground: missing file -> slate", c::load_ground(file) == c::GroundChoice{});
+        c::GroundChoice pick{"custom", {0x12, 0x34, 0x56}};
+        check("ground: custom saves (folder made) and loads back",
+              c::save_ground(file, pick) && c::load_ground(file) == pick);
+        check("ground: preset saves and loads back",
+              c::save_ground(file, {"purple", {0x12, 0x34, 0x56}}) && c::load_ground(file).id == "purple" &&
+              c::load_ground(file).base() == c::ground_preset("purple")->base);
+        { std::ofstream(file) << "{\"ground\": \"chartreuse\"}"; }
+        check("ground: an unknown preset -> slate", c::load_ground(file).id == "slate");
+        { std::ofstream(file) << "not json {"; }
+        check("ground: garbage -> slate", c::load_ground(file) == c::GroundChoice{});
+        std::error_code ec;
+        std::filesystem::remove_all(dir, ec);
+    }
+
     // -- Shortcuts: the registry paradigm, exercised ---------------------------
     // A seed's claim isn't a fact until a consumer exercises it. The registry's
     // whole promise is that a key and its advertised row can't drift, because

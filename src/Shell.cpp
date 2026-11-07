@@ -55,6 +55,7 @@ void Shell::build_ui() {
     build_pages();     // zone
     bind_actions();    // bindings
     bind_journal();    // s005b: undo / redo / new table + the window's Ctrl+Z
+    bind_ground();     // s005c: the skin's base colour, as saved
 
     // The recents list was loaded in bind_actions (after its action group
     // exists, so a click can route); paint both surfaces.

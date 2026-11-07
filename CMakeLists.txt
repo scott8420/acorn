@@ -89,6 +89,8 @@ target_include_directories(acorn-engine-badabi PRIVATE include)
 add_library(acorn_core STATIC
     # s004b: recent connections (no passwords) + their JSON pump.
     src/core/Connections.cpp
+    # s005c: the skin's base colour -- presets, the recipe, the saved choice.
+    src/core/Ground.cpp
     src/core/TextMap.cpp
     # The SHORTCUT-REGISTRY paradigm: one list, two consumers (App wires accels
     # from it, ShortcutsDialog renders from it) so a key and its advertised row
@@ -180,6 +182,7 @@ add_executable(acorn
     src/AboutWindow.cpp
     src/NewTableWindow.cpp
     src/Shell_journal.cpp
+    src/Shell_ground.cpp
     src/ShortcutsDialog.cpp
     src/Registry.cpp
     src/Log.cpp
