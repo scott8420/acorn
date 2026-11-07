@@ -2042,6 +2042,61 @@ void test_layouts_pure(const fs::path& dir) {
               core::check_layout(card).empty() && fields_ok && card.header == 48 && card.footer == 40 &&
               core::body_objects(card).size() == card.objects.size() - 2, core::check_layout(card));
     }
+    // s011a: portals.
+    {
+        const auto card = sample_layout();
+        const core::LayoutObject* port = nullptr;
+        for (const auto& o : card.objects) if (o.kind == core::ObjectKind::Portal) port = &o;
+        check("portals: the Contact Card lists the contact's phones (by contact_id: kind, number), in the body",
+              port && port->from == "phones" && port->field == "contact_id" &&
+              port->columns == std::vector<std::string>{"kind", "number"} && core::part_of(card, *port) == core::Part::Body &&
+              port->y + port->h <= core::footer_top(card), "");
+        const std::vector<core::PortalLink> links{{"phones", "contact_id"}, {"addresses", "contact_id"}};
+        auto gone = *port;
+        gone.field = "owner_id";
+        check("portals: a portal whose link is there isn't missing; one whose link went is (fields and words never are)",
+              !core::missing_link(*port, links) && core::missing_link(gone, links) && !core::missing_link(gone, {{"phones", "owner_id"}}) &&
+              !core::missing_link(card.objects[0], {}), "");
+        check("portals: a new one's columns -- every field but the link and the counting key",
+              core::portal_columns({"id", "contact_id", "kind", "number"}, "contact_id", "id") == std::vector<std::string>{"kind", "number"} &&
+              core::portal_columns({"contact_id", "number"}, "contact_id") == std::vector<std::string>{"number"}, "");
+        auto l = core::default_layout("contacts", {"id", "first_name"});
+        const int below = core::next_row_y(l);
+        core::add_portal(l, {"phones", "contact_id"}, {"kind", "number"});
+        const auto& p = l.objects.back();
+        check("portals: Add Portal -- under everything, a default row wide, the names plus four records tall, on the grid, fitted",
+              p.kind == core::ObjectKind::Portal && p.y == below && p.x == 16 && p.w == 472 && p.h == 120 &&
+              p.y % 8 == 0 && p.h % 8 == 0 && l.height >= p.y + p.h + 16 && core::check_layout(l).empty(),
+              std::to_string(p.y) + " " + std::to_string(l.height));
+        check("portals: its name in the notes; Add Field still offers every field (the link field is another table's)",
+              core::object_label(p) == "the portal to “phones”" && core::link_label({"phones", "contact_id"}) == "phones · contact_id" &&
+              core::fields_not_on(core::default_layout("phones", {"id", "contact_id"}), {"id", "contact_id"}).empty() &&
+              core::add_object(l, core::ObjectKind::Portal) == 0, core::object_label(p));
+        // The drive's catch: Add on a body full to the footer line -- the footer moves down, the new object stays in the body.
+        auto full = sample_layout();
+        const int ft0 = core::footer_top(full), foot0 = full.footer;
+        core::add_portal(full, {"addresses", "contact_id"}, {"kind", "city"});
+        auto fw = sample_layout();
+        core::add_object(fw, core::ObjectKind::Text, "More");
+        check("portals: Add with a footer in the way -- the footer (and its words) moves down, the new object is in the body",
+              core::part_of(full, full.objects.back()) == core::Part::Body && full.footer == foot0 &&
+              core::footer_top(full) > ft0 && full.objects[full.objects.size() - 2].y == 392 + (core::footer_top(full) - ft0) &&
+              core::part_of(fw, fw.objects.back()) == core::Part::Body && fw.footer == foot0 && core::check_layout(full).empty(),
+              std::to_string(full.objects.back().y) + " ft " + std::to_string(core::footer_top(full)) + " footer " + std::to_string(full.footer));
+        auto nofrom = l;
+        nofrom.objects.back().from.clear();
+        check("portals: one with no table or no link field -- refused in words", !core::check_layout(nofrom).empty(), "");
+        core::Solution ps;
+        ps.points_at.engine = "sqlite";
+        ps.points_at.path = (dir / "portal.sqlite").string();
+        ps.layouts["contacts"][card.name] = card;
+        const auto pf = (dir / "portal.acorn").string();
+        auto pb = core::save_solution(pf, ps) ? core::load_solution(pf) : std::nullopt;
+        std::ifstream in(pf);
+        const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        check("portals: round-trip in the .acorn -- {\"kind\": \"portal\", \"from\", \"field\", \"columns\"}",
+              pb && *pb == ps && text.find("\"portal\"") != std::string::npos && text.find("\"columns\"") != std::string::npos, "");
+    }
     // s010e: several picked.
     {
         std::vector<int> pk;
@@ -2223,6 +2278,40 @@ void test_sample(Journal& j, Gate& g, const std::string& P) {
           made ? std::to_string(count("contacts")) + " / " + std::to_string(count("phones")) : made.error().message);
     const auto* card = sol.layout("contacts", kSampleLayoutName);
     check(P + "sample: the Contact Card kept in the solution (saved once)", card && *card == sample_layout() && saves >= 1, "");
+    // s011a: a portal's rows -- each contact's phones, read by the link.
+    if (auto sc = g.introspect(); sc && sc->table("phones") && sc->table("contacts")) {
+        const Table& ph = *sc->table("phones");
+        auto all = read_page(g, *sc->table("contacts"), {0, 50});
+        std::int64_t sum = 0;
+        bool each_ok = all.has_value(), one_page = true, every_row_points = true;
+        if (all)
+            for (const auto& row : all->rows) {
+                auto rel = read_related(g, ph, {"contact_id"}, {row[0]}, {0, 50});
+                if (!rel) { each_ok = false; break; }
+                sum += rel->total;
+                one_page = one_page && static_cast<std::int64_t>(rel->rows.size()) == rel->total;
+                const auto ci = static_cast<std::size_t>(std::find(rel->columns.begin(), rel->columns.end(), "contact_id") - rel->columns.begin());
+                for (const auto& r : rel->rows)
+                    every_row_points = every_row_points && ci < r.size() && num(r[ci]) == num(row[0]);
+            }
+        check(P + "portals: each contact's phones by the link -- every row points at it, the counts add up to 16",
+              each_ok && sum == 16 && one_page && every_row_points, std::to_string(sum));
+        auto paged = all && !all->rows.empty() ? read_related(g, ph, {"contact_id"}, {all->rows[0][0]}, {0, 1}) : std::expected<Page, Error>{};
+        check(P + "portals: a page of them -- one row, the total still counts every match",
+              paged && paged->rows.size() <= 1 && paged->total >= static_cast<std::int64_t>(paged->rows.size()), "");
+        auto none = read_related(g, ph, {"contact_id"}, {Value()}, {0, 50});
+        auto nobody = read_related(g, ph, {"contact_id"}, {Value(std::int64_t{999999})}, {0, 50});
+        auto bad = read_related(g, ph, {"no_such"}, {Value(std::int64_t{1})}, {0, 50});
+        auto odd = read_related(g, ph, {"contact_id"}, {}, {0, 50});
+        check(P + "portals: an empty key -> none; a key nothing points at -> none; a field it hasn't / a mismatch -> refused in words",
+              none && none->rows.empty() && none->total == 0 && nobody && nobody->rows.empty() && nobody->total == 0 &&
+              !bad && bad.error().message.find("no_such") != std::string::npos && !odd, bad ? "read!" : bad.error().message);
+        const auto sql = related_sql(g, ph, {"contact_id"}, {0, 10});
+        check(P + "portals: the value is bound, never written into the SQL", sql.find("= ?") != std::string::npos &&
+              sql.find("WHERE") != std::string::npos, sql);
+    } else {
+        check(P + "portals: the sample read back", false, "");
+    }
     j.clear();
     check(P + "sample: arrives with nothing to undo (the caller clears the journal)", !j.can_undo() && !j.can_redo(), "");
     j.store().set_solution(nullptr, {});

@@ -42,6 +42,15 @@ std::string page_sql(const Connection& c, const Table& t, const PageRequest& r);
 
 std::expected<Page, Error> read_page(Connection& c, const Table& t, const PageRequest& r);
 
+// s011a -- a portal's rows: the records of `t` whose `link` fields hold
+// `values` (a contact's phones: phones where contact_id = 7), in key order,
+// a page of them; `total` counts every match. The values are bound, never
+// written into the SQL. A NULL value matches nothing (no record points at a
+// record that has no key).
+std::string related_sql(const Connection& c, const Table& t, const std::vector<std::string>& link, const PageRequest& r);
+std::expected<Page, Error> read_related(Connection& c, const Table& t, const std::vector<std::string>& link,
+                                        const std::vector<Value>& values, const PageRequest& r);
+
 // One cell as Browse shows it: NULL -> "", text as-is, a Yes-No field 0/1 ->
 // "No" / "Yes", a real without a trailing ".0" mess, a blob -> "(n bytes)".
 std::string cell_text(const Value& v, FieldType t);

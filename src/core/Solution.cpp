@@ -99,6 +99,7 @@ std::optional<Solution> load_solution(const std::string& file) {
                             else if (kind == "text") o.kind = ObjectKind::Text;
                             else if (kind == "line") o.kind = ObjectKind::Line;   // s010c
                             else if (kind == "box")  o.kind = ObjectKind::Box;
+                            else if (kind == "portal") o.kind = ObjectKind::Portal;   // s011a
                             else continue;   // a kind this Acorn doesn't know: not drawn, not invented
                             o.field = str_or_empty(oj, "field");
                             o.text = str_or_empty(oj, "text");
@@ -106,6 +107,11 @@ std::optional<Solution> load_solution(const std::string& file) {
                             o.y = num_or_0(oj, "y");
                             o.w = num_or_0(oj, "w");
                             o.h = num_or_0(oj, "h");
+                            if (o.kind == ObjectKind::Portal) {
+                                o.from = str_or_empty(oj, "from");
+                                if (auto cj = oj.find("columns"); cj != oj.end() && cj->is_array())
+                                    for (const auto& c : *cj) if (c.is_string()) o.columns.push_back(c.get<std::string>());
+                            }
                             l.objects.push_back(std::move(o));
                         }
                     if (!check_layout(l).empty()) continue;   // never half a layout
@@ -143,6 +149,9 @@ bool save_solution(const std::string& file, const Solution& s) {
                 nlohmann::json oj;
                 if (o.kind == ObjectKind::Field)     { oj["kind"] = "field"; oj["field"] = o.field; }
                 else if (o.kind == ObjectKind::Text) { oj["kind"] = "text";  oj["text"] = o.text; }
+                else if (o.kind == ObjectKind::Portal) {   // s011a
+                    oj["kind"] = "portal"; oj["from"] = o.from; oj["field"] = o.field; oj["columns"] = o.columns;
+                }
                 else oj["kind"] = o.kind == ObjectKind::Line ? "line" : "box";   // s010c: drawing has only a place
                 oj["x"] = o.x; oj["y"] = o.y; oj["w"] = o.w; oj["h"] = o.h;
                 objects.push_back(std::move(oj));

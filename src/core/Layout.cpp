@@ -41,6 +41,8 @@ std::string check_layout(const Layout& l) {
     for (const auto& o : l.objects) {
         if (o.x < 0 || o.y < 0 || o.w <= 0 || o.h <= 0) return "an object needs a place and a size";
         if (o.kind == ObjectKind::Field && o.field.empty()) return "a field object needs a field";
+        if (o.kind == ObjectKind::Portal && (o.from.empty() || o.field.empty()))
+            return "a portal needs the table it lists and its link field";
     }
     return {};
 }
@@ -83,6 +85,19 @@ LayoutObject dragged(const LayoutObject& from, Grab g, int dx, int dy, int grid)
 
 namespace {
 int up8(int v) { return ((v + kLayoutGrid - 1) / kLayoutGrid) * kLayoutGrid; }
+// s011a fix: an object about to land at [y, y + h) stays in the body -- with
+// a footer in the way, the footer (its objects too) moves down to make room.
+// Before this, Add on a full body put the object ON the footer line, so it
+// belonged to the footer and the Form never showed it.
+void room_in_body(Layout& l, int y, int h) {
+    if (l.footer == 0) return;
+    const int ft = footer_top(l);
+    const int need = up8(y + h + kFormGap);
+    if (need <= ft) return;
+    const int d = need - ft;
+    for (auto& o : l.objects) if (o.y >= ft) o.y += d;
+    l.height += d;
+}
 }  // namespace
 
 void fit(Layout& l) {
@@ -177,6 +192,7 @@ std::string object_label(const LayoutObject& o) {
         case ObjectKind::Field: return "“" + o.field + "”";
         case ObjectKind::Line:  return "a line";
         case ObjectKind::Box:   return "a box";
+        case ObjectKind::Portal: return "the portal to “" + o.from + "”";
         default:                return "the words “" + o.text + "”";
     }
 }
@@ -191,6 +207,8 @@ int next_row_y(const Layout& l) {   // s010d: in the body -- under its objects, 
 
 int add_object(Layout& l, ObjectKind kind, const std::string& what) {
     const int y = next_row_y(l);
+    if (kind != ObjectKind::Portal)
+        room_in_body(l, y, kind == ObjectKind::Box ? 8 * kLayoutGrid : kind == ObjectKind::Line ? kLayoutGrid : kFormRowH);
     const int boxx = kFormMargin + kFormLabelW + kFormGap;
     int n = 1;
     switch (kind) {
@@ -210,6 +228,8 @@ int add_object(Layout& l, ObjectKind kind, const std::string& what) {
         case ObjectKind::Box:
             l.objects.push_back({ObjectKind::Box, "", "", kFormMargin, y, 20 * kLayoutGrid, 8 * kLayoutGrid});
             break;
+        case ObjectKind::Portal:   // add_portal knows its link; here, a bare one would be invalid
+            return 0;
     }
     fit(l);
     return n;
@@ -279,5 +299,37 @@ std::string picks_label(const Layout& l, const std::vector<int>& picks) {
         return object_label(l.objects[static_cast<std::size_t>(picks.front())]);
     return std::to_string(picks.size()) + " objects";
 }
+
+// ── s011a: portals ──────────────────────────────────────────────────────────
+
+bool missing_link(const LayoutObject& o, const std::vector<PortalLink>& links) {
+    if (o.kind != ObjectKind::Portal) return false;
+    return std::find(links.begin(), links.end(), PortalLink{o.from, o.field}) == links.end();
+}
+
+std::vector<std::string> portal_columns(const std::vector<std::string>& from_fields, const std::string& link_field,
+                                        const std::string& counting) {
+    std::vector<std::string> out;
+    for (const auto& f : from_fields)
+        if (f != link_field && f != counting) out.push_back(f);
+    return out;
+}
+
+void add_portal(Layout& l, const PortalLink& link, const std::vector<std::string>& columns) {
+    LayoutObject o;
+    o.kind = ObjectKind::Portal;
+    o.from = link.from;
+    o.field = link.field;
+    o.columns = columns;
+    o.x = kFormMargin;
+    o.y = next_row_y(l);
+    o.w = kFormLabelW + kFormGap + kFormBoxW;                // a default row's width
+    o.h = kPortalRowH * (1 + kPortalRows);                   // the names, then four records
+    room_in_body(l, o.y, o.h);
+    l.objects.push_back(std::move(o));
+    fit(l);
+}
+
+std::string link_label(const PortalLink& k) { return k.from + " · " + k.field; }
 
 }  // namespace acorn::core

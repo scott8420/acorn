@@ -212,6 +212,8 @@ private:
     std::string picked_layout(const std::string& table) const;  // category: layouts: the name last picked for the table (else the default)
     core::Layout layout_of(const std::string& table, const std::string& name, bool* kept = nullptr) const;  // category: layouts: kept, else the computed default
     std::vector<std::string> fields_of(const std::string& table) const;  // category: layouts: the live table's fields, in order
+    std::vector<core::PortalLink> portal_links(const std::string& table) const;  // category: layouts: s011a -- one-field links INTO the table
+    Gtk::Widget* form_portal(const core::LayoutObject& o, const db::Table& parent);  // category: form: s011a -- the related records, listed
 
     // ── ground (s005c) -- src/Shell_ground.cpp ──────────────────────────────
     void bind_ground();                          // category: ground: win.ground (radio) + the saved choice + the provider

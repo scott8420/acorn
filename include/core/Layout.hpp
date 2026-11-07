@@ -28,13 +28,19 @@ inline constexpr int kLayoutGrid = 8;
 // s010c: + Line (a rule: horizontal when wider than tall, else vertical,
 // through the middle of its place) and Box (a rectangle) -- drawing, drawn
 // behind the fields in the Form.
-enum class ObjectKind { Field, Text, Line, Box };
+// s011a: + Portal -- the records of another table that point at this record
+// (a contact's phones on the contact's Form): `from` is that table, `field`
+// its link field (phones.contact_id -> contacts), `columns` the fields of
+// `from` it lists. A portal whose link is gone is drawn dashed, never dropped.
+enum class ObjectKind { Field, Text, Line, Box, Portal };
 
 struct LayoutObject {
     ObjectKind  kind = ObjectKind::Field;
-    std::string field;   // Field: the field it shows
+    std::string field;   // Field: the field it shows. Portal: the link field in `from`
     std::string text;    // Text: what it says
     int x = 0, y = 0, w = 0, h = 0;
+    std::string from;                  // Portal: the table whose records it lists
+    std::vector<std::string> columns;  // Portal: the fields of `from` it shows, in order
     bool operator==(const LayoutObject&) const = default;
 };
 
@@ -87,7 +93,8 @@ void fit(Layout& l);
 // `base`, or "base 2", "base 3" ... -- the first not in `taken`.
 std::string unique_layout_name(const std::string& base, const std::vector<std::string>& taken);
 
-// "first_name" / "the words “Who”" / "a line" / "a box" -- what the editor's
+// "first_name" / "the words “Who”" / "a line" / "a box" / "the portal to
+// “phones”" -- what the editor's
 // notes call an object.
 std::string object_label(const LayoutObject& o);
 
@@ -138,5 +145,27 @@ Layout moved_objects(const Layout& from, const std::vector<int>& picks, int anch
 int remove_objects(Layout& l, const std::vector<int>& picks);
 // One: object_label ("“first_name”"); several: "3 objects".
 std::string picks_label(const Layout& l, const std::vector<int>& picks);
+
+// ── s011a: portals ──────────────────────────────────────────────────────────
+// A link INTO the layout's table that a portal can follow: `from`.`field`
+// points at the table's key (one-field links -- the ones the Graph makes).
+struct PortalLink {
+    std::string from, field;
+    bool operator==(const PortalLink&) const = default;
+};
+inline constexpr int kPortalRowH = 24;   // the column names' row and each record's
+inline constexpr int kPortalRows = 4;    // a new portal shows four records before it scrolls
+// A portal object whose link isn't among `links` (the table or the link went).
+bool missing_link(const LayoutObject& o, const std::vector<PortalLink>& links);
+// The columns a new portal lists: `from`'s fields, without the link field
+// (it holds this record's key -- the same on every row) and without a key
+// that counts up (`counting`: Acorn's number, not the person's).
+std::vector<std::string> portal_columns(const std::vector<std::string>& from_fields, const std::string& link_field,
+                                        const std::string& counting = {});
+// `l` with a portal added under everything, last, as wide as a default row,
+// kPortalRows records tall. The body is fitted.
+void add_portal(Layout& l, const PortalLink& link, const std::vector<std::string>& columns);
+// "phones · contact_id" -- how the editor names a link.
+std::string link_label(const PortalLink& k);
 
 }  // namespace acorn::core

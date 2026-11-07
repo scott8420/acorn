@@ -188,6 +188,20 @@ window.acorn button:not(.acorn-primary):not(.titlebutton):disabled { opacity: 0.
     padding: 0 8px;
     border-bottom: 1px solid alpha(@acorn_ink, 0.12);
 }
+/* s011a: a portal -- the related records, listed */
+.acorn-portal {
+    border: 1px solid alpha(@acorn_ink, 0.22);
+    border-radius: 6px;
+}
+.acorn-portal-head {
+    background: alpha(@acorn_ink, 0.06);
+    border-bottom: 1px solid alpha(@acorn_ink, 0.18);
+    min-height: 24px;
+}
+.acorn-portal-head label { padding: 0 8px; font-weight: bold; }
+.acorn-portal-row { min-height: 24px; border-bottom: 1px solid alpha(@acorn_ink, 0.08); }
+.acorn-portal-row label { padding: 0 8px; }
+.acorn-portal-more { padding: 0 8px; }
 .acorn-missing {
     padding: 0 8px;
     border: 1px dashed alpha(@acorn_ink, 0.45);

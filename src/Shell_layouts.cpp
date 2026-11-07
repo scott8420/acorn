@@ -107,6 +107,16 @@ std::vector<std::string> Shell::fields_of(const std::string& table) const {  // 
     return out;
 }
 
+std::vector<core::PortalLink> Shell::portal_links(const std::string& table) const {  // layouts: s011a -- links a portal can follow
+    std::vector<core::PortalLink> out;
+    const db::Table* t = m_schema.table(table);
+    if (!t) return out;
+    for (const auto& in : m_schema.links_to(table))
+        if (in.from && in.fk && in.fk->columns.size() == 1 && m_schema.ref_columns(*in.fk).size() == 1)
+            out.push_back({in.from->name, in.fk->columns.front()});
+    return out;
+}
+
 std::vector<std::string> Shell::layout_names(const std::string& table) const {  // layouts: the default first, then the kept ones
     std::vector<std::string> out{core::default_layout_name(table)};
     if (auto it = m_solution.layouts.find(table); it != m_solution.layouts.end())
@@ -494,6 +504,7 @@ void Shell::draw_layout(const Cairo::RefPtr<Cairo::Context>& cr, int w, int h) {
     gtk_widget_get_color(GTK_WIDGET(m_lay_canvas.gobj()), &ink);
     auto set = [&](double a) { cr->set_source_rgba(ink.red, ink.green, ink.blue, a); };
     const auto fields = fields_of(m_lay_table);
+    const auto links = portal_links(m_lay_table);
     const db::Table* t = m_schema.table(m_lay_table);
 
     // The grid: a dot every 8 px over the body.
@@ -557,6 +568,50 @@ void Shell::draw_layout(const Cairo::RefPtr<Cairo::Context>& cr, int w, int h) {
             cr->set_line_width(1.5);
             cr->rectangle(o.x + 0.75, o.y + 0.75, o.w - 1.5, o.h - 1.5);
             cr->stroke();
+        } else if (o.kind == core::ObjectKind::Portal) {   // s011a: a list -- the column names, then rows
+            const bool gone = core::missing_link(o, links);
+            cr->set_line_width(1);
+            if (gone) {
+                set(0.50);
+                cr->set_dash(std::vector<double>{5, 4}, 0);
+                cr->rectangle(x, y, ow, oh);
+                cr->stroke();
+                cr->unset_dash();
+                text_in("missing link " + curly(o.from + "." + o.field), o, false, 0.55);
+                continue;
+            }
+            set(0.04);
+            cr->rectangle(x, y, ow, oh);
+            cr->fill();
+            set(0.38);
+            cr->rectangle(x, y, ow, oh);
+            cr->stroke();
+            const int rh = core::kPortalRowH;
+            set(0.08);   // the names' row, shaded
+            cr->rectangle(x, y, ow, std::min(rh, o.h - 1));
+            cr->fill();
+            set(0.14);   // row rules
+            for (int ry = o.y + rh; ry < o.y + o.h; ry += rh) {
+                cr->move_to(o.x + 1, ry + 0.5);
+                cr->line_to(o.x + o.w - 1, ry + 0.5);
+            }
+            cr->stroke();
+            const int n = static_cast<int>(o.columns.size());
+            const db::Table* ft = m_schema.table(o.from);
+            for (int c = 0; c < n; ++c) {   // the columns share the width
+                core::LayoutObject cell = o;
+                cell.x = o.x + (o.w * c) / n;
+                cell.w = o.x + (o.w * (c + 1)) / n - cell.x;
+                cell.h = std::min(rh, o.h);
+                const bool col_gone = !ft || !ft->column(o.columns[static_cast<std::size_t>(c)]);
+                text_in(o.columns[static_cast<std::size_t>(c)] + (col_gone ? " ?" : ""), cell, false, col_gone ? 0.45 : 0.85);
+            }
+            if (o.h > rh) {   // what it lists, under the names
+                core::LayoutObject cap = o;
+                cap.y = o.y + rh;
+                cap.h = std::min(rh, o.h - rh);
+                text_in(o.from + " that point here (by " + o.field + ")", cap, false, 0.45);
+            }
         } else if (o.kind == core::ObjectKind::Text) {
             cr->set_line_width(1);
             set(0.18);
@@ -613,7 +668,7 @@ void Shell::paint_inspector() {  // layouts: the picked object's field / words /
 
     if (m_lay_picks.size() > 1) {   // s010e: several -- how many, what, and Remove
         m_lay_inspector.append(*side_label(std::to_string(m_lay_picks.size()) + " objects", "acorn-field-name"));
-        int f = 0, w = 0, ln = 0, bx = 0;
+        int f = 0, w = 0, ln = 0, bx = 0, pt = 0;
         for (int i : m_lay_picks) {
             if (i < 0 || static_cast<std::size_t>(i) >= m_lay.objects.size()) continue;
             switch (m_lay.objects[static_cast<std::size_t>(i)].kind) {
@@ -621,6 +676,7 @@ void Shell::paint_inspector() {  // layouts: the picked object's field / words /
                 case core::ObjectKind::Text:  ++w; break;
                 case core::ObjectKind::Line:  ++ln; break;
                 case core::ObjectKind::Box:   ++bx; break;
+                case core::ObjectKind::Portal: ++pt; break;
             }
         }
         std::string kinds;
@@ -633,6 +689,7 @@ void Shell::paint_inspector() {  // layouts: the picked object's field / words /
         add(w, "set of words", "sets of words");
         add(ln, "line", "lines");
         add(bx, "box", "boxes");
+        add(pt, "portal", "portals");
         m_lay_inspector.append(*side_label(kinds, "acorn-status"));
         m_lay_inspector.append(*side_label(
             "Drag any of them to move them all; the arrows nudge them all; Delete removes them all -- one step each. "
@@ -712,6 +769,37 @@ void Shell::paint_inspector() {  // layouts: the picked object's field / words /
             row->append(*b);
         }
         m_lay_inspector.append(*row);
+        // s011a: a portal -- offered only when something links INTO this table.
+        if (const auto links = portal_links(m_lay_table); !links.empty()) {
+            auto lk = std::make_shared<std::vector<core::PortalLink>>(links);
+            std::vector<Glib::ustring> lshown;
+            for (const auto& k : links) lshown.push_back(core::link_label(k));
+            auto pdd = Gtk::make_managed<Gtk::DropDown>(Gtk::StringList::create(lshown));
+            pdd->set_name("layouts.add_portal_pick");
+            pdd->set_tooltip_text("A table that points at “" + m_lay_table + "” -- the portal lists its records that point at the shown one");
+            pdd->set_sensitive(can);
+            pdd->set_margin_top(6);
+            auto addp = Gtk::make_managed<Gtk::Button>("Add Portal");
+            addp->set_name("layouts.add_portal");
+            addp->set_sensitive(can);
+            addp->set_tooltip_text("A list of the related records (a contact's phones), under everything");
+            addp->signal_clicked().connect([this, pdd, lk, gen] {
+                if (gen != m_lay_gen) return;
+                const auto i = pdd->get_selected();
+                if (i == GTK_INVALID_LIST_POSITION || i >= lk->size()) return;
+                const auto& k = (*lk)[i];
+                std::string counting;
+                if (const db::Table* ft = m_schema.table(k.from))
+                    for (const auto& c : ft->columns) if (c.auto_increment && c.pk_position > 0) counting = c.name;
+                auto l = m_lay;
+                core::add_portal(l, k, core::portal_columns(fields_of(k.from), k.field, counting));
+                m_lay_picks = {static_cast<int>(l.objects.size()) - 1};
+                const std::string what = "Added " + core::object_label(l.objects.back());
+                Glib::signal_idle().connect_once([this, l, what] { m_lay_focus.clear(); keep_layout(l, what); m_lay_canvas.grab_focus(); });
+            });
+            m_lay_inspector.append(*pdd);
+            m_lay_inspector.append(*addp);
+        }
         return;
     }
     const auto idx = static_cast<std::size_t>(lay_one());
@@ -726,7 +814,8 @@ void Shell::paint_inspector() {  // layouts: the picked object's field / words /
 
     m_lay_inspector.append(*side_label(o.kind == core::ObjectKind::Field ? "Field box"
                                        : o.kind == core::ObjectKind::Text ? "Words"
-                                       : o.kind == core::ObjectKind::Line ? "Line" : "Box", "acorn-field-name"));
+                                       : o.kind == core::ObjectKind::Line ? "Line"
+                                       : o.kind == core::ObjectKind::Portal ? "Portal" : "Box", "acorn-field-name"));
 
     if (o.kind == core::ObjectKind::Field) {
         // The field it shows -- a missing one listed first, so it can be
@@ -756,6 +845,17 @@ void Shell::paint_inspector() {  // layouts: the picked object's field / words /
         m_lay_inspector.append(*side_label("Shows", "acorn-status"));
         m_lay_inspector.append(*dd);
         if (m_lay_focus == "layouts.field") focus_back = dd;
+    } else if (o.kind == core::ObjectKind::Portal) {   // s011a: what it lists (columns change in s011b+)
+        if (core::missing_link(o, portal_links(m_lay_table)))
+            m_lay_inspector.append(*side_label("Its link is gone: " + curly(o.from + "." + o.field) + " no longer points at " +
+                                               curly(m_lay_table) + ". Nothing is lost -- link them again in the Graph, "
+                                               "or remove the portal.", "acorn-mark"));
+        else
+            m_lay_inspector.append(*side_label("Lists the " + curly(o.from) + " records whose " + curly(o.field) +
+                                               " points at the shown " + curly(m_lay_table) + " record.", "acorn-status"));
+        std::string cols;
+        for (const auto& c : o.columns) cols += (cols.empty() ? "" : ", ") + c;
+        m_lay_inspector.append(*side_label("Columns: " + (cols.empty() ? std::string("none") : cols), "acorn-status"));
     } else if (o.kind == core::ObjectKind::Text) {
         auto e = Gtk::make_managed<Gtk::Entry>();
         e->set_text(o.text);

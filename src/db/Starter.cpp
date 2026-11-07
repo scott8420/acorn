@@ -135,9 +135,14 @@ core::Layout sample_layout() {  // s010f: "Contact Card" -- on the 8 px grid
     box("birthday", 168, 192, 152);
     words("Notes", 224);
     box("notes", 168, 224, 320);
+    words("Phones", 256);                                    // s011a: a portal -- this contact's phones
+    core::LayoutObject portal{K::Portal, "contact_id", "", 168, 256, 320, core::kPortalRowH * (1 + core::kPortalRows)};
+    portal.from = "phones";
+    portal.columns = {"kind", "number"};
+    l.objects.push_back(std::move(portal));
     l.footer = 40;                                           // the footer, with words of its own
-    l.height = 264 + l.footer;
-    words("Acorn's sample", 272, 200);
+    l.height = 384 + l.footer;
+    words("Acorn's sample", 392, 200);
     return l;
 }
 

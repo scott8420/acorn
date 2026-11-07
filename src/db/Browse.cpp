@@ -9,10 +9,19 @@
 
 namespace acorn::db {
 
-std::string page_sql(const Connection& c, const Table& t, const PageRequest& r) {
+namespace {
+
+// "WHERE a = ? AND b = ?" over `link` (empty: "").
+std::string where_of(const Connection& c, const std::vector<std::string>& link) {
+    std::string w;
+    for (std::size_t i = 0; i < link.size(); ++i) w += (i ? " AND " : " WHERE ") + c.quote_ident(link[i]) + " = ?";
+    return w;
+}
+
+std::string select_sql(const Connection& c, const Table& t, const PageRequest& r, const std::string& where) {
     std::string s = "SELECT ";
     for (std::size_t i = 0; i < t.columns.size(); ++i) s += (i ? ", " : "") + c.quote_ident(t.columns[i].name);
-    s += " FROM " + c.quote_ident(t.name);
+    s += " FROM " + c.quote_ident(t.name) + where;
     std::vector<std::string> order;
     const auto pk = t.primary_key();
     if (!r.sort.empty() && t.column(r.sort))
@@ -29,20 +38,22 @@ std::string page_sql(const Connection& c, const Table& t, const PageRequest& r) 
     return s;
 }
 
-std::expected<Page, Error> read_page(Connection& c, const Table& t, const PageRequest& r) {
+std::expected<Page, Error> read_where(Connection& c, const Table& t, const PageRequest& r,
+                                      const std::vector<std::string>& link, const std::vector<Value>& values) {
     Page p;
     p.offset = std::max<std::int64_t>(r.offset, 0);
     for (const auto& col : t.columns) p.columns.push_back(col.name);
     if (t.columns.empty()) return p;
+    const std::string where = where_of(c, link);
 
-    auto n = c.query("SELECT COUNT(*) FROM " + c.quote_ident(t.name));
+    auto n = c.query("SELECT COUNT(*) FROM " + c.quote_ident(t.name) + where, values);
     if (!n) return std::unexpected(n.error());
     if (!n->rows.empty()) {
         const auto& v = n->rows[0][0];
         if (auto i = v.as_int()) p.total = *i;
         else if (auto txt = v.as_text()) p.total = std::stoll(*txt);
     }
-    auto q = c.query(page_sql(c, t, r));
+    auto q = c.query(select_sql(c, t, r, where), values);
     if (!q) return std::unexpected(q.error());
     p.rows = std::move(q->rows);
 
@@ -59,6 +70,33 @@ std::expected<Page, Error> read_page(Connection& c, const Table& t, const PageRe
         p.ids.push_back(Store::row_id(t.name, pk, key));
     }
     return p;
+}
+
+}  // namespace
+
+std::string page_sql(const Connection& c, const Table& t, const PageRequest& r) { return select_sql(c, t, r, {}); }
+
+std::expected<Page, Error> read_page(Connection& c, const Table& t, const PageRequest& r) {
+    return read_where(c, t, r, {}, {});
+}
+
+std::string related_sql(const Connection& c, const Table& t, const std::vector<std::string>& link, const PageRequest& r) {
+    return select_sql(c, t, r, where_of(c, link));
+}
+
+std::expected<Page, Error> read_related(Connection& c, const Table& t, const std::vector<std::string>& link,
+                                        const std::vector<Value>& values, const PageRequest& r) {
+    if (link.empty() || link.size() != values.size())
+        return std::unexpected(Error{Error::Code::Internal, "a portal's link and its values don't match"});
+    for (const auto& v : link)
+        if (!t.column(v)) return std::unexpected(Error{Error::Code::NotFound, "“" + t.name + "” has no field “" + v + "”"});
+    for (const auto& v : values)
+        if (v.is_null()) {   // nothing points at a record with no key
+            Page p;
+            for (const auto& col : t.columns) p.columns.push_back(col.name);
+            return p;
+        }
+    return read_where(c, t, r, link, values);
 }
 
 std::string cell_text(const Value& v, FieldType t) {
