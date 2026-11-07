@@ -1,4 +1,7 @@
 #include "Shell.hpp"
+#include <gtkmm/eventcontrollerscroll.h>
+
+#include <functional>
 #include "Log.hpp"
 
 #include <gdk/gdkkeysyms.h>
@@ -853,9 +856,82 @@ void Shell::paint_inspector() {  // layouts: the picked object's field / words /
         else
             m_lay_inspector.append(*side_label("Lists the " + curly(o.from) + " records whose " + curly(o.field) +
                                                " points at the shown " + curly(m_lay_table) + " record.", "acorn-status"));
-        std::string cols;
-        for (const auto& c : o.columns) cols += (cols.empty() ? "" : ", ") + c;
-        m_lay_inspector.append(*side_label("Columns: " + (cols.empty() ? std::string("none") : cols), "acorn-status"));
+        // s011c: its columns -- each with up / down / remove; Add from the rest.
+        // Every change is one step (Change Layout).
+        m_lay_inspector.append(*side_label("Columns", "acorn-status"));
+        const db::Table* ft = m_schema.table(o.from);
+        const std::string portal = curly(o.from);
+        auto change = [this, idx, gen](std::function<bool(core::LayoutObject&)> f, std::string what) {
+            if (gen != m_lay_gen || idx >= m_lay.objects.size()) return;
+            auto l = m_lay;
+            if (!f(l.objects[idx])) return;
+            Glib::signal_idle().connect_once([this, l, what] { m_lay_focus.clear(); keep_layout(l, what); });
+        };
+        const int n = static_cast<int>(o.columns.size());
+        if (n == 0) m_lay_inspector.append(*side_label("none -- add one below", "acorn-null"));
+        for (int i = 0; i < n; ++i) {
+            const std::string c = o.columns[static_cast<std::size_t>(i)];
+            auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 2);
+            auto name = side_label(c + (ft && !ft->column(c) ? " (missing)" : ""), nullptr);
+            name->set_hexpand(true);
+            name->set_ellipsize(Pango::EllipsizeMode::END);
+            row->append(*name);
+            const struct { const char* icon; const char* tip; int d; const char* nm; } arrows[] = {
+                {"go-up-symbolic", "Earlier -- one column to the left", -1, "up"},
+                {"go-down-symbolic", "Later -- one column to the right", 1, "down"}};
+            for (const auto& a : arrows) {
+                auto b = Gtk::make_managed<Gtk::Button>();
+                b->set_icon_name(a.icon);
+                b->add_css_class("flat");
+                b->set_tooltip_text(a.tip);
+                b->set_name(std::string("layouts.column.") + a.nm + "." + c);
+                b->set_sensitive(can && i + a.d >= 0 && i + a.d < n);
+                const int d = a.d;
+                b->signal_clicked().connect([change, i, d, c, portal] {
+                    change([i, d](core::LayoutObject& p) { return core::move_column(p, i, d); },
+                           "Moved the column " + curly(c) + " in the portal to " + portal);
+                });
+                row->append(*b);
+            }
+            auto rm = Gtk::make_managed<Gtk::Button>();
+            rm->set_icon_name("list-remove-symbolic");
+            rm->add_css_class("flat");
+            rm->set_tooltip_text("Take this column off the portal -- the field and its values are untouched");
+            rm->set_name("layouts.column.remove." + c);
+            rm->set_sensitive(can);
+            rm->signal_clicked().connect([change, i, c, portal] {
+                change([i](core::LayoutObject& p) {
+                    if (i >= static_cast<int>(p.columns.size())) return false;
+                    p.columns.erase(p.columns.begin() + i);
+                    return true;
+                }, "Removed the column " + curly(c) + " from the portal to " + portal);
+            });
+            row->append(*rm);
+            m_lay_inspector.append(*row);
+        }
+        const auto rest = core::columns_not_on(o, fields_of(o.from));
+        if (!rest.empty()) {
+            auto names = std::make_shared<std::vector<std::string>>(rest);
+            std::vector<Glib::ustring> shown(rest.begin(), rest.end());
+            auto cdd = Gtk::make_managed<Gtk::DropDown>(Gtk::StringList::create(shown));
+            cdd->set_name("layouts.column.pick");
+            cdd->set_tooltip_text("A field of " + portal + " the portal doesn't list yet");
+            cdd->set_sensitive(can);
+            cdd->set_margin_top(4);
+            auto addc = Gtk::make_managed<Gtk::Button>("Add Column");
+            addc->set_name("layouts.column.add");
+            addc->set_sensitive(can);
+            addc->set_tooltip_text("Add the field as the portal's last column");
+            addc->signal_clicked().connect([change, cdd, names, portal] {
+                const auto k = cdd->get_selected();
+                if (k == GTK_INVALID_LIST_POSITION || k >= names->size()) return;
+                const std::string c = (*names)[k];
+                change([c](core::LayoutObject& p) { p.columns.push_back(c); return true; },
+                       "Added the column " + curly(c) + " to the portal to " + portal);
+            });
+            m_lay_inspector.append(*cdd);
+            m_lay_inspector.append(*addc);
+        }
     } else if (o.kind == core::ObjectKind::Text) {
         auto e = Gtk::make_managed<Gtk::Entry>();
         e->set_text(o.text);
@@ -893,6 +969,21 @@ void Shell::paint_inspector() {  // layouts: the picked object's field / words /
         auto adj = Gtk::Adjustment::create(o.*(p.v), p.lo, 9999, core::kLayoutGrid, 64, 0);
         auto spin = Gtk::make_managed<Gtk::SpinButton>(adj, 1.0, 0);
         spin->set_numeric(true);
+        // s011c fix (drive): the wheel over a spin box changed the place while
+        // you scrolled the inspector past it (it scrolls since s010f). Here the
+        // wheel scrolls the inspector; values change by typing or - / +.
+        auto wheel = Gtk::EventControllerScroll::create();
+        wheel->set_flags(Gtk::EventControllerScroll::Flags::VERTICAL);
+        wheel->set_propagation_phase(Gtk::PropagationPhase::CAPTURE);
+        wheel->signal_scroll().connect([spin](double, double dy) -> bool {
+            if (auto* sw = spin->get_ancestor(GTK_TYPE_SCROLLED_WINDOW))
+                if (auto* w = dynamic_cast<Gtk::ScrolledWindow*>(sw)) {
+                    auto va = w->get_vadjustment();
+                    va->set_value(va->get_value() + dy * 48.0);
+                }
+            return true;
+        }, false);
+        spin->add_controller(wheel);
         spin->set_sensitive(can);
         spin->set_hexpand(true);
         const std::string nm = std::string("layouts.") + p.name;

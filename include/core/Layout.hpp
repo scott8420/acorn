@@ -165,6 +165,12 @@ std::vector<std::string> portal_columns(const std::vector<std::string>& from_fie
 // `l` with a portal added under everything, last, as wide as a default row,
 // kPortalRows records tall. The body is fitted.
 void add_portal(Layout& l, const PortalLink& link, const std::vector<std::string>& columns);
+// s011c: choosing a portal's columns. `from`'s fields the portal doesn't list
+// yet, in the table's order -- never the link field.
+std::vector<std::string> columns_not_on(const LayoutObject& o, const std::vector<std::string>& from_fields);
+// Column `i` moved by `delta` places (-1 left / up, +1 right / down); false
+// when it can't go (the end, or no such column).
+bool move_column(LayoutObject& o, int i, int delta);
 // "phones · contact_id" -- how the editor names a link.
 std::string link_label(const PortalLink& k);
 

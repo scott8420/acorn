@@ -2083,6 +2083,16 @@ void test_layouts_pure(const fs::path& dir) {
               core::footer_top(full) > ft0 && full.objects[full.objects.size() - 2].y == 392 + (core::footer_top(full) - ft0) &&
               core::part_of(fw, fw.objects.back()) == core::Part::Body && fw.footer == foot0 && core::check_layout(full).empty(),
               std::to_string(full.objects.back().y) + " ft " + std::to_string(core::footer_top(full)) + " footer " + std::to_string(full.footer));
+        // s011c: columns.
+        auto pc = *port;   // kind, number
+        check("portals: columns not on it -- the table's order, never the link field",
+              core::columns_not_on(pc, {"id", "contact_id", "kind", "number"}) == std::vector<std::string>{"id"} &&
+              core::columns_not_on(gone, {"contact_id", "owner_id", "kind"}) == std::vector<std::string>{"contact_id"}, "");
+        auto mv = pc;
+        const bool m1 = core::move_column(mv, 1, -1);
+        const bool m2 = core::move_column(mv, 0, -1), m3 = core::move_column(mv, 1, 1), m4 = core::move_column(mv, 5, 1);
+        check("portals: a column moved left; not past either end, nor one that isn't there",
+              m1 && mv.columns == std::vector<std::string>{"number", "kind"} && !m2 && !m3 && !m4, "");
         auto nofrom = l;
         nofrom.objects.back().from.clear();
         check("portals: one with no table or no link field -- refused in words", !core::check_layout(nofrom).empty(), "");

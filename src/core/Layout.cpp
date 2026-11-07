@@ -330,6 +330,22 @@ void add_portal(Layout& l, const PortalLink& link, const std::vector<std::string
     fit(l);
 }
 
+std::vector<std::string> columns_not_on(const LayoutObject& o, const std::vector<std::string>& from_fields) {
+    std::vector<std::string> out;
+    for (const auto& f : from_fields)
+        if (f != o.field && std::find(o.columns.begin(), o.columns.end(), f) == o.columns.end()) out.push_back(f);
+    return out;
+}
+
+bool move_column(LayoutObject& o, int i, int delta) {
+    const int n = static_cast<int>(o.columns.size()), j = i + delta;
+    if (i < 0 || i >= n || j < 0 || j >= n || delta == 0) return false;
+    const auto c = o.columns[static_cast<std::size_t>(i)];
+    o.columns.erase(o.columns.begin() + i);
+    o.columns.insert(o.columns.begin() + j, c);
+    return true;
+}
+
 std::string link_label(const PortalLink& k) { return k.from + " · " + k.field; }
 
 }  // namespace acorn::core
