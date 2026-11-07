@@ -4,7 +4,9 @@
 #include <glibmm/datetime.h>
 #include <gtkmm/calendar.h>
 #include <gtkmm/checkbutton.h>
+#include <gtkmm/button.h>
 #include <gtkmm/entry.h>
+#include <gtkmm/eventcontrollerkey.h>
 #include <gtkmm/eventcontrollerfocus.h>
 #include <gtkmm/drawingarea.h>
 #include <gtkmm/fixed.h>
@@ -169,7 +171,7 @@ void Shell::paint_form() {  // form: the picked record through its layout
             });
             w = da;
         } else if (o.kind == core::ObjectKind::Portal) {   // s011a
-            w = form_portal(o, *t);
+            w = form_portal(o, *t, focus_back);
         } else if (o.kind == core::ObjectKind::Text) {
             auto l = form_label(o.text, "acorn-field-name");
             l->set_xalign(1.0f);   // toward its box
@@ -263,10 +265,18 @@ void Shell::paint_form() {  // form: the picked record through its layout
 
 // s011a: a PORTAL -- the records of o.from whose o.field points at the shown
 // record, one row each under the column names, scrolling inside its box. A
-// link that's gone is a dashed "missing link", like a missing field. Shows
-// only (s011b edits a row, New / Delete). Reads through the Gate: a SELECT.
-Gtk::Widget* Shell::form_portal(const core::LayoutObject& o, const db::Table& parent) {  // form: the related records, listed
+// link that's gone is a dashed "missing link", like a missing field. Reads
+// through the Gate: a SELECT.
+// s011b: EDITED -- when the related table is writable each cell is a box that
+// saves as the Form's do (Enter / leave = one step, Esc puts it back, Ctrl+Z
+// with nothing typed undoes); the link field is never a box (it is this
+// record's key). "New" at the foot adds a related record with the link filled
+// in; a row's trash deletes it, following its own links as Delete Record does.
+// Each one step.
+Gtk::Widget* Shell::form_portal(const core::LayoutObject& o, const db::Table& parent, Gtk::Widget*& focus_back) {  // form: the related records
     constexpr std::int64_t kShown = 200;   // more than that: a line says how many, Browse has the rest
+    constexpr int kTrashW = 28;            // the row's delete button, and the names' row's matching gap
+    const unsigned gen = m_view_gen;
     const db::Table* ft = m_schema.table(o.from);
     const db::ForeignKey* fk = nullptr;
     if (ft)
@@ -279,48 +289,56 @@ Gtk::Widget* Shell::form_portal(const core::LayoutObject& o, const db::Table& pa
                             parent.name + "”. Nothing is lost -- link them again in the Graph, or remove the portal in Layouts.");
         return l;
     }
+    const bool can = m_writable && m_journal && db::Store::why_not_writable(*ft).empty();
     auto box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL);
     box->add_css_class("acorn-portal");
     box->set_name("form.portal." + o.from);
     box->set_overflow(Gtk::Overflow::HIDDEN);
 
-    auto cells = [&](const std::vector<std::string>& texts, const char* css, const std::vector<bool>& dim) {
-        auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL);
-        row->set_homogeneous(true);
-        row->add_css_class(css);
-        for (std::size_t i = 0; i < texts.size(); ++i) {
-            auto l = form_label(texts[i], i < dim.size() && dim[i] ? "acorn-null" : nullptr);
-            l->set_hexpand(true);
-            l->set_valign(Gtk::Align::CENTER);
-            l->set_max_width_chars(1);   // natural width tiny: the columns share the portal's width, never widen the Form
-            if (!texts[i].empty()) l->set_tooltip_text(texts[i]);
-            row->append(*l);
-        }
-        return row;
+    // A row: the columns sharing the width, then (when editable) the trash's slot.
+    auto row_of = [&](const char* css) {
+        auto line = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL);
+        line->add_css_class(css);
+        auto cols = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL);
+        cols->set_homogeneous(true);
+        cols->set_hexpand(true);
+        line->append(*cols);
+        return std::pair{line, cols};
     };
-    std::vector<std::string> head;
-    std::vector<bool> head_dim;
-    for (const auto& c : o.columns) {
-        const bool gone = !ft->column(c);
-        head.push_back(gone ? c + " ?" : c);
-        head_dim.push_back(gone);
+    auto cell_label = [&](const std::string& text, bool dim) {
+        auto l = form_label(text, dim ? "acorn-null" : nullptr);
+        l->set_hexpand(true);
+        l->set_valign(Gtk::Align::CENTER);
+        l->set_max_width_chars(1);   // natural width tiny: the columns share the portal's width, never widen the Form
+        if (!text.empty()) l->set_tooltip_text(text);
+        return l;
+    };
+    {
+        auto [hr, hc] = row_of("acorn-portal-head");
+        for (const auto& c : o.columns) {
+            const bool gone = !ft->column(c);
+            auto l = cell_label(gone ? c + " ?" : c, gone);
+            if (gone) l->set_tooltip_text("“" + o.from + "” no longer has “" + c + "” -- this column stays empty");
+            hc->append(*l);
+        }
+        if (can) {
+            auto gap = Gtk::make_managed<Gtk::Box>();
+            gap->set_size_request(kTrashW, -1);
+            hr->append(*gap);
+        }
+        box->append(*hr);
     }
-    auto hr = cells(head, "acorn-portal-head", head_dim);
-    int ci = 0;   // a column the table no longer has says so
-    for (auto* l = hr->get_first_child(); l; l = l->get_next_sibling(), ++ci)
-        if (static_cast<std::size_t>(ci) < head_dim.size() && head_dim[static_cast<std::size_t>(ci)])
-            l->set_tooltip_text("“" + o.from + "” no longer has “" + o.columns[static_cast<std::size_t>(ci)] + "” -- this column stays empty");
-    box->append(*hr);
 
     auto rows = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL);
     const db::Value* key = browse_value(ref.front());
     std::expected<db::Page, db::Error> page = db::Page{};
     if (key) page = db::read_related(*m_conn, *ft, {o.field}, {*key}, {0, kShown});
+    const std::string from = o.from;
     if (!page) {
         rows->append(*form_label("Could not read “" + o.from + "”: " + page.error().message, "acorn-missing"));
         if (auto lg = log::get(log::Area::Shell)) lg->warn("form: portal '{}': {}", o.from, page.error().message);
     } else if (page->rows.empty()) {
-        auto l = form_label("No “" + o.from + "” point at this record.", "acorn-null");
+        auto l = form_label("No “" + o.from + "” point at this record." + (can ? " New adds one." : ""), "acorn-null");
         l->add_css_class("acorn-portal-more");
         rows->append(*l);
     } else {
@@ -330,17 +348,86 @@ Gtk::Widget* Shell::form_portal(const core::LayoutObject& o, const db::Table& pa
             for (std::size_t i = 0; i < page->columns.size(); ++i) if (page->columns[i] == c) k = static_cast<int>(i);
             at.push_back(k);
         }
-        for (const auto& r : page->rows) {
-            std::vector<std::string> texts;
-            std::vector<bool> dim;
+        for (std::size_t ri = 0; ri < page->rows.size(); ++ri) {
+            const auto& r = page->rows[ri];
+            const std::string rid = ri < page->ids.size() ? page->ids[ri] : std::string{};
+            const bool row_can = can && !rid.empty();
+            auto [line, cols] = row_of("acorn-portal-row");
             for (std::size_t i = 0; i < at.size(); ++i) {
-                std::string tx;
-                if (at[i] >= 0 && static_cast<std::size_t>(at[i]) < r.size())
-                    tx = db::cell_text(r[static_cast<std::size_t>(at[i])], ft->columns[static_cast<std::size_t>(at[i])].type);
-                texts.push_back(tx);
-                dim.push_back(false);
+                const db::Column* col = at[i] >= 0 ? &ft->columns[static_cast<std::size_t>(at[i])] : nullptr;
+                const std::string tx = col && static_cast<std::size_t>(at[i]) < r.size()
+                                           ? db::cell_text(r[static_cast<std::size_t>(at[i])], col->type) : std::string{};
+                const bool boxed = row_can && col && col->pk_position == 0 && col->name != o.field &&
+                                   col->type != db::FieldType::Container;
+                if (!boxed) { cols->append(*cell_label(tx, false)); continue; }
+                auto e = Gtk::make_managed<Gtk::Entry>();
+                e->add_css_class("acorn-portal-entry");
+                e->set_hexpand(true);
+                e->set_width_chars(1);
+                e->set_text(tx);
+                e->set_enable_undo(false);
+                e->set_name("form.portal." + from + "." + col->name);
+                if (col->type == db::FieldType::Date) e->set_placeholder_text("YYYY-MM-DD");
+                const std::string cname = col->name;
+                const std::string fkey = "portal|" + from + "|" + rid + "|" + cname;
+                // What the record holds: a save keeps the boxes (Tab's focus stays),
+                // so the box's own idea of "saved" moves with each save.
+                auto saved = std::make_shared<std::string>(tx);
+                auto keep = [this, e, from, rid, cname, saved] {
+                    const std::string typed = e->get_text();
+                    if (commit_related(from, rid, cname, typed, *saved)) *saved = typed;
+                };
+                e->signal_activate().connect([this, keep, gen] { if (gen == m_view_gen) keep(); });
+                auto focus = Gtk::EventControllerFocus::create();
+                focus->signal_enter().connect([this, fkey, gen] { if (gen == m_view_gen) m_form_focus = fkey; });
+                focus->signal_leave().connect([this, keep, gen] {
+                    if (m_browse_painting || gen != m_view_gen) return;
+                    keep();
+                });
+                e->add_controller(focus);
+                // Esc -- or Ctrl+Z with typing pending -- puts the box back; Ctrl+Z
+                // with nothing pending undoes the last step (as the Form's boxes).
+                auto keys = Gtk::EventControllerKey::create();
+                keys->signal_key_pressed().connect(
+                    [this, e, saved, gen](guint keyval, guint, Gdk::ModifierType state) -> bool {
+                        if (gen != m_view_gen) return false;
+                        const bool ctrl_z = (keyval == GDK_KEY_z || keyval == GDK_KEY_Z) &&
+                            (state & Gdk::ModifierType::CONTROL_MASK) == Gdk::ModifierType::CONTROL_MASK &&
+                            (state & Gdk::ModifierType::SHIFT_MASK) != Gdk::ModifierType::SHIFT_MASK;
+                        if (keyval != GDK_KEY_Escape && !ctrl_z) return false;
+                        if (ctrl_z && std::string(e->get_text()) == *saved) { activate_action("win.undo"); return true; }
+                        e->set_text(*saved);
+                        e->set_position(-1);
+                        return true;
+                    },
+                    false);
+                keys->set_propagation_phase(Gtk::PropagationPhase::CAPTURE);
+                e->add_controller(keys);
+                if (m_form_focus == fkey) focus_back = e;
+                cols->append(*e);
             }
-            rows->append(*cells(texts, "acorn-portal-row", dim));
+            if (can) {
+                auto del = Gtk::make_managed<Gtk::Button>();
+                del->set_icon_name("user-trash-symbolic");
+                del->add_css_class("flat");
+                del->add_css_class("acorn-portal-trash");
+                del->set_size_request(kTrashW, -1);
+                del->set_name("form.portal." + from + ".delete");
+                del->set_sensitive(row_can);
+                del->set_tooltip_text("Delete this “" + from + "” record -- Ctrl+Z brings it back");
+                del->signal_clicked().connect([this, rid, from, gen] {
+                    if (gen != m_view_gen) return;
+                    auto d = db::verbs::delete_record(*m_journal, rid);
+                    if (auto lg = log::get(log::Area::App))
+                        lg->info("journal: portal delete {}: {}", db::Store::describe(rid), d ? "deleted" : d.error().message);
+                    if (d) browse_note("Deleted " + db::Store::describe(rid) + ". Ctrl+Z brings it back.", "ok");
+                    else   browse_note("Not deleted: " + d.error().message + ".", "error");
+                    m_form_focus.clear();
+                    Glib::signal_idle().connect_once([this] { load_browse_page(); });   // a row went: repaint
+                });
+                line->append(*del);
+            }
+            rows->append(*line);
         }
         if (page->total > static_cast<std::int64_t>(page->rows.size())) {
             auto more = form_label(std::to_string(page->rows.size()) + " of " + std::to_string(page->total) +
@@ -354,8 +441,61 @@ Gtk::Widget* Shell::form_portal(const core::LayoutObject& o, const db::Table& pa
     sc->set_vexpand(true);
     sc->set_child(*rows);
     box->append(*sc);
-    box->set_tooltip_text("“" + o.from + "” records whose “" + o.field + "” points at this one -- editing them here comes next");
+    if (can && key && !key->is_null()) {   // the foot: New, the link filled in
+        auto add = Gtk::make_managed<Gtk::Button>("New “" + o.from + "”");
+        add->add_css_class("flat");
+        add->add_css_class("acorn-portal-new");
+        add->set_halign(Gtk::Align::START);
+        add->set_name("form.portal." + from + ".new");
+        add->set_tooltip_text("A new “" + from + "” record pointing at this one -- Ctrl+Z takes it away");
+        const std::string link = o.field;
+        const db::Value kv = *key;
+        std::string first;   // the new row's first box takes the focus
+        for (const auto& c : o.columns)
+            if (const auto* col = ft->column(c); first.empty() && col && col->pk_position == 0 && c != link &&
+                                                 col->type != db::FieldType::Container) first = c;
+        add->signal_clicked().connect([this, from, link, kv, first, gen] {
+            if (gen != m_view_gen) return;
+            auto made = db::verbs::new_record(*m_journal, from, {link}, {kv});
+            if (auto lg = log::get(log::Area::App))
+                lg->info("journal: portal new in '{}': {}", from, made ? "made" : made.error().message);
+            if (made) {
+                browse_note("Added a “" + from + "” record. Ctrl+Z takes it away.", "ok");
+                m_form_focus = first.empty() ? std::string{} : "portal|" + from + "|" + *made + "|" + first;
+            } else {
+                browse_note("Not added: " + made.error().message + ".", "error");
+            }
+            Glib::signal_idle().connect_once([this] { load_browse_page(); });   // a row came: repaint
+        });
+        box->append(*add);
+    } else if (!can) {
+        box->set_tooltip_text("“" + o.from + "” records whose “" + o.field + "” points at this one -- " +
+                              (m_writable ? "“" + o.from + "” has no key, so they are shown, not edited"
+                                          : std::string("this connection is read-only")));
+    }
     return box;
+}
+
+bool Shell::commit_related(const std::string& table, const std::string& row, const std::string& column,
+                           const std::string& typed, const std::string& saved) {  // form: a portal cell -> set_field
+    if (!m_journal || row.empty() || typed == saved) return false;   // left alone: not a step
+    const db::Table* t = m_schema.table(table);
+    const db::Column* c = t ? t->column(column) : nullptr;
+    if (!c) return false;
+    auto v = db::parse_field(typed, *c);
+    if (!v) {   // refused: repaint, so the box shows what is really there
+        browse_note("Not saved: " + v.error() + ".", "error");
+        Glib::signal_idle().connect_once([this] { load_browse_page(); });
+        return false;
+    }
+    auto r = db::verbs::set_field(*m_journal, row, column, *v);
+    if (auto lg = log::get(log::Area::App))
+        lg->info("journal: portal edit {} '{}': {}", db::Store::describe(row), column, r ? "saved" : r.error().message);
+    if (r) browse_note("Saved “" + table + "”.“" + column + "”. Ctrl+Z undoes it.", "ok");
+    else   browse_note("Not saved: " + r.error().message + ".", "error");
+    const bool ok = r.has_value();   // saved: the boxes stay (Tab's focus); refused: repaint
+    Glib::signal_idle().connect_once([this, ok] { load_browse_page(ok); });
+    return ok;
 }
 
 void Shell::form_step(int delta) {  // form: the previous / next record, across pages

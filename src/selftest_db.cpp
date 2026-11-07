@@ -2306,6 +2306,38 @@ void test_sample(Journal& j, Gate& g, const std::string& P) {
         check(P + "portals: an empty key -> none; a key nothing points at -> none; a field it hasn't / a mismatch -> refused in words",
               none && none->rows.empty() && none->total == 0 && nobody && nobody->rows.empty() && nobody->total == 0 &&
               !bad && bad.error().message.find("no_such") != std::string::npos && !odd, bad ? "read!" : bad.error().message);
+        // s011b: what a portal does -- New with the link filled in, an edit, Delete; each one step, each undone.
+        if (all && !all->rows.empty()) {
+            const Value who = all->rows[0][0];
+            auto before = read_related(g, ph, {"contact_id"}, {who}, {0, 50});
+            const auto n0 = before ? before->total : -1;
+            const auto steps = j.size();
+            auto made = verbs::new_record(j, "phones", {"contact_id"}, {who});
+            auto after = read_related(g, ph, {"contact_id"}, {who}, {0, 50});
+            check(P + "portals: New -- one step, the link filled in, it lists with the others",
+                  made && after && after->total == n0 + 1 && j.size() == steps + 1 &&
+                  std::find(after->ids.begin(), after->ids.end(), *made) != after->ids.end(),
+                  made ? j.undo_label() : made.error().message);
+            auto ed = made ? verbs::set_field(j, *made, "number", Value("555-0199")) : std::expected<void, Error>{};
+            auto seen = read_related(g, ph, {"contact_id"}, {who}, {0, 50});
+            bool has = false;
+            if (seen) for (const auto& r : seen->rows) for (const auto& v : r) has = has || (v.as_text() && *v.as_text() == "555-0199");
+            check(P + "portals: a row edited in place -- saved, still pointing here", ed && has, ed ? "" : ed.error().message);
+            auto u1 = j.undo();
+            auto u2 = j.undo();
+            auto back = read_related(g, ph, {"contact_id"}, {who}, {0, 50});
+            check(P + "portals: Ctrl+Z twice -- the edit, then the new record, gone", u1 && u2 && back && back->total == n0, "");
+            if (back && !back->ids.empty()) {
+                auto del = verbs::delete_record(j, back->ids.front());
+                auto less = read_related(g, ph, {"contact_id"}, {who}, {0, 50});
+                auto ud = j.undo();
+                auto again = read_related(g, ph, {"contact_id"}, {who}, {0, 50});
+                check(P + "portals: Delete a row -- one fewer; Ctrl+Z brings it back, the same id",
+                      del && less && less->total == n0 - 1 && ud && again && again->total == n0 &&
+                      std::find(again->ids.begin(), again->ids.end(), back->ids.front()) != again->ids.end(),
+                      del ? "" : del.error().message);
+            }
+        }
         const auto sql = related_sql(g, ph, {"contact_id"}, {0, 10});
         check(P + "portals: the value is bound, never written into the SQL", sql.find("= ?") != std::string::npos &&
               sql.find("WHERE") != std::string::npos, sql);
