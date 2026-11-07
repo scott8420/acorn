@@ -8,7 +8,11 @@
 //     Id    "table:<name>"                 a table
 //           "row:<n>:<table>:<key>"        a record (s006): n = the table
 //                                          name's byte length, key = the
-//                                          primary key's values, encoded
+//                                          primary key's fields BY NAME and
+//                                          their values, encoded (s007d: a
+//                                          step taken under another key is
+//                                          refused, never applied to the
+//                                          wrong record)
 //           "field:<n>:<table>:<column>"   one field's values in every record
 //                                          (s007) -- what Delete Field keeps
 //                                          so undo can put them back
@@ -94,6 +98,8 @@ struct TableDef {
     std::vector<ColumnDef> columns;
     std::int64_t           rows = 0;          // live count -- a step never drops data
     std::vector<IndexDef>  indexes;           // by name (s007)
+    std::string            key_name;          // the engine's name for the key's own index / constraint
+                                              // (s007d: PostgreSQL drops it by name); not compared
     // Same fields by name (order is display only), same indexes, same rows.
     bool operator==(const TableDef& o) const;
 
@@ -118,6 +124,7 @@ struct RowDef {
 struct FieldData {
     std::string                     table;
     std::string                     column;
+    std::vector<std::string>        key_fields;   // what `keys` are values of (s007d)
     std::vector<std::vector<Value>> keys;     // keys[i] holds values[i]; in key order
     std::vector<Value>              values;
     bool operator==(const FieldData&) const = default;
@@ -143,8 +150,9 @@ std::string check_new_table(const TableDef& t, const Schema& existing);
 // One step changes the fields one way: a field whose name alone changed is a
 // RENAME (one field gone + one come, otherwise identical); new fields are
 // added at the end; gone fields are dropped; indexes no longer wanted are
-// dropped first and new ones made last. Anything else (a field's type,
-// required, default, the key) is refused in words -- s007c. MariaDB gets ONE
+// dropped first and new ones made last; a field's type / required / default
+// change (s007c) and the key (s007d: a step of its own) as described at
+// their verbs. Refusals come back in words. MariaDB gets ONE
 // ALTER TABLE (it can't roll DDL back, so one statement is the step).
 std::expected<std::vector<std::string>, std::string>
 plan_alter(Dialect d, char quote, const TableDef& live, const TableDef& want);
@@ -187,11 +195,15 @@ public:
     Store(Connection& c, Dialect d, const Capabilities& caps) : m_conn(c), m_dialect(d), m_caps(caps) {}
 
     static Id table_id(const std::string& name) { return "table:" + name; }
-    // A record by its key values, in key order. "" when a value can't be a key
-    // Acorn writes by (NULL, a blob).
-    static Id row_id(const std::string& table, const std::vector<db::Value>& key);
+    // A record by its key: the key's fields and their values, in key order. ""
+    // when a value can't be a key Acorn writes by (NULL, a blob), or the
+    // fields and values don't pair up.
+    static Id row_id(const std::string& table, const std::vector<std::string>& key_fields,
+                     const std::vector<db::Value>& key);
     // Back again: false when `id` is not a well-formed row id.
     static bool parse_row_id(const Id& id, std::string& table, std::vector<db::Value>& key);
+    static bool parse_row_id(const Id& id, std::string& table, std::vector<std::string>& key_fields,
+                             std::vector<db::Value>& key);
     // What a step that MAKES a record in `table` declares (the record's own id
     // is not known until the engine assigns its key).
     static Id new_row_id(const std::string& table) { return "new:" + table; }
@@ -253,6 +265,7 @@ private:
     std::vector<std::string> primary_key_of(const std::string& table) const;
     bool write_back(const std::string& table, const ColumnDef& from, const ColumnDef& to, const FieldData& before);
     std::string where_key(const Table& t) const;
+    bool same_key(const std::string& table, const Table& t, const std::vector<std::string>& named) const;
 
     Connection&           m_conn;
     Dialect               m_dialect;
@@ -373,6 +386,19 @@ std::expected<std::vector<std::string>, Error> design_losses(Journal& j, const T
 // (db/Convert) and KEPT in the step, so undo puts back exactly what was there.
 // Not the key (s007d). A design_table step of one change.
 std::expected<void, Error> change_field(Journal& j, const std::string& table, const ColumnDef& c);
+// s007d -- Change Key of “t”: records are found by `fields` (in key order)
+// from now on; `counting` makes a lone whole-number key count up (or stop).
+// Fields joining the key become required; fields leaving it stay, required,
+// values intact. Refused in words: a field empty in some record, values shared
+// by two records, a counting key that isn't one whole-number field (SQLite: a
+// lone INTEGER key always counts). The key changes in a step of its own.
+// Label: Change Key of “t” to “a”, “b” -- or Make “id” Count Up / Stop “id”
+// Counting Up when only the counting changes.
+std::expected<void, Error> change_key(Journal& j, const std::string& table, const std::vector<std::string>& fields,
+                                      bool counting);
+// The table as change_key would make it (the designer builds its picture
+// with this, so the window and the verb agree). Refused: no such field.
+std::expected<TableDef, std::string> keyed(const TableDef& live, const std::vector<std::string>& fields, bool counting);
 // What a design step would do to the live table, as the SQL put() will run
 // (the designer's preview): `want` is the table as the designer has it.
 std::expected<std::vector<std::string>, Error> preview(Journal& j, const TableDef& want);

@@ -233,27 +233,29 @@ void DesignTableWindow::add_field_row(const db::ColumnDef* live) {
     const bool key = live && live->pk_position > 0;
     const db::FieldType kind = live ? db::map_type(m_dialect, live->decl_type) : db::FieldType::Text;
     if (key || kind == db::FieldType::Unknown) {
-        // The key (s007d), or a type Acorn doesn't map: shown, not changed.
-        std::string what = key ? std::string(db::to_string(kind)) + (live->auto_increment ? " · key, counts up" : " · key")
-                               : live->decl_type;
+        // A key field (its kind, required, default stay -- s007d), or a type
+        // Acorn doesn't map: shown, not changed.
+        std::string what = key ? std::string(db::to_string(kind)) : live->decl_type;
         auto* t = label(what, "dim-label");
-        t->set_size_request(330, -1);
-        t->set_tooltip_text(key ? live->decl_type + " -- the key is not changed here yet"
+        m_mid->add_widget(*t);   // as wide as the kind + Required + default of the other rows
+        t->set_tooltip_text(key ? live->decl_type + " -- a key field keeps its kind; move the key off it to change that"
                                 : live->decl_type + " -- a type Acorn doesn't map; not changed here");
         r.box->append(*t);
     } else {
+        auto* mid = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        m_mid->add_widget(*mid);
         std::vector<Glib::ustring> types(std::begin(kTypeNames), std::end(kTypeNames));
         r.type = Gtk::make_managed<Gtk::DropDown>(Gtk::StringList::create(types));
         r.type->set_selected(static_cast<unsigned>(kind));
         r.type->set_size_request(120, -1);
         r.type->set_tooltip_text(live ? live->decl_type + " -- pick another kind to convert its values" : "The kind of field");
         r.type->property_selected().signal_changed().connect([this] { refresh(); });
-        r.box->append(*r.type);
+        mid->append(*r.type);
         r.required = Gtk::make_managed<Gtk::CheckButton>("Required");
         r.required->set_active(live && !live->nullable);
         r.required->set_tooltip_text("Every record must hold a value here");
         r.required->signal_toggled().connect([this] { refresh(); });
-        r.box->append(*r.required);
+        mid->append(*r.required);
         r.dflt = Gtk::make_managed<Gtk::Entry>();
         r.dflt->set_placeholder_text("no default");
         r.dflt->set_text(live ? db::default_text(live->default_sql) : "");
@@ -261,15 +263,35 @@ void DesignTableWindow::add_field_row(const db::ColumnDef* live) {
         r.dflt->set_tooltip_text("What a new record holds here when nothing is given");
         r.dflt->set_name(live ? "design.default." + live->name : "design.default.new");
         r.dflt->signal_changed().connect([this] { refresh(); });
-        r.box->append(*r.dflt);
+        mid->append(*r.dflt);
+        r.box->append(*mid);
     }
+    // s007d: the key.
+    r.key = Gtk::make_managed<Gtk::CheckButton>("Key");
+    r.key->set_name(live ? "design.key." + live->name : "design.key.new");
+    r.key->set_active(key);
+    if (live) {
+        r.key->set_tooltip_text("Records are found by the key -- filled and different in every record");
+    } else {
+        r.key->set_sensitive(false);
+        r.key->set_tooltip_text("Add the field first, then make it the key");
+    }
+    r.key->signal_toggled().connect([this] { follow_key(); refresh(); });
+    r.box->append(*r.key);
+    r.counts = Gtk::make_managed<Gtk::CheckButton>("counts up");
+    r.counts->set_name(live ? "design.counts." + live->name : "design.counts.new");
+    r.counts->set_active(live && live->auto_increment);
+    r.counts->set_opacity(0.0);   // its slot is kept on every row, so the columns line up
+    r.counts->signal_toggled().connect([this] { refresh(); });
+    r.box->append(*r.counts);
+
     r.del = Gtk::make_managed<Gtk::Button>();
     r.del->set_has_frame(false);
     if (live) {
         r.del->set_icon_name("user-trash-symbolic");
         if (key) {
             r.del->set_sensitive(false);
-            r.del->set_tooltip_text("The key is not changed here");
+            r.del->set_tooltip_text("Part of the key -- move the key off it first");
         } else {
             r.del->set_tooltip_text("Delete this field");
         }
@@ -282,6 +304,7 @@ void DesignTableWindow::add_field_row(const db::ColumnDef* live) {
                     if (f.type) f.type->set_sensitive(!f.deleted);
                     if (f.required) f.required->set_sensitive(!f.deleted);
                     if (f.dflt) f.dflt->set_sensitive(!f.deleted);
+                    f.key->set_sensitive(!f.deleted);
                     if (f.deleted) {   // a field going is not also renamed or changed
                         const db::ColumnDef* c = m_live.column(orig);
                         m_resetting = true;
@@ -289,6 +312,7 @@ void DesignTableWindow::add_field_row(const db::ColumnDef* live) {
                         if (c && f.type) f.type->set_selected(static_cast<unsigned>(db::map_type(m_dialect, c->decl_type)));
                         if (c && f.required) f.required->set_active(!c->nullable);
                         if (c && f.dflt) f.dflt->set_text(db::default_text(c->default_sql));
+                        f.key->set_active(false);
                         m_resetting = false;
                     }
                     f.del->set_icon_name(f.deleted ? "edit-undo-symbolic" : "user-trash-symbolic");
@@ -312,6 +336,56 @@ void DesignTableWindow::add_field_row(const db::ColumnDef* live) {
     m_field_box.append(*r.box);
     m_fields.push_back(r);
     rebuild_index_fields();
+    follow_key();
+}
+
+db::FieldType DesignTableWindow::kind_of(const FieldRow& f) const {
+    if (f.type) {
+        const unsigned sel = f.type->get_selected();
+        return static_cast<db::FieldType>(sel < kTypeCount ? sel : 0u);
+    }
+    const db::ColumnDef* c = f.orig.empty() ? nullptr : m_live.column(f.orig);
+    return c ? db::map_type(m_dialect, c->decl_type) : db::FieldType::Text;
+}
+
+std::vector<std::string> DesignTableWindow::key_wanted(bool& counting) const {
+    std::vector<std::string> k;
+    const FieldRow* lone = nullptr;
+    for (const auto& f : m_fields) {
+        if (f.deleted || f.orig.empty() || !f.key->get_active()) continue;
+        k.push_back(f.name->get_text());
+        lone = &f;
+    }
+    counting = k.size() == 1 && lone && kind_of(*lone) == db::FieldType::Integer && lone->counts->get_active();
+    return k;
+}
+
+// The "counts up" toggle shows on the one row that is the key alone, when it
+// is a whole number. SQLite: a lone INTEGER key always counts (its rule) --
+// shown ticked, not changeable.
+void DesignTableWindow::follow_key() {
+    if (m_following) return;
+    m_following = true;
+    int keys = 0;
+    for (const auto& f : m_fields) if (!f.deleted && !f.orig.empty() && f.key->get_active()) ++keys;
+    for (auto& f : m_fields) {
+        const bool lone = keys == 1 && !f.deleted && !f.orig.empty() && f.key->get_active() &&
+                          kind_of(f) == db::FieldType::Integer;
+        f.counts->set_opacity(lone ? 1.0 : 0.0);
+        f.counts->set_can_target(lone);
+        f.counts->set_can_focus(lone);
+        const db::ColumnDef* c = f.orig.empty() ? nullptr : m_live.column(f.orig);
+        const bool rowid = m_dialect == db::Dialect::SQLite && c && lower(c->decl_type) == "integer";
+        if (lone && rowid) {
+            f.counts->set_active(true);
+            f.counts->set_sensitive(false);
+            f.counts->set_tooltip_text("On SQLite a key of one INTEGER field always counts up -- the engine's own rule");
+        } else {
+            f.counts->set_sensitive(lone);
+            f.counts->set_tooltip_text("A new record gets the next number by itself");
+        }
+    }
+    m_following = false;
 }
 
 std::expected<db::ColumnDef, std::string> DesignTableWindow::field_of(const FieldRow& f) const {
@@ -439,6 +513,21 @@ db::TableDef DesignTableWindow::want() const {
         w.indexes.push_back(ix);
     }
     std::sort(w.indexes.begin(), w.indexes.end(), [](auto& a, auto& b) { return a.name < b.name; });
+    // s007d: the key as the Key ticks have it (the verb's own rules: fields
+    // joining become required, leaving stay required).
+    bool counting = false;
+    const auto kf = key_wanted(counting);
+    std::vector<std::pair<int, std::string>> lk;
+    bool lc = false;
+    for (const auto& c : m_live.columns) {
+        if (c.pk_position > 0) lk.push_back({c.pk_position, c.name});
+        if (c.auto_increment) lc = true;
+    }
+    std::sort(lk.begin(), lk.end());
+    std::vector<std::string> live_key;
+    for (const auto& [p, n] : lk) live_key.push_back(n);
+    if (kf != live_key || counting != lc)
+        if (auto k = db::verbs::keyed(w, kf, counting)) w = *k;
     return w;
 }
 
@@ -569,6 +658,17 @@ void DesignTableWindow::refresh() {
     }
     m_losses.set_visible(!losses.empty());
     m_understand.set_visible(!losses.empty());
+    {   // s007d: a key change loses nothing -- the tick says what undoes it
+        bool keyed = false;
+        for (const auto& f : m_fields)
+            if (!f.orig.empty() && m_live.column(f.orig) &&
+                ((m_live.column(f.orig)->pk_position > 0) != (f.key->get_active() && !f.deleted)))
+                keyed = true;
+        for (const auto& f : m_fields)
+            if (f.counts->get_can_target() && m_live.column(f.orig) && m_live.column(f.orig)->auto_increment != f.counts->get_active())
+                keyed = true;
+        m_understand.set_label(keyed ? "I understand -- Ctrl+Z puts the key back" : "I understand -- Ctrl+Z brings them back");
+    }
 
     const bool ok = why.empty() && !plan.empty() && (losses.empty() || m_understand.get_active());
     m_ok.set_sensitive(ok);

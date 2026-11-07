@@ -627,29 +627,35 @@ void test_journal_pure() {
 
 // ── s006: record ids ─────────────────────────────────────────────────────────
 void test_row_ids() {
-    auto round = [](const std::string& t, std::vector<Value> k) {
-        const auto id = Store::row_id(t, k);
+    auto round = [](const std::string& t, std::vector<std::string> f, std::vector<Value> k) {
+        const auto id = Store::row_id(t, f, k);
         std::string t2;
+        std::vector<std::string> f2;
         std::vector<Value> k2;
-        return !id.empty() && Store::parse_row_id(id, t2, k2) && t2 == t && k2 == k;
+        return !id.empty() && Store::parse_row_id(id, t2, f2, k2) && t2 == t && f2 == f && k2 == k;
     };
-    check("row id: integer key round-trips", round("customers", {Value(std::int64_t{7})}), Store::row_id("customers", {Value(7)}));
-    check("row id: text with : ; and quotes, a table with : in its name",
-          round("odd:table;x", {Value("a:b;c\"d"), Value(std::int64_t{-3})}), "");
+    check("row id: integer key round-trips", round("customers", {"id"}, {Value(std::int64_t{7})}),
+          Store::row_id("customers", {"id"}, {Value(7)}));
+    check("row id: text with : ; = and quotes, a table and a key field with : in their names",
+          round("odd:table;x", {"a:b", "c=d;"}, {Value("a:b;c\"d"), Value(std::int64_t{-3})}), "");
     check("row id: composite (text, real, int) round-trips",
-          round("t", {Value("k"), Value(2.5), Value(std::int64_t{9})}), "");
-    check("row id: empty text key round-trips", round("t", {Value("")}), "");
-    check("row id: NULL / blob / no key -> no id",
-          Store::row_id("t", {Value()}).empty() && Store::row_id("t", {Value(Blob{1})}).empty() &&
-          Store::row_id("t", {}).empty(), "");
+          round("t", {"a", "b", "c"}, {Value("k"), Value(2.5), Value(std::int64_t{9})}), "");
+    check("row id: empty text key round-trips", round("t", {"code"}, {Value("")}), "");
+    check("row id: NULL / blob / no key / unpaired fields -> no id",
+          Store::row_id("t", {"id"}, {Value()}).empty() && Store::row_id("t", {"id"}, {Value(Blob{1})}).empty() &&
+          Store::row_id("t", {}, {}).empty() && Store::row_id("t", {"a", "b"}, {Value(1)}).empty() &&
+          Store::row_id("t", {""}, {Value(1)}).empty(), "");
     std::string t; std::vector<Value> k;
     check("row id: garbage is not a row id",
-          !Store::parse_row_id("table:x", t, k) && !Store::parse_row_id("row:99:x:i1;", t, k) &&
-          !Store::parse_row_id("row:1:x:q1;", t, k) && !Store::parse_row_id("row:1:x:", t, k) &&
-          !Store::parse_row_id("row:1:x:i1", t, k), "");
+          !Store::parse_row_id("table:x", t, k) && !Store::parse_row_id("row:99:x:2:id=i1;", t, k) &&
+          !Store::parse_row_id("row:1:x:2:id=q1;", t, k) && !Store::parse_row_id("row:1:x:", t, k) &&
+          !Store::parse_row_id("row:1:x:2:id=i1", t, k) && !Store::parse_row_id("row:1:x:i1;", t, k) &&
+          !Store::parse_row_id("row:1:x:2:id=", t, k), "");
+    check("row id: s007d -- the key's fields are part of the id",
+          Store::row_id("t", {"id"}, {Value(5)}) != Store::row_id("t", {"n"}, {Value(5)}), "");
     check("row id: describe() says table and key",
-          Store::describe(Store::row_id("customers", {Value(7)})) == "“customers” record 7",
-          Store::describe(Store::row_id("customers", {Value(7)})));
+          Store::describe(Store::row_id("customers", {"id"}, {Value(7)})) == "“customers” record 7",
+          Store::describe(Store::row_id("customers", {"id"}, {Value(7)})));
 }
 
 // s006: records through the door -- every engine.
@@ -667,7 +673,7 @@ void test_records(Journal& j, Gate& g, Engine* e, const ConnectParams& ro, const
     auto a = verbs::new_record(j, "acorn_people", {"name", "age"}, {Value("Ada"), Value(36)});
     auto b = verbs::new_record(j, "acorn_people", {"name"}, {Value("Grace")});
     check(P + "records: New Record learns the engine's key (1, 2)",
-          a && b && *a == Store::row_id("acorn_people", {Value(1)}) && *b == Store::row_id("acorn_people", {Value(2)}),
+          a && b && *a == Store::row_id("acorn_people", {"id"}, {Value(1)}) && *b == Store::row_id("acorn_people", {"id"}, {Value(2)}),
           a ? (b ? *b : b.error().message) : a.error().message);
     if (!a || !b) return;
     check(P + "records: the label names the table", j.undo_label() == "New Record in “acorn_people”", j.undo_label());
@@ -872,7 +878,7 @@ void test_browse(Journal& j, Gate& g, Engine* e, const std::string& P) {
           p1->rows[0][1] == Value("Grace") && p3->rows[0][1] == Value("Frances") && page_range(*p1) == "1–3 of 7",
           p1 ? page_range(*p1) : p1.error().message);
     check(P + "browse: each record carries its journal id",
-          p1 && p1->ids.size() == 3 && p1->ids[1] == Store::row_id("acorn_browse", {Value(2)}), p1 && !p1->ids.empty() ? p1->ids[0] : "");
+          p1 && p1->ids.size() == 3 && p1->ids[1] == Store::row_id("acorn_browse", {"id"}, {Value(2)}), p1 && !p1->ids.empty() ? p1->ids[0] : "");
     auto byname = read_page(g, *bt, {0, 7, "name"});
     auto desc = read_page(g, *bt, {0, 2, "name", true});
     check(P + "browse: sorted by a column, both ways",
@@ -1218,6 +1224,219 @@ bool has_table(Connection& c, const std::string& n) {
     return s && s->table(n);
 }
 
+// ── s007d: the key ───────────────────────────────────────────────────────────
+void test_key_pure() {
+    TableDef live;
+    live.name = "people";
+    live.key_name = "people_pkey";
+    live.columns = {{"id", "INTEGER", true, std::nullopt, 1, true},
+                    {"email", "TEXT", true, std::nullopt, 0, false},
+                    {"age", "INTEGER", true, std::nullopt, 0, false}};
+    auto by_email = verbs::keyed(live, {"email"}, false);
+    check("key: verbs::keyed() -- email joins (required), id leaves (required, stops counting)",
+          by_email && by_email->column("email")->pk_position == 1 && !by_email->column("email")->nullable &&
+          by_email->column("id")->pk_position == 0 && !by_email->column("id")->auto_increment &&
+          !by_email->column("id")->nullable && !by_email->column("age")->nullable == false, "");
+    check("key: verbs::keyed() refuses a field the table doesn't have, or one named twice",
+          !verbs::keyed(live, {"nope"}, false) && !verbs::keyed(live, {"email", "email"}, false), "");
+    check("key: the label names the new key", verbs::design_label(live, *by_email) == "Change Key of “people” to “email”",
+          verbs::design_label(live, *by_email));
+
+    auto sq = plan_alter(Dialect::SQLite, '"', live, *by_email);
+    std::string all;
+    if (sq) for (auto& s : *sq) all += s + "\n";
+    check("key: SQLite makes the table again -- the new key written, the id count carried, the old row cleared",
+          sq && all.find("PRIMARY KEY (\"email\")") != std::string::npos &&
+          all.find("\"email\" TEXT NOT NULL") != std::string::npos &&
+          all.find("INSERT INTO sqlite_sequence") != std::string::npos &&
+          all.find("DELETE FROM sqlite_sequence WHERE name = 'people'") != std::string::npos &&
+          all.find("AUTOINCREMENT") == std::string::npos, sq ? all : sq.error());
+
+    TableDef pl = live;
+    pl.columns[0].decl_type = "bigint";
+    pl.columns[0].nullable = false;
+    pl.columns[1].decl_type = "text";
+    auto pk = verbs::keyed(pl, {"email"}, false);
+    auto pg = plan_alter(Dialect::PostgreSQL, '"', pl, *pk);
+    check("key: PostgreSQL -- DROP IDENTITY, DROP CONSTRAINT by name, SET NOT NULL, ADD PRIMARY KEY, in that order",
+          pg && pg->size() == 4 && (*pg)[0] == "ALTER TABLE \"people\" ALTER COLUMN \"id\" DROP IDENTITY" &&
+          (*pg)[1] == "ALTER TABLE \"people\" DROP CONSTRAINT \"people_pkey\"" &&
+          (*pg)[2] == "ALTER TABLE \"people\" ALTER COLUMN \"email\" SET NOT NULL" &&
+          (*pg)[3] == "ALTER TABLE \"people\" ADD PRIMARY KEY (\"email\")",
+          pg ? (pg->empty() ? "" : (*pg)[0] + " / " + std::to_string(pg->size())) : pg.error());
+    auto back = plan_alter(Dialect::PostgreSQL, '"', *pk, pl);
+    std::string ball;
+    if (back) for (auto& s : *back) ball += s + "\n";
+    check("key: PostgreSQL -- a counting key back: identity added, the count starts past the highest id",
+          back && ball.find("ADD GENERATED BY DEFAULT AS IDENTITY") != std::string::npos &&
+          ball.find("setval(pg_get_serial_sequence('\"people\"', 'id'), COALESCE(MAX(\"id\"), 0) + 1, false)") != std::string::npos &&
+          ball.find("ALTER COLUMN \"email\" DROP NOT NULL") != std::string::npos,
+          back ? ball : back.error());
+
+    TableDef ml = pl;
+    ml.columns[0].decl_type = "bigint(20)";
+    ml.columns[1].decl_type = "varchar(255)";
+    auto mk = verbs::keyed(ml, {"email", "id"}, false);
+    auto my = plan_alter(Dialect::MariaDB, '`', ml, *mk);
+    check("key: MariaDB -- ONE ALTER: drop the key, the fields, the new key",
+          my && my->size() == 1 && (*my)[0].find("DROP PRIMARY KEY") != std::string::npos &&
+          (*my)[0].find("MODIFY COLUMN `id` bigint(20) NOT NULL") != std::string::npos &&
+          (*my)[0].find("AUTO_INCREMENT") == std::string::npos &&
+          (*my)[0].find("ADD PRIMARY KEY (`email`, `id`)") != std::string::npos,
+          my ? (my->empty() ? "" : (*my)[0]) : my.error());
+
+    // Refusals, in words.
+    auto mixed = *by_email;
+    mixed.columns[2].name = "years";
+    check("key: a key change mixed with other changes is refused -- a step of its own",
+          !plan_alter(Dialect::SQLite, '"', live, mixed), "");
+    auto none = verbs::keyed(live, {}, false);
+    auto pn = plan_alter(Dialect::PostgreSQL, '"', pl, *verbs::keyed(pl, {}, false));
+    check("key: no key at all is refused", none && !pn && pn.error().find("needs a key") != std::string::npos,
+          pn ? "planned!" : pn.error());
+    auto txt = verbs::keyed(pl, {"email"}, true);
+    auto pt = plan_alter(Dialect::PostgreSQL, '"', pl, *txt);
+    check("key: a text key can't count up", !pt && pt.error().find("whole number") != std::string::npos,
+          pt ? "planned!" : pt.error());
+    auto two = verbs::keyed(pl, {"id", "age"}, true);
+    check("key: a key of two fields doesn't count up", two && !two->column("id")->auto_increment, "");
+    auto stop = verbs::keyed(live, {"id"}, false);
+    auto ps = plan_alter(Dialect::SQLite, '"', live, *stop);
+    check("key: SQLite -- a lone INTEGER key always counts (the engine's rule), said in words",
+          !ps && ps.error().find("always counts up") != std::string::npos, ps ? "planned!" : ps.error());
+    auto ok_pg = plan_alter(Dialect::PostgreSQL, '"', pl, *verbs::keyed(pl, {"id"}, false));
+    check("key: PostgreSQL -- the key stops counting: DROP IDENTITY alone",
+          ok_pg && ok_pg->size() == 1 && (*ok_pg)[0].find("DROP IDENTITY") != std::string::npos,
+          ok_pg ? std::to_string(ok_pg->size()) : ok_pg.error());
+    check("key: the counting labels", verbs::design_label(pl, *verbs::keyed(pl, {"id"}, false)) == "Stop “id” Counting Up" &&
+          verbs::design_label(*verbs::keyed(pl, {"id"}, false), pl) == "Make “id” Count Up", "");
+    auto renamed = live;
+    renamed.columns[0].name = "pid";
+    auto pr = plan_alter(Dialect::PostgreSQL, '"', pl, [&] { auto x = pl; x.columns[0].name = "pid"; return x; }());
+    check("key: renaming the key field is a rename, not a key change",
+          pr && pr->size() == 1 && (*pr)[0].find("RENAME COLUMN") != std::string::npos, pr ? "" : pr.error());
+}
+
+// Every engine: the key moves, comes back, refuses what would break it.
+void test_key(Journal& j, Gate& g, Engine* e, const std::string& P) {
+    const Dialect d = e->dialect();
+    const std::string T = "acorn_key";
+    TableDef t;
+    t.name = T;
+    t.columns = {{"id", decl_for(d, FieldType::Integer), false, std::nullopt, 1, true},
+                 {"email", decl_for(d, FieldType::Text), true, std::nullopt, 0, false},
+                 {"name", decl_for(d, FieldType::Text), true, std::nullopt, 0, false},
+                 {"age", decl_for(d, FieldType::Integer), true, std::nullopt, 0, false}};
+    if (auto mk = verbs::new_table(j, t); !mk) { check(P + "key: fixture", false, mk.error().message); return; }
+    const char* rows[][3] = {{"ada@x", "Ada", "36"}, {"grace@x", "Grace", ""}, {"linus@x", "Ada", "54"}, {"gone@x", "Gone", "1"}};
+    for (auto& r : rows)
+        (void)verbs::new_record(j, T, {"email", "name", "age"},
+                                {Value(r[0]), Value(r[1]), *r[2] ? Value(static_cast<std::int64_t>(std::stoll(r[2]))) : Value()});
+    // the last one deleted: the highest id ever (4) is no longer in the table
+    (void)verbs::delete_record(j, Store::row_id(T, {"id"}, {Value(4)}));
+    auto pk = [&] {
+        auto s = g.introspect();
+        return s && s->table(T) ? s->table(T)->primary_key() : std::vector<std::string>{};
+    };
+    auto col = [&](const std::string& c) -> std::optional<Column> {
+        auto s = g.introspect();
+        if (!s || !s->table(T) || !s->table(T)->column(c)) return std::nullopt;
+        return *s->table(T)->column(c);
+    };
+
+    // Refused in words, nothing touched.
+    const auto steps = j.size();
+    auto dup = verbs::change_key(j, T, {"name"}, false);
+    check(P + "key: values shared by two records are refused, in words",
+          !dup && dup.error().message.find("1 value of “name” is shared by more than one record") != std::string::npos &&
+          j.size() == steps && pk() == std::vector<std::string>{"id"}, dup ? "made!" : dup.error().message);
+    auto emp = verbs::change_key(j, T, {"email", "age"}, false);
+    check(P + "key: a record without the field is refused, in words",
+          !emp && emp.error().message.find("1 record has no “age”") != std::string::npos && j.size() == steps,
+          emp ? "made!" : emp.error().message);
+    TableDef live = TableDef::from(*g.introspect()->table(T));
+    auto mixed = verbs::keyed(live, {"email"}, false);
+    mixed->columns.push_back({"extra", decl_for(d, FieldType::Text), true, std::nullopt, 0, false});
+    auto mx = verbs::design_table(j, *mixed);
+    check(P + "key: a key change with another change is refused -- a step of its own",
+          !mx && mx.error().message.find("step of its own") != std::string::npos && j.size() == steps,
+          mx ? "made!" : mx.error().message);
+
+    // The words before Apply.
+    auto words = verbs::design_losses(j, *verbs::keyed(live, {"email"}, false));
+    std::string w;
+    if (words) for (auto& x : *words) w += x + " | ";
+    check(P + "key: the words say what changes -- found by email, email required, id stays",
+          words && w.find("Records are found by “email” from now on") != std::string::npos &&
+          w.find("“email” becomes required") != std::string::npos &&
+          w.find("“id” stays, as a required field") != std::string::npos,
+          words ? w : words.error().message);
+
+    // Move it.
+    auto mv = verbs::change_key(j, T, {"email"}, false);
+    check(P + "key: Change Key moves it to email -- one step, labelled",
+          mv && j.size() == steps + 1 && pk() == std::vector<std::string>{"email"} &&
+          j.undo_label() == "Change Key of “acorn_key” to “email”", mv ? j.undo_label() : mv.error().message);
+    auto idc = col("id");
+    check(P + "key: id stays, required, no longer counting, values kept",
+          idc && !idc->nullable && !idc->auto_increment && idc->pk_position == 0, "");
+    // A record is found by its email now; a name under the old key is refused.
+    auto ed = verbs::set_field(j, Store::row_id(T, {"email"}, {Value("grace@x")}), "age", Value(85));
+    check(P + "key: a record is edited by its new key", ed.has_value(), ed ? "" : ed.error().message);
+    auto old = verbs::set_field(j, Store::row_id(T, {"id"}, {Value(1)}), "age", Value(99));
+    check(P + "key: a record named by the old key is refused in words, never matched by its values",
+          !old && old.error().message.find("found by “email” now, not “id”") != std::string::npos,
+          old ? "written!" : old.error().message);
+    (void)j.undo();   // the edit
+
+    // Back: undo puts the counting key back -- and on SQLite the id count too.
+    auto un = j.undo();
+    auto idb = col("id");
+    check(P + "key: undo -- found by id again, counting", un && pk() == std::vector<std::string>{"id"} && idb && idb->auto_increment,
+          un ? "" : un.error().message);
+    auto nr = verbs::new_record(j, T, {"email"}, {Value("new@x")});
+    if (d == Dialect::SQLite)
+        check(P + "key: SQLite -- the id count came back with the key: the next id is 5, never the deleted 4",
+              nr && *nr == Store::row_id(T, {"id"}, {Value(5)}), nr ? *nr : nr.error().message);
+    else
+        check(P + "key: the key counts again after undo", nr.has_value(), nr ? "" : nr.error().message);
+    if (nr) (void)j.undo();
+
+    // Counting off and on (the servers; SQLite refuses -- its rule).
+    auto off = verbs::change_key(j, T, {"id"}, false);
+    if (d == Dialect::SQLite) {
+        check(P + "key: SQLite refuses to stop a lone INTEGER key counting, in words",
+              !off && off.error().message.find("always counts up") != std::string::npos, off ? "made!" : off.error().message);
+    } else {
+        auto c0 = col("id");
+        check(P + "key: Stop Counting Up -- id is still the key, no longer counting",
+              off && c0 && !c0->auto_increment && pk() == std::vector<std::string>{"id"} &&
+              j.undo_label() == "Stop “id” Counting Up", off ? j.undo_label() : off.error().message);
+        auto none = verbs::new_record(j, T, {"email"}, {Value("nokey@x")});
+        check(P + "key: ... so a record without its key is refused by the engine", !none, none ? *none : "");
+        auto on = verbs::change_key(j, T, {"id"}, true);
+        auto c1 = col("id");
+        check(P + "key: Make Count Up -- counting again", on && c1 && c1->auto_increment &&
+              j.undo_label() == "Make “id” Count Up", on ? j.undo_label() : on.error().message);
+        auto nx = verbs::new_record(j, T, {"email"}, {Value("next@x")});
+        check(P + "key: the count starts past the highest id there", nx && *nx != Store::row_id(T, {"id"}, {Value(1)}) &&
+              *nx != Store::row_id(T, {"id"}, {Value(2)}) && *nx != Store::row_id(T, {"id"}, {Value(3)}),
+              nx ? *nx : nx.error().message);
+        if (nx) (void)j.undo();
+        auto u1 = j.undo(), u2 = j.undo();
+        check(P + "key: undo both -- counting as made", u1 && u2 && col("id") && col("id")->auto_increment,
+              u1 ? (u2 ? "" : u2.error().message) : u1.error().message);
+    }
+
+    // A key of two fields, and back.
+    auto two = verbs::change_key(j, T, {"name", "email"}, false);
+    check(P + "key: a key of two fields (name, email -- name repeats, the pair doesn't)",
+          two && pk() == std::vector<std::string>{"name", "email"}, two ? "" : two.error().message);
+    auto u = j.undo();
+    check(P + "key: undo -- id again", u && pk() == std::vector<std::string>{"id"}, u ? "" : u.error().message);
+    check(P + "key: nothing strayed", j.strays() == 1, std::to_string(j.strays()));
+}
+
 void test_journal(Engine* e, const ConnectParams& rw, const ConnectParams& ro, const std::string& P0) {
     const std::string P = P0 + ": journal: ";
     auto opened = e->open(rw);
@@ -1354,6 +1573,7 @@ void test_journal(Engine* e, const ConnectParams& rw, const ConnectParams& ro, c
     test_records(j, g, e, ro, P);
     test_browse(j, g, e, P);
     test_design(j, g, e, P);
+    test_key(j, g, e, P);
 }
 
 // SQLite-only behaviour: files.
@@ -1448,6 +1668,7 @@ void db_tests(CheckFn fn, int& skip_count) {
     test_types();
     test_journal_pure();
     test_design_pure();
+    test_key_pure();
     test_convert_pure();
     test_row_ids();
     test_browse_pure();

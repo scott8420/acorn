@@ -56,7 +56,7 @@ std::expected<Page, Error> read_page(Connection& c, const Table& t, const PageRe
         if (!keyed || at.size() != pk.size()) { p.ids.emplace_back(); continue; }
         std::vector<Value> key;
         for (auto i : at) key.push_back(i < row.size() ? row[i] : Value());
-        p.ids.push_back(Store::row_id(t.name, key));
+        p.ids.push_back(Store::row_id(t.name, pk, key));
     }
     return p;
 }

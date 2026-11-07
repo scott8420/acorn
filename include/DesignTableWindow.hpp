@@ -5,6 +5,7 @@
 #include <gtkmm/checkbutton.h>
 #include <gtkmm/dropdown.h>
 #include <gtkmm/entry.h>
+#include <gtkmm/sizegroup.h>
 #include <gtkmm/textview.h>
 #include <gtkmm/window.h>
 
@@ -25,7 +26,9 @@
 // words, with an "I understand" that is never ticked for you; Apply stays grey
 // until it is. s007c: a field's type, required and default are edited in its
 // row (values that won't fit the new kind, empties a "required" fills -- said
-// in words first). The key is shown, not editable (s007d).
+// in words first). s007d: each field row has a Key toggle (a key of several
+// fields follows the rows' order) and a lone whole-number key a "counts up"
+// toggle; the key changes in a step of its own, said in words before Apply.
 //
 // The window never touches a connection: Preview / Losses / Apply are Shell's.
 // Lifetime: the NewTableWindow shape -- a hide-on-close singleton; start()
@@ -53,6 +56,8 @@ private:
         Gtk::CheckButton* required = nullptr;
         Gtk::Entry*    dflt = nullptr;     // the default as typed ("" = none)
         Gtk::Button*   del = nullptr;
+        Gtk::CheckButton* key = nullptr;   // s007d: in the key
+        Gtk::CheckButton* counts = nullptr; // s007d: a lone whole-number key counts up
         bool           deleted = false;
     };
     struct IndexRow {
@@ -80,6 +85,10 @@ private:
     std::expected<db::ColumnDef, std::string> field_of(const FieldRow& f) const;
     void refresh();
     void on_apply();
+    // s007d: the key as the rows have it -- its fields in row order, counting.
+    std::vector<std::string> key_wanted(bool& counting) const;
+    db::FieldType kind_of(const FieldRow& f) const;
+    void follow_key();                     // the counts-up toggles follow the Key ticks
 
     db::Dialect             m_dialect = db::Dialect::SQLite;
     db::TableDef            m_live;
@@ -90,6 +99,8 @@ private:
     std::vector<IndexRow>   m_indexes;
     std::vector<std::string> m_pick_names;   // the New Index picker's rows
     bool                    m_resetting = false;
+    bool                    m_following = false;
+    Glib::RefPtr<Gtk::SizeGroup> m_mid = Gtk::SizeGroup::create(Gtk::SizeGroup::Mode::HORIZONTAL);   // kind + required + default
     Gtk::Label*             m_note = nullptr;
 
     widgets::Label          m_title;
