@@ -12,6 +12,74 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(GTKMM REQUIRED gtkmm-4.0)
 find_package(spdlog REQUIRED)
 
+# ── acorn_db -- the database layer's shared code (s002) ────────────────────────
+# Value / Result / Schema helpers and the type map. Linked by acorn_core AND by
+# every engine plugin, so it is position-independent and GTK-free. The plugins
+# never see acorn_core -- they implement db::Engine and nothing else.
+add_library(acorn_db STATIC
+    src/db/Value.cpp
+    src/db/Types.cpp
+)
+target_include_directories(acorn_db PUBLIC include)
+set_target_properties(acorn_db PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# ── Engine plugins -- one .so per engine, dlopen'd at runtime ──────────────────
+# Output to build/engines/ (the Loader's build-tree dir); install.sh copies them
+# to <prefix>/lib/acorn/engines/. An engine whose client library is missing at
+# build time is skipped with a message -- the app still builds and runs.
+set(ACORN_ENGINE_DIR "${CMAKE_CURRENT_BINARY_DIR}/engines")
+set(ACORN_ENGINES "")
+function(acorn_engine id)
+    add_library(acorn-engine-${id} MODULE ${ARGN})
+    set_target_properties(acorn-engine-${id} PROPERTIES
+        PREFIX ""
+        LIBRARY_OUTPUT_DIRECTORY "${ACORN_ENGINE_DIR}"
+        CXX_VISIBILITY_PRESET hidden
+        VISIBILITY_INLINES_HIDDEN ON)
+    target_link_libraries(acorn-engine-${id} PRIVATE acorn_db)
+    set(ACORN_ENGINES ${ACORN_ENGINES} acorn-engine-${id} PARENT_SCOPE)
+endfunction()
+
+find_package(SQLite3)
+if(SQLite3_FOUND)
+    acorn_engine(sqlite engines/sqlite/SqliteEngine.cpp)
+    # CMake 4.x names the target SQLite3::SQLite3 and deprecates the old
+    # SQLite::SQLite3; older CMake (Ubuntu 24.04's 3.28) has only the old name.
+    if(TARGET SQLite3::SQLite3)
+        target_link_libraries(acorn-engine-sqlite PRIVATE SQLite3::SQLite3)
+    else()
+        target_link_libraries(acorn-engine-sqlite PRIVATE SQLite::SQLite3)
+    endif()
+else()
+    message(STATUS "SQLite3 dev files not found -- the SQLite engine will not be built "
+                   "(Fedora: sqlite-devel)")
+endif()
+
+pkg_check_modules(MARIADB IMPORTED_TARGET libmariadb)
+if(MARIADB_FOUND)
+    acorn_engine(mariadb engines/mariadb/MariadbEngine.cpp)
+    target_link_libraries(acorn-engine-mariadb PRIVATE PkgConfig::MARIADB)
+else()
+    message(STATUS "libmariadb not found -- the MariaDB engine will not be built "
+                   "(Fedora: mariadb-connector-c-devel)")
+endif()
+
+pkg_check_modules(LIBPQ IMPORTED_TARGET libpq)
+if(LIBPQ_FOUND)
+    acorn_engine(postgres engines/postgres/PostgresEngine.cpp)
+    target_link_libraries(acorn-engine-postgres PRIVATE PkgConfig::LIBPQ)
+else()
+    message(STATUS "libpq not found -- the PostgreSQL engine will not be built "
+                   "(Fedora: libpq-devel)")
+endif()
+
+# Test-only plugin: a foreign ABI number, so the selftest proves the loader
+# refuses a stale .so. Lives in engines-test/, never installed.
+add_library(acorn-engine-badabi MODULE engines/test/BadAbi.cpp)
+set_target_properties(acorn-engine-badabi PROPERTIES
+    PREFIX "" LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/engines-test")
+target_include_directories(acorn-engine-badabi PRIVATE include)
+
 # ── acorn_core -- the GTK-free core (the model side of the one real seam) ──────
 # No gtkmm on this library's link line, BY DESIGN: a stray UI include under
 # core/ fails to compile, so the seam is enforced by the build graph and the
@@ -28,15 +96,27 @@ add_library(acorn_core STATIC
     # template over the app's store); Stones is the demo model + its verbs +
     # the verb table the selftest gate walks. docs/undo.md.
     src/core/Stones.cpp
+    # The engine plugin loader (dlopen). The app's side of the plugin seam.
+    src/db/Loader.cpp
 )
 target_include_directories(acorn_core PUBLIC include)
+target_link_libraries(acorn_core PUBLIC acorn_db ${CMAKE_DL_LIBS})
 # Vendored nlohmann/json (header-only, MIT), PRIVATE -- an implementation detail
 # of the pump, no consumer inherits the include (CANON: surprise-free build).
 target_include_directories(acorn_core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
 
 # ── Headless selftest -- exercises the core with no display ────────────────────
-add_executable(acorn_selftest src/selftest.cpp)
+add_executable(acorn_selftest src/selftest.cpp src/selftest_db.cpp)
 target_link_libraries(acorn_selftest PRIVATE acorn_core)
+# The selftest loads the real plugins from build/engines/ and the test plugin
+# from build/engines-test/, so building it builds them.
+if(ACORN_ENGINES)
+    add_dependencies(acorn_selftest ${ACORN_ENGINES})
+endif()
+add_dependencies(acorn_selftest acorn-engine-badabi)
+target_compile_definitions(acorn_selftest PRIVATE
+    ACORN_TEST_ENGINE_DIR="${ACORN_ENGINE_DIR}"
+    ACORN_TEST_BADABI_DIR="${CMAKE_CURRENT_BINARY_DIR}/engines-test")
 
 # ── App resources (gresource) -- the RESOURCE-PIPELINE paradigm ────────────────
 # glib-compile-resources embeds resources/acorn.gresource.xml into a C source;
@@ -89,3 +169,7 @@ target_link_libraries(acorn     PRIVATE ${GTKMM_LIBRARIES} acorn_core spdlog::sp
 target_link_directories(acorn   PRIVATE ${GTKMM_LIBRARY_DIRS})
 target_compile_options(acorn    PRIVATE ${GTKMM_CFLAGS_OTHER})
 target_compile_definitions(acorn PRIVATE ACORN_VERSION="${PROJECT_VERSION}")
+# The app loads engines at runtime; building it builds them.
+if(ACORN_ENGINES)
+    add_dependencies(acorn ${ACORN_ENGINES})
+endif()

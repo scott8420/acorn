@@ -51,6 +51,8 @@ while IFS= read -r p; do
     fi
 done < "$MANIFEST"
 "${SUDO[@]}" rmdir --ignore-fail-on-non-empty "$PREFIX/share/$APP" 2>/dev/null || true
+# The engine plugin dirs (s002) -- only if now empty.
+"${SUDO[@]}" rmdir --ignore-fail-on-non-empty "$PREFIX/lib/$APP/engines" "$PREFIX/lib/$APP" 2>/dev/null || true
 
 ICONDIR="$PREFIX/share/icons/hicolor"
 APPDIR="$PREFIX/share/applications"

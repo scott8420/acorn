@@ -25,8 +25,13 @@
 
 namespace core = acorn::core;
 
+namespace acorn::selftest {
+using CheckFn = void (*)(const std::string&, bool, const std::string&);
+void db_tests(CheckFn check, int& skip_count);   // selftest_db.cpp (s002)
+}
+
 namespace {
-int g_pass = 0, g_fail = 0;
+int g_pass = 0, g_fail = 0, g_skip = 0;
 void check(const std::string& name, bool ok, const std::string& detail = "") {
     if (ok) { ++g_pass; std::cout << "  PASS  " << name; }
     else    { ++g_fail; std::cout << "  FAIL  " << name; }
@@ -76,7 +81,7 @@ void roundtrip(const std::vector<core::FlatLine>& flat,
 }  // namespace
 
 int main() {
-    std::cout << "acorn_selftest -- recents pump + textmap mapping\n";
+    std::cout << "acorn_selftest -- core paradigms + the database layer\n";
 
     // ── Undo -- the one door, two pictures, gestures, merging (s046) ──────────
     {
@@ -399,7 +404,10 @@ int main() {
 
 
 
+    // ── The database layer (s002) ─────────────────────────────────────────────
+    acorn::selftest::db_tests(&check, g_skip);
+
     std::cout << "-----------------------------------------------\n";
-    std::cout << g_pass << " pass / " << g_fail << " fail\n";
+    std::cout << g_pass << " pass / " << g_fail << " fail / " << g_skip << " skipped\n";
     return g_fail == 0 ? 0 : 1;
 }
