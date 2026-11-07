@@ -71,6 +71,8 @@ Glib::RefPtr<Gio::Menu> Shell::build_menu() {  // zone: hamburger model
     file->append("New Database File\u2026", "win.new-file");
     file->append("New Address Book\u2026", "win.new-address-book");   // s009b: a starter
     file->append("Open a Database File\u2026", "win.open-file");
+    file->append("Open Solution\u2026", "win.open-solution");               // s009c
+    file->append("Point This Solution At\u2026", "win.repoint-solution");   // s009c
     m_recents_menu = Gio::Menu::create();
     file->append_submenu("Open Recent", m_recents_menu);
     menu->append_section(file);

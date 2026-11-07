@@ -22,6 +22,7 @@
 #include <giomm/simpleaction.h>
 
 #include <memory>
+#include <optional>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -171,6 +172,8 @@ private:
     std::string mark_of(const std::string& table, const std::string& id) const;  // category: graph: why a record is marked ("" = not)
     void paint_marks_note();                     // category: graph: Browse shows the marks
     void open_solution(const core::SavedConnection& c);  // category: graph: s009 -- the connection's .acorn, read (or a fresh one)
+    void on_open_solution();                     // category: graph: s009c -- pick an .acorn, connect to what it points at
+    void on_repoint_solution();                  // category: graph: s009c -- the next connection takes this solution along
 
     // ── ground (s005c) -- src/Shell_ground.cpp ──────────────────────────────
     void bind_ground();                          // category: ground: win.ground (radio) + the saved choice + the provider
@@ -315,6 +318,8 @@ private:
     std::map<std::string, Mark>     m_marks;
     core::Solution                  m_solution;        // s009: the open connection's .acorn (box places)
     std::string                     m_solution_path;
+    std::string                     m_forced_solution;   // s009c: Open Solution... -- this file, not the derived one
+    std::optional<core::Solution>   m_repoint;           // s009c: carried to the next connection
     unsigned                        m_graph_gen = 0;
     Gtk::Widget*                    m_graph_canvas = nullptr;   // the Fixed of boxes (handles are hit on it)
 

@@ -121,6 +121,7 @@ const std::vector<ShortcutSpec>& shortcut_registry() {
         // ── General ───────────────────────────────────────────────────────────
         {"General", "win.new-file",      {"<Ctrl>n"}, "", "New database file (empty SQLite)"},
         {"General", "win.open-file",     {"<Ctrl>o"}, "", "Open a database file"},
+        {"General", "win.open-solution", {"<Ctrl><Shift>o"}, "", "Open a solution (.acorn) and connect to its database"},
         {"General", "win.shortcuts",     {"<Ctrl>question", "<Ctrl>slash"}, "",
          "Keyboard shortcuts (this window)"},
         {"General", "win.about",         {"F1"}, "", "About Acorn"},

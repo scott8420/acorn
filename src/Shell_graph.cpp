@@ -6,6 +6,9 @@
 #include <gtkmm/drawingarea.h>
 #include <gtkmm/droptarget.h>
 #include <glibmm/miscutils.h>
+#include <gtkmm/filedialog.h>
+#include <gtkmm/filefilter.h>
+#include <giomm/liststore.h>
 #include <gtkmm/fixed.h>
 #include <gtkmm/gesturedrag.h>
 #include <gtkmm/gestureclick.h>
@@ -679,13 +682,76 @@ void Shell::open_solution(const core::SavedConnection& c) {  // graph: the conne
     const std::string app_dir = (fs::path(Glib::get_user_data_dir()) / "acorn").string();
     const bool beside = c.is_file() && core::folder_writable(fs::path(c.path).parent_path().string());
     m_solution_path = core::solution_path(c, app_dir, beside);
+    // s009c: Open Solution... names the file itself.
+    if (auto forced = std::exchange(m_forced_solution, std::string{}); !forced.empty()) m_solution_path = forced;
     auto s = core::load_solution(m_solution_path);
     m_solution = s ? *s : core::Solution{};
     m_solution.points_at = c;
+    // s009c: Point This Solution At... -- the carried solution becomes this
+    // connection's, unless it already has one (never overwritten).
+    if (auto carried = std::exchange(m_repoint, std::nullopt)) {
+        if (s) {
+            graph_note("Not re-pointed: this connection already has a solution (" + m_solution_path +
+                       ") -- it is the one open now; the other is unchanged.", "error");
+        } else {
+            m_solution = *carried;
+            m_solution.points_at = c;
+            const bool ok = core::save_solution(m_solution_path, m_solution);
+            graph_note(ok ? "The solution now points at " + c.label() + " (" + m_solution_path +
+                                "); the old file is unchanged."
+                          : "Not re-pointed: could not write " + m_solution_path + ".", ok ? "ok" : "error");
+            if (!ok) m_solution = core::Solution{c, {}};
+        }
+    }
     if (auto lg = log::get(log::Area::App))
         lg->info("solution: {} ({})", m_solution_path, s ? "read" : "none yet -- written on the first move");
     if (m_journal)
         m_journal->store().set_solution(&m_solution, [this] { return core::save_solution(m_solution_path, m_solution); });
+}
+
+void Shell::on_open_solution() {  // graph: s009c -- pick an .acorn, connect to what it points at
+    auto dialog = Gtk::FileDialog::create();
+    dialog->set_title("Open a solution");
+    auto filters = Gio::ListStore<Gtk::FileFilter>::create();
+    auto f = Gtk::FileFilter::create();
+    f->set_name("Acorn solutions");
+    f->add_pattern("*.acorn");
+    filters->append(f);
+    dialog->set_filters(filters);
+    dialog->open(*this, [this, dialog](const Glib::RefPtr<Gio::AsyncResult>& res) {
+        std::string path;
+        try {
+            auto file = dialog->open_finish(res);
+            if (!file) return;
+            path = file->get_path();
+        } catch (const Glib::Error&) {
+            return;   // cancelled
+        }
+        m_stack.set_visible_child("connect");
+        auto sol = core::load_solution(path);
+        if (!sol) { set_status("Not opened: " + path + " isn't an Acorn solution Acorn can read.", "error"); return; }
+        const auto& c = sol->points_at;
+        if (c.engine.empty() || (c.is_file() && !std::filesystem::exists(c.path))) {
+            set_status("The solution points at " + (c.engine.empty() ? std::string("nothing") : c.path) +
+                       ", which isn't there -- open the database, then Point This Solution At... it.", "error");
+            return;
+        }
+        if (auto lg = log::get(log::Area::App)) lg->info("solution: open {} -> {}", path, c.key());
+        fill_form(c);
+        m_forced_solution = path;
+        on_connect();   // a server asks the keyring first, as Recent does
+    });
+}
+
+void Shell::on_repoint_solution() {  // graph: s009c -- the next connection takes this solution along
+    if (!m_conn) {
+        set_status("Connect first -- then Point This Solution At... carries its solution to another connection.", "error");
+        return;
+    }
+    m_repoint = m_solution;
+    m_stack.set_visible_child("connect");
+    set_status("Choose where " + m_solution.points_at.label() + "'s solution should point, then Connect -- "
+               "its boxes come along; the old file stays as it is.", "ok");
 }
 
 void Shell::refresh_marks() {  // graph: marks follow the records (fixed ones drop off)
