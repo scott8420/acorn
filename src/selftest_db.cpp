@@ -454,6 +454,45 @@ void test_design_pure() {
           pu && pu->size() == 2 && (*pu)[0].find("ADD COLUMN \"age\" INTEGER") != std::string::npos &&
           (*pu)[1] == "CREATE INDEX \"people_age\" ON \"people\" (\"age\")", "");
 
+    {   // s007e -- a field coming back BEFORE fields the table keeps goes in its place.
+    TableDef mid = live;
+    mid.columns.erase(mid.columns.begin() + 1);   // "name", between id and age
+    auto ps = plan_alter(Dialect::SQLite, '"', mid, live);
+    const std::string ps0 = ps && !ps->empty() ? (*ps)[0] : (ps ? "" : ps.error());
+    const auto pi = ps0.find("\"id\""), pn = ps0.find("\"name\""), pg = ps0.find("\"age\"");
+    bool ps_seq = false, ps_ix = false;
+    if (ps) for (auto& st : *ps) {
+        if (st.find("sqlite_sequence") != std::string::npos) ps_seq = true;
+        if (st == "CREATE INDEX \"people_age\" ON \"people\" (\"age\")") ps_ix = true;
+    }
+    check("design (s007e): SQLite -- a field back in the middle makes the table again in the picture's order "
+          "(id count carried, indexes made again)",
+          ps && ps0.rfind("CREATE TABLE \"acorn_rebuild_people\"", 0) == 0 && pi < pn && pn < pg &&
+          pg != std::string::npos && ps_seq && ps_ix, ps0);
+    auto pf = plan_alter(Dialect::SQLite, '"', mid, live, false);
+    check("design (s007e): SQLite -- when the table can't be made again, ADD COLUMN at the end (one statement)",
+          pf && pf->size() == 1 && (*pf)[0] == "ALTER TABLE \"people\" ADD COLUMN \"name\" TEXT",
+          pf && !pf->empty() ? (*pf)[0] : "");
+    auto pma = plan_alter(Dialect::MariaDB, '`', mid, live);
+    check("design (s007e): MariaDB -- ADD COLUMN .. AFTER the field before it",
+          pma && pma->size() == 1 && (*pma)[0] == "ALTER TABLE `people`\n  ADD COLUMN `name` TEXT AFTER `id`",
+          pma && !pma->empty() ? (*pma)[0] : "");
+    TableDef first = live;
+    first.columns.insert(first.columns.begin(), {"email", "TEXT", true, std::nullopt, 0, false});
+    auto pmf = plan_alter(Dialect::MariaDB, '`', live, first);
+    check("design (s007e): MariaDB -- a field first is ADD COLUMN .. FIRST",
+          pmf && pmf->size() == 1 && (*pmf)[0] == "ALTER TABLE `people`\n  ADD COLUMN `email` TEXT FIRST",
+          pmf && !pmf->empty() ? (*pmf)[0] : "");
+    auto ppg = plan_alter(Dialect::PostgreSQL, '"', mid, live);
+    check("design (s007e): PostgreSQL -- can only add at the end; no rebuild",
+          ppg && ppg->size() == 1 && (*ppg)[0] == "ALTER TABLE \"people\" ADD COLUMN \"name\" TEXT",
+          ppg && !ppg->empty() ? (*ppg)[0] : "");
+    auto pend = plan_alter(Dialect::MariaDB, '`', live, add);
+    check("design (s007e): a field at the end stays a plain ADD COLUMN (no AFTER)",
+          pend && pend->size() == 1 && (*pend)[0] == "ALTER TABLE `people`\n  ADD COLUMN `email` TEXT",
+          pend && !pend->empty() ? (*pend)[0] : "");
+    }
+
     TableDef keep_ix = del;
     keep_ix.indexes = live.indexes;
     auto pk = plan_alter(Dialect::SQLite, '"', live, keep_ix);
@@ -977,15 +1016,54 @@ void test_design(Journal& j, Gate& g, Engine* e, const std::string& P) {
           df && di && !di->column("age") && di->indexes.size() == 0 &&
           j.undo_label() == "Delete Field \u201Cage\u201D from \u201C" + T + "\u201D",
           df ? "" : df.error().message);
+    auto seq_now = [&] {   // SQLite's id count (s007e: the placement rebuild keeps it)
+        auto r = g.query("SELECT seq FROM sqlite_sequence WHERE name = '" + T + "'");
+        return r && !r->rows.empty() ? r->rows[0][0] : Value();
+    };
+    const Value seq0 = d == Dialect::SQLite ? seq_now() : Value();
+    auto order_of = [&](const std::optional<Table>& x) {
+        std::vector<std::string> n;
+        if (x) for (auto& c : x->columns) n.push_back(c.name);
+        return n;
+    };
+    const std::vector<std::string> in_place = {"id", "name", "age", "city"}, at_end = {"id", "name", "city", "age"};
     auto ud = j.undo();
     auto ui = info();
-    check(P + "design: undo Delete Field -- the field back (last), every value back, the index back",
-          ud && ui && ui->column("age") && ui->columns.back().name == "age" && ages("age") == want_ages &&
-          ui->indexes.size() == 1 && ui->indexes[0].columns == std::vector<std::string>{"age"},
+    // s007e: SQLite (made again) and MariaDB (AFTER) put it back in its place;
+    // PostgreSQL can only add it at the end.
+    const bool placed = d == Dialect::PostgreSQL ? order_of(ui) == at_end : order_of(ui) == in_place;
+    check(P + "design: undo Delete Field -- the field back " +
+              (d == Dialect::PostgreSQL ? std::string("(last: the engine's limit)") : std::string("IN ITS PLACE")) +
+              ", every value back, the index back",
+          ud && ui && placed && ages("age") == want_ages &&
+          ui->indexes.size() == 1 && ui->indexes[0].columns == std::vector<std::string>{"age"} &&
+          (d != Dialect::SQLite || seq_now() == seq0),
           ud ? "" : ud.error().message);
     auto rd = j.redo();
     check(P + "design: redo Delete Field -- gone again", rd && info() && !info()->column("age"), rd ? "" : rd.error().message);
     (void)j.undo();
+    if (d == Dialect::SQLite) {
+        // s007e: a trigger the rebuild would lose -> no rebuild; the field goes
+        // on the end as before, values and trigger intact.
+        (void)verbs::delete_field(j, T, "age");
+        (void)g.inner().query("CREATE TRIGGER acorn_design_tr AFTER INSERT ON " + g.quote_ident(T) + " BEGIN SELECT 1; END");
+        auto pv2 = verbs::preview(j, [&] { TableDef x = TableDef::from(*info()); x.columns.insert(x.columns.begin() + 2,
+                                        {"age", decl_for(d, FieldType::Integer), true, std::nullopt, 0, false}); return x; }());
+        auto ut = j.undo();
+        auto tr = g.query("SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'acorn_design_tr'");
+        check(P + "design (s007e): SQLite -- a trigger blocks the rebuild: undo puts the field at the end, "
+                  "values and trigger kept; the preview says ADD COLUMN",
+              ut && order_of(info()) == at_end && ages("age") == want_ages && tr && !tr->rows.empty() &&
+              tr->rows[0][0] == Value(1) && pv2 && pv2->size() == 1 && (*pv2)[0].find("ADD COLUMN") != std::string::npos,
+              ut ? (pv2 && !pv2->empty() ? (*pv2)[0] : "") : ut.error().message);
+        (void)g.inner().query("DROP TRIGGER acorn_design_tr");
+        // Put the fixture back in its usual order for what follows.
+        j.clear();
+        (void)g.inner().query("DROP TABLE " + g.quote_ident(T));
+        if (auto mk = verbs::new_table(j, t); !mk) { check(P + "design: fixture again", false, mk.error().message); return; }
+        for (auto [n, a] : people)
+            (void)verbs::new_record(j, T, {"name", "age"}, {Value(n), a ? Value(a) : Value()});
+    }
     // A record changed while the field was gone: undo is refused, nothing touched.
     (void)verbs::delete_field(j, T, "age");
     (void)g.inner().query("DELETE FROM " + g.quote_ident(T) + " WHERE " + g.quote_ident("name") + " = 'Grace'");

@@ -412,8 +412,21 @@ std::string key_rules(Dialect d, const TableDef& live, const TableDef& want) {
     return {};
 }
 
+// s007e: a field coming back (undo of Delete Field) belongs somewhere other
+// than the end when a field the table keeps comes after it in `want`.
+bool out_of_place(const TableDef& want, const Diff& df) {
+    bool seen_added = false;
+    for (const auto& c : want.columns) {
+        bool added = false;
+        for (const auto* a : df.added) if (a->name == c.name) added = true;
+        if (added) seen_added = true;
+        else if (seen_added) return true;
+    }
+    return false;
+}
+
 std::expected<std::vector<Stmt>, std::string>
-plan_steps(Dialect d, char q, const TableDef& live, const TableDef& want) {
+plan_steps(Dialect d, char q, const TableDef& live, const TableDef& want, bool in_place) {
     auto df = diff_tables(live, want);
     if (!df) return std::unexpected(df.error());
     if (df->key)
@@ -427,12 +440,23 @@ plan_steps(Dialect d, char q, const TableDef& live, const TableDef& want) {
         for (std::size_t i = 0; i < wk.size(); ++i) s += (i ? ", " : "") + quote_ident_with(q, wk[i]);
         return s;
     };
+    const bool misplaced = out_of_place(want, *df);
     if (d == Dialect::SQLite && !df->changed.empty()) {
         for (const auto& lx : live.indexes)
             if (lower(lx.name).rfind("sqlite_autoindex", 0) == 0)
                 return std::unexpected(curly(live.name) + " has a UNIQUE rule written into the table -- Acorn can't "
                                        "make the table again with it yet");
         return plan_rebuild(q, live, want, *df);
+    }
+    // s007e: a field put back in its old place -- SQLite can only add at the
+    // end, so the table is made again in `want`'s order. When it can't be (a
+    // trigger / view / link / rule the picture doesn't carry: in_place false,
+    // or a UNIQUE written into the table), ADD COLUMN at the end, as before.
+    if (d == Dialect::SQLite && in_place && misplaced && df->dropped.empty() && !df->rename) {
+        bool inline_unique = false;
+        for (const auto& lx : live.indexes)
+            if (lower(lx.name).rfind("sqlite_autoindex", 0) == 0) inline_unique = true;
+        if (!inline_unique) return plan_rebuild(q, live, want, *df);
     }
     if (d == Dialect::MariaDB) {   // ONE statement: atomic on an engine that can't roll DDL back
         std::vector<std::string> cl;
@@ -445,7 +469,15 @@ plan_steps(Dialect d, char q, const TableDef& live, const TableDef& want) {
         for (const auto& ch : df->changed)
             cl.push_back("MODIFY COLUMN " + field_decl(q, *ch.want) + (ch.want->auto_increment ? " AUTO_INCREMENT" : ""));
         if (new_key) cl.push_back("ADD PRIMARY KEY (" + key_list() + ")");
-        for (const auto* c : df->added) cl.push_back("ADD COLUMN " + field_decl(q, *c));
+        for (const auto* c : df->added) {
+            std::string a = "ADD COLUMN " + field_decl(q, *c);
+            if (misplaced) {   // s007e: back in its place -- after the field before it in `want`
+                const ColumnDef* prev = nullptr;
+                for (const auto& w : want.columns) { if (w.name == c->name) break; prev = &w; }
+                a += prev ? " AFTER " + quote_ident_with(q, prev->name) : std::string(" FIRST");
+            }
+            cl.push_back(a);
+        }
         for (const auto* ix : df->idx_make) {
             std::string a = std::string("ADD ") + (ix->unique ? "UNIQUE " : "") + "INDEX " + quote_ident_with(q, ix->name) + " (";
             for (std::size_t i = 0; i < ix->columns.size(); ++i) a += (i ? ", " : "") + quote_ident_with(q, ix->columns[i]);
@@ -563,6 +595,16 @@ std::string rebuild_blocker(Connection& c, const std::string& table) {
     return {};
 }
 
+// s007e: may SQLite make `live` again to put a field back in its place? Only
+// asked when a field comes back somewhere other than the end; "no" is not a
+// refusal -- the field goes on the end, as it always did.
+bool can_place(Connection& c, Dialect d, const TableDef& live, const TableDef& want) {
+    if (d != Dialect::SQLite) return true;
+    auto df = diff_tables(live, want);
+    if (!df || !df->changed.empty() || !out_of_place(want, *df)) return true;
+    return rebuild_blocker(c, live.name).empty();
+}
+
 std::int64_t count_of(Connection& c, const std::string& sql) {
     auto n = c.query(sql);
     if (!n || n->rows.empty()) return -1;
@@ -629,8 +671,8 @@ std::string key_blocker(Connection& c, Dialect d, const TableDef& live, const Ta
 }  // namespace
 
 std::expected<std::vector<std::string>, std::string>
-plan_alter(Dialect d, char q, const TableDef& live, const TableDef& want) {
-    auto steps = plan_steps(d, q, live, want);
+plan_alter(Dialect d, char q, const TableDef& live, const TableDef& want, bool in_place) {
+    auto steps = plan_steps(d, q, live, want, in_place);
     if (!steps) return std::unexpected(steps.error());
     std::vector<std::string> out;
     for (auto& s : *steps) out.push_back(std::move(s.sql));
@@ -1183,7 +1225,7 @@ void Store::put_table(const Id& id, const std::optional<TableDef>& v) {
         }
         if (!df->changed.empty() && m_dialect == Dialect::SQLite)
             if (auto why = rebuild_blocker(m_conn, name); !why.empty()) { fail(Error::Code::Unsupported, why); return; }
-        auto plan = plan_steps(m_dialect, q, *live, *v);
+        auto plan = plan_steps(m_dialect, q, *live, *v, can_place(m_conn, m_dialect, *live, *v));
         if (!plan) { fail(Error::Code::Unsupported, plan.error()); return; }
         // MariaDB: the engine casts in its one statement -- a value Acorn reads
         // as not fitting would be emptied with no way back. Refused first.
@@ -1933,7 +1975,8 @@ std::expected<std::vector<std::string>, Error> preview(Journal& j, const TableDe
         for (const auto& ix : want.indexes) out.push_back(create_index_sql(st.dialect(), q, want.name, ix));
         return out;
     }
-    auto plan = plan_alter(st.dialect(), q, std::get<TableDef>(*got), want);
+    const TableDef& live = std::get<TableDef>(*got);
+    auto plan = plan_alter(st.dialect(), q, live, want, can_place(st.connection(), st.dialect(), live, want));
     if (!plan) return std::unexpected(Error{Error::Code::Unsupported, plan.error()});
     return *plan;
 }

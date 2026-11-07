@@ -23,8 +23,11 @@
 //           record / field.
 //
 // A table's identity is its fields BY NAME (s007): their order is how they
-// are shown, not what they are. An engine can only add a field at the end, so
-// undoing Delete Field brings it back last; the pictures still match.
+// are shown, not what they are. Undoing Delete Field puts the field back in
+// its old place where the engine can (s007e: SQLite makes the table again in
+// the picture's order, MariaDB adds it AFTER the field before it); PostgreSQL
+// can only add at the end, and SQLite falls back to the end when the table
+// can't be made again. Either way the pictures match.
 //
 // Store::put turns the pictures into SQL: a table absent -> present is CREATE
 // TABLE, present -> absent DROP TABLE, present -> a different shape is ALTER
@@ -154,8 +157,13 @@ std::string check_new_table(const TableDef& t, const Schema& existing);
 // change (s007c) and the key (s007d: a step of its own) as described at
 // their verbs. Refusals come back in words. MariaDB gets ONE
 // ALTER TABLE (it can't roll DDL back, so one statement is the step).
+// s007e: a field that comes back before fields the table keeps (undo of
+// Delete Field) goes in its place -- SQLite by making the table again when
+// `in_place` (the caller has asked the database: no trigger / view / link /
+// rule the rebuild would lose), else ADD COLUMN at the end; MariaDB ADD
+// COLUMN .. AFTER / FIRST; PostgreSQL at the end.
 std::expected<std::vector<std::string>, std::string>
-plan_alter(Dialect d, char quote, const TableDef& live, const TableDef& want);
+plan_alter(Dialect d, char quote, const TableDef& live, const TableDef& want, bool in_place = true);
 std::string create_index_sql(Dialect d, char quote, const std::string& table, const IndexDef& ix);
 std::string drop_index_sql(Dialect d, char quote, const std::string& table, const std::string& index);
 // Every index name in the schema (SQLite and PostgreSQL keep them per database,
