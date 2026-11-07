@@ -1,0 +1,339 @@
+#include "Shell.hpp"
+#include "Log.hpp"
+
+#include <giomm/liststore.h>
+#include <algorithm>
+#include <filesystem>
+#include <gtkmm/filedialog.h>
+#include <gtkmm/filefilter.h>
+#include <gtkmm/grid.h>
+#include <gtkmm/image.h>
+#include <gtkmm/label.h>
+#include <gtkmm/scrolledwindow.h>
+
+// Shell_connect.cpp -- the CONNECT area (s004). Pick an engine, point it at a
+// file or a server, connect READ-ONLY (RULES: the data is sacred -- nothing
+// writes until s005's door), and read the schema on a worker so the window
+// never waits on a slow server.
+//
+// Threading: the worker opens the connection and introspects, parks the
+// results under m_result_mx and emits m_connect_done; on_connect_done runs on
+// the UI thread, joins, and takes ownership. The UI never touches a connection
+// the worker is still using -- the Connect button is disabled while one runs.
+
+namespace acorn {
+
+namespace {
+
+Gtk::Label* field_label(const char* text) {
+    auto l = Gtk::make_managed<Gtk::Label>(text);
+    l->set_xalign(1.0f);
+    l->add_css_class("acorn-field-label");
+    return l;
+}
+
+std::string summary(const db::Table& t) {
+    std::size_t pk = 0;
+    for (auto& c : t.columns) pk += c.pk_position > 0;
+    std::string s = std::to_string(t.columns.size()) + " column" + (t.columns.size() == 1 ? "" : "s");
+    if (pk) s += " · key: " + [&] {
+        std::string k;
+        for (auto& n : t.primary_key()) k += (k.empty() ? "" : ", ") + n;
+        return k;
+    }();
+    if (!t.foreign_keys.empty())
+        s += " · " + std::to_string(t.foreign_keys.size()) + " link" +
+             (t.foreign_keys.size() == 1 ? "" : "s");
+    if (!t.indexes.empty())
+        s += " · " + std::to_string(t.indexes.size()) + " index" +
+             (t.indexes.size() == 1 ? "" : "es");
+    return s;
+}
+
+}  // namespace
+
+void Shell::build_connect_page() {  // connect: the Connect area
+    m_connect_page.set_margin(28);
+
+    // Hero: emblem + title.
+    auto hero = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 16);
+    auto emblem = Gtk::make_managed<Gtk::Image>();
+    emblem->set_from_icon_name("acorn-logo-symbolic");
+    emblem->set_pixel_size(56);
+    emblem->add_css_class("acorn-hero-icon");
+    auto titles = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 2);
+    auto title = Gtk::make_managed<Gtk::Label>("Connect");
+    title->set_xalign(0.0f);
+    title->add_css_class("acorn-hero-title");
+    auto sub = Gtk::make_managed<Gtk::Label>(
+        "Open a database to look around. Acorn reads only, for now -- nothing is changed.");
+    sub->set_xalign(0.0f);
+    sub->set_wrap(true);
+    sub->add_css_class("acorn-hero-sub");
+    titles->append(*title);
+    titles->append(*sub);
+    hero->append(*emblem);
+    hero->append(*titles);
+    m_connect_page.append(*hero);
+
+    // The engines this machine can actually run.
+    m_loader.scan(db::Loader::default_dirs());
+    for (auto& r : m_loader.rejected())
+        if (auto lg = log::get(log::Area::App))
+            lg->warn("engine not loaded: {} -- {}", r.file.string(), r.reason);
+    m_engines = m_loader.engines();
+    // SQLite first: it is the default for new solutions and needs no server.
+    std::stable_sort(m_engines.begin(), m_engines.end(), [](db::Engine* a, db::Engine* b) {
+        return (a->id() == "sqlite") > (b->id() == "sqlite");
+    });
+    m_engine_names = Gtk::StringList::create({});
+    for (auto* e : m_engines) m_engine_names->append(e->name());
+    m_engine_pick.set_model(m_engine_names);
+    m_engine_pick.set_name("shell.connect.engine");
+    if (auto lg = log::get(log::Area::App)) lg->info("{} engine(s) loaded", m_engines.size());
+
+    // The form, on a calm panel.
+    auto panel = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 10);
+    panel->add_css_class("acorn-panel");
+    panel->set_size_request(520, -1);
+    panel->set_halign(Gtk::Align::START);
+
+    auto engine_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 10);
+    auto el = field_label("Engine");
+    el->set_size_request(90, -1);
+    m_engine_pick.set_hexpand(true);
+    engine_row->append(*el);
+    engine_row->append(m_engine_pick);
+    panel->append(*engine_row);
+
+    // File engines: a path + Open...
+    auto file_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 10);
+    auto fl = field_label("File");
+    fl->set_size_request(90, -1);
+    m_path.set_hexpand(true);
+    m_path.set_placeholder_text("/path/to/database.sqlite");
+    m_path.signal_activate().connect(sigc::mem_fun(*this, &Shell::on_connect));
+    m_browse.set_label("Open…");
+    m_browse.signal_clicked().connect(sigc::mem_fun(*this, &Shell::on_browse_file));
+    file_row->append(*fl);
+    file_row->append(m_path);
+    file_row->append(m_browse);
+    m_file_rows.append(*file_row);
+    panel->append(m_file_rows);
+
+    // Server engines: host / port / database / user / password.
+    auto grid = Gtk::make_managed<Gtk::Grid>();
+    grid->set_row_spacing(6);
+    grid->set_column_spacing(10);
+    int row = 0;
+    const auto add = [&](const char* label, Gtk::Entry& e, const char* hint) {
+        auto l = field_label(label);
+        l->set_size_request(90, -1);
+        e.set_hexpand(true);
+        e.set_placeholder_text(hint);
+        e.signal_activate().connect(sigc::mem_fun(*this, &Shell::on_connect));
+        grid->attach(*l, 0, row);
+        grid->attach(e, 1, row);
+        ++row;
+    };
+    add("Host", m_host, "localhost");
+    add("Port", m_port, "default");
+    add("Database", m_database, "name");
+    add("User", m_user, "user name");
+    add("Password", m_password, "not stored");
+    m_password.set_visibility(false);
+    m_password.set_input_purpose(Gtk::InputPurpose::PASSWORD);
+    m_server_rows.append(*grid);
+    panel->append(m_server_rows);
+
+    auto actions = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 10);
+    m_connect.set_label("Connect");
+    m_connect.add_css_class("acorn-primary");
+    m_connect.signal_clicked().connect(sigc::mem_fun(*this, &Shell::on_connect));
+    auto badge = Gtk::make_managed<Gtk::Label>("READ-ONLY");
+    badge->add_css_class("acorn-badge");
+    badge->set_valign(Gtk::Align::CENTER);
+    actions->append(m_connect);
+    actions->append(*badge);
+    panel->append(*actions);
+
+    m_status.set_xalign(0.0f);
+    m_status.set_wrap(true);
+    m_status.add_css_class("acorn-status");
+    panel->append(m_status);
+    m_connect_page.append(*panel);
+
+    // What we found: tables and views, on their own panel.
+    auto found = Gtk::make_managed<Gtk::ScrolledWindow>();
+    found->set_policy(Gtk::PolicyType::NEVER, Gtk::PolicyType::AUTOMATIC);
+    found->set_vexpand(true);
+    found->add_css_class("acorn-panel");
+    m_tables.set_selection_mode(Gtk::SelectionMode::NONE);
+    found->set_child(m_tables);
+    m_connect_page.append(*found);
+
+    m_engine_pick.property_selected().signal_changed().connect(
+        sigc::mem_fun(*this, &Shell::on_engine_changed));
+    m_connect_done.connect(sigc::mem_fun(*this, &Shell::on_connect_done));
+
+    if (m_engines.empty()) {
+        m_connect.set_sensitive(false);
+        set_status("No database engines were found. Reinstall Acorn, or check the log.", "error");
+    }
+    on_engine_changed();
+    show_schema();
+
+    m_stack.add(m_connect_page, "connect", "Connect");
+}
+
+void Shell::on_engine_changed() {  // connect: file vs server rows
+    const auto i = m_engine_pick.get_selected();
+    db::Engine* e = i < m_engines.size() ? m_engines[i] : nullptr;
+    const bool server = e && e->caps().needs_server;
+    m_file_rows.set_visible(!server);
+    m_server_rows.set_visible(server);
+    if (e && server)
+        m_port.set_placeholder_text(e->dialect() == db::Dialect::MariaDB ? "3306" : "5432");
+}
+
+void Shell::on_browse_file() {  // connect: pick an SQLite file
+    auto dialog = Gtk::FileDialog::create();
+    dialog->set_title("Open a database");
+    auto filters = Gio::ListStore<Gtk::FileFilter>::create();
+    auto lite = Gtk::FileFilter::create();
+    lite->set_name("SQLite databases");
+    for (auto p : {"*.sqlite", "*.sqlite3", "*.db", "*.db3"}) lite->add_pattern(p);
+    auto all = Gtk::FileFilter::create();
+    all->set_name("All files");
+    all->add_pattern("*");
+    filters->append(lite);
+    filters->append(all);
+    dialog->set_filters(filters);
+    dialog->open(*this, [this, dialog](const Glib::RefPtr<Gio::AsyncResult>& res) {
+        try {
+            if (auto f = dialog->open_finish(res)) {
+                m_path.set_text(f->get_path());
+                on_connect();
+            }
+        } catch (const Glib::Error&) {
+            // Cancelled or dismissed -- nothing to do.
+        }
+    });
+}
+
+void Shell::on_connect() {  // connect: open read-only + introspect on a worker
+    if (m_worker.joinable()) return;                 // one at a time
+    const auto i = m_engine_pick.get_selected();
+    if (i >= m_engines.size()) return;
+    db::Engine* e = m_engines[i];
+
+    db::ConnectParams p;                             // read_only = true by default
+    if (e->caps().needs_server) {
+        p.host = m_host.get_text();
+        p.port = std::atoi(m_port.get_text().c_str());
+        p.database = m_database.get_text();
+        p.user = m_user.get_text();
+        p.password = m_password.get_text();
+        m_password.set_text("");                     // never kept (keyring: s004b)
+        m_conn_label = e->name() + " — " + (p.database.empty() ? "(server)" : p.database) +
+                       " on " + (p.host.empty() ? "localhost" : p.host);
+    } else {
+        p.path = m_path.get_text();
+        if (p.path.empty()) { set_status("Choose a database file first.", "error"); return; }
+        m_conn_label = e->name() + " — " + std::filesystem::path(p.path).filename().string();
+    }
+
+    m_connect.set_sensitive(false);
+    set_status("Connecting to " + m_conn_label + "…", "");
+    if (auto lg = log::get(log::Area::App)) lg->info("connect (read-only): {}", m_conn_label);
+
+    m_worker = std::thread([this, e, p]() {
+        std::unique_ptr<db::Connection> conn;
+        db::Schema schema;
+        std::string error;
+        if (auto c = e->open(p)) {
+            if (auto s = (*c)->introspect()) {
+                conn = std::move(*c);
+                schema = std::move(*s);
+            } else {
+                error = s.error().message;
+            }
+        } else {
+            error = c.error().message;
+        }
+        {
+            std::lock_guard lk(m_result_mx);
+            m_result_conn = std::move(conn);
+            m_result_schema = std::move(schema);
+            m_result_error = std::move(error);
+        }
+        m_connect_done.emit();
+    });
+}
+
+void Shell::on_connect_done() {  // connect: back on the UI thread
+    if (m_worker.joinable()) m_worker.join();
+    m_connect.set_sensitive(true);
+    std::unique_ptr<db::Connection> conn;
+    std::string error;
+    {
+        std::lock_guard lk(m_result_mx);
+        conn = std::move(m_result_conn);
+        error = std::move(m_result_error);
+        if (conn) m_schema = std::move(m_result_schema);
+    }
+    if (!conn) {
+        set_status("Could not connect: " + error, "error");
+        if (auto lg = log::get(log::Area::App)) lg->warn("connect failed: {}", error);
+        return;
+    }
+    m_conn = std::move(conn);
+    std::size_t tables = 0, views = 0;
+    for (auto& t : m_schema.tables) (t.kind == db::Table::Kind::View ? views : tables)++;
+    set_status("Connected to " + m_conn_label + " (read-only): " + std::to_string(tables) +
+               " table" + (tables == 1 ? "" : "s") + ", " + std::to_string(views) + " view" +
+               (views == 1 ? "" : "s") + ".", "ok");
+    set_title("Acorn — " + m_conn_label);
+    show_schema();
+}
+
+void Shell::show_schema() {  // connect: paint the table list
+    while (auto* child = m_tables.get_first_child()) m_tables.remove(*child);
+    if (m_schema.tables.empty()) {
+        auto empty = Gtk::make_managed<Gtk::Label>(
+            m_conn ? "This database has no tables yet." : "Tables and views appear here once you connect.");
+        empty->add_css_class("acorn-status");
+        empty->set_margin(12);
+        m_tables.append(*empty);
+        return;
+    }
+    for (auto& t : m_schema.tables) {
+        auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 10);
+        row->set_margin(6);
+        auto name = Gtk::make_managed<Gtk::Label>(t.name);
+        name->set_xalign(0.0f);
+        name->set_size_request(200, -1);
+        name->set_ellipsize(Pango::EllipsizeMode::END);
+        auto info = Gtk::make_managed<Gtk::Label>(summary(t));
+        info->set_xalign(0.0f);
+        info->set_hexpand(true);
+        info->add_css_class("acorn-status");
+        row->append(*name);
+        row->append(*info);
+        if (t.kind == db::Table::Kind::View) {
+            auto b = Gtk::make_managed<Gtk::Label>("VIEW");
+            b->add_css_class("acorn-badge");
+            row->append(*b);
+        }
+        m_tables.append(*row);
+    }
+}
+
+void Shell::set_status(const std::string& text, const char* kind) {  // connect: "", "ok", "error"
+    m_status.set_text(text);
+    m_status.remove_css_class("ok");
+    m_status.remove_css_class("error");
+    if (kind && *kind) m_status.add_css_class(kind);
+}
+
+}  // namespace acorn

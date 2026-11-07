@@ -1,0 +1,117 @@
+/* Acorn's skin (s004) -- "not your usual straight-laced app".
+ *
+ * Plain GTK4 CSS, compiled into the binary (gresource) and loaded by App at
+ * APPLICATION priority. Its own dark look regardless of the desktop scheme:
+ * a deep forest gradient frames the window, a frosted sidebar, an amber accent,
+ * and data always sits on a calm solid panel so long sessions don't tire.
+ * Per-area tints hang off .page-<area> on the window (REQUIREMENTS §2).
+ */
+
+@define-color acorn_forest_hi  #1f5a3a;
+@define-color acorn_forest_lo  #0b2216;
+@define-color acorn_amber      #f5b942;
+@define-color acorn_amber_dim  #c98e2a;
+@define-color acorn_ink        #eef3ea;
+@define-color acorn_ink_dim    #a9bba9;
+@define-color acorn_panel      #14271c;
+@define-color acorn_panel_edge rgba(245, 185, 66, 0.18);
+
+window.acorn {
+    background: radial-gradient(circle at 85% 0%, rgba(245, 185, 66, 0.22), transparent 45%),
+                linear-gradient(160deg, @acorn_forest_hi, @acorn_forest_lo);
+    color: @acorn_ink;
+}
+
+window.acorn headerbar {
+    background: transparent;
+    box-shadow: none;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    color: @acorn_ink;
+}
+
+window.acorn headerbar button,
+window.acorn headerbar menubutton > button {
+    background: transparent;
+    color: @acorn_ink;
+    box-shadow: none;
+    border: none;
+}
+window.acorn headerbar button:hover,
+window.acorn headerbar menubutton > button:hover { background: rgba(255, 255, 255, 0.08); }
+window.acorn headerbar button.acorn-logo image { color: @acorn_amber; }
+
+window.acorn button:not(.acorn-primary):not(.titlebutton) {
+    background: rgba(255, 255, 255, 0.07);
+    color: @acorn_ink;
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    border-radius: 8px;
+    box-shadow: none;
+}
+window.acorn button:not(.acorn-primary):not(.titlebutton):hover { background: rgba(255, 255, 255, 0.13); }
+
+/* Frosted sidebar with a soft pill selection. */
+window.acorn stacksidebar,
+window.acorn stacksidebar list {
+    background: rgba(255, 255, 255, 0.05);
+    border-right: 1px solid rgba(255, 255, 255, 0.06);
+}
+window.acorn stacksidebar row {
+    margin: 3px 8px;
+    padding: 6px 10px;
+    border-radius: 999px;
+    color: @acorn_ink_dim;
+}
+window.acorn stacksidebar row:selected {
+    background: rgba(245, 185, 66, 0.20);
+    color: @acorn_ink;
+}
+
+/* The landing hero on each area. */
+.acorn-hero-title { font-size: 22pt; font-weight: 800; color: @acorn_ink; }
+.acorn-hero-sub   { color: @acorn_ink_dim; }
+.acorn-hero-icon  { color: @acorn_amber; }
+
+/* Data and forms sit on a calm, solid panel. */
+.acorn-panel {
+    background: @acorn_panel;
+    border: 1px solid @acorn_panel_edge;
+    border-radius: 14px;
+    padding: 14px;
+}
+.acorn-panel list,
+.acorn-panel row { background: transparent; color: @acorn_ink; }
+.acorn-panel row:hover { background: rgba(255, 255, 255, 0.04); }
+
+.acorn-field-label { color: @acorn_ink_dim; }
+
+window.acorn entry,
+window.acorn dropdown > button {
+    background: rgba(0, 0, 0, 0.25);
+    color: @acorn_ink;
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    border-radius: 8px;
+}
+window.acorn entry:focus-within { border-color: @acorn_amber_dim; }
+
+window.acorn button.acorn-primary {
+    background: @acorn_amber;
+    color: #1d1405;
+    font-weight: 700;
+    border-radius: 999px;
+    padding: 6px 18px;
+}
+window.acorn button.acorn-primary:hover    { background: shade(@acorn_amber, 1.08); }
+window.acorn button.acorn-primary:disabled { background: rgba(245, 185, 66, 0.35); }
+
+.acorn-status       { color: @acorn_ink_dim; }
+.acorn-status.ok    { color: #9fe0a8; }
+.acorn-status.error { color: #ff9a8a; }
+
+.acorn-badge {
+    font-size: 8pt;
+    font-weight: 700;
+    color: @acorn_amber;
+    border: 1px solid @acorn_panel_edge;
+    border-radius: 999px;
+    padding: 1px 8px;
+}

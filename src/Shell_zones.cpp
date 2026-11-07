@@ -15,7 +15,9 @@ namespace acorn {
 
 void Shell::build_shell() {  // zone: window + sidebar + stack
     set_title("Acorn");
-    set_default_size(760, 520);
+    set_default_size(960, 640);
+    add_css_class("acorn");          // s004: the skin styles window.acorn only
+    add_css_class("page-connect");
 
     auto header = Gtk::make_managed<Gtk::HeaderBar>();
 
@@ -25,6 +27,7 @@ void Shell::build_shell() {  // zone: window + sidebar + stack
     // (the dialog-lifetime exemplar).
     m_logo_button.set_icon_name("acorn-logo-symbolic");
     m_logo_button.set_has_frame(false);
+    m_logo_button.add_css_class("acorn-logo");
     m_logo_button.set_tooltip_text("About Acorn");
     m_logo_button.set_action_name("win.about");
     header->pack_start(m_logo_button);
@@ -48,6 +51,14 @@ void Shell::build_shell() {  // zone: window + sidebar + stack
 }
 
 void Shell::build_pages() {  // zone: the pattern pages
+    // s004: Acorn's own areas. Cairn's demo pages (Recent menu, Registry,
+    // Undo) are no longer on the sidebar; their code stays until the real
+    // recents (s004b) and the change journal's UI (s005) replace it.
+    build_connect_page();
+}
+
+// Cairn's demo pages, kept buildable but not called (see build_pages).
+void Shell::build_demo_pages() {  // zone: Cairn's retired demo pages
     // Page 1 -- Recents: a live list + explanation. The menu's Open-recent
     // submenu and this list are the same data, two surfaces (CANON: two
     // surfaces, one mechanism).

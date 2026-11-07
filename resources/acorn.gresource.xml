@@ -14,4 +14,8 @@
   <gresource prefix="/io/github/scott8420/Acorn/icons/scalable/apps">
     <file preprocess="xml-stripblanks" alias="acorn-logo-symbolic.svg">icons/scalable/apps/acorn-logo-symbolic.svg</file>
   </gresource>
+  <!-- s004: the skin. App loads it at APPLICATION priority. -->
+  <gresource prefix="/io/github/scott8420/Acorn">
+    <file>acorn.css</file>
+  </gresource>
 </gresources>

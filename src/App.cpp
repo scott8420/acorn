@@ -6,7 +6,9 @@
 #include "Appearance.hpp"
 #include "Log.hpp"
 
+#include <gtkmm/cssprovider.h>
 #include <gtkmm/icontheme.h>
+#include <gtkmm/stylecontext.h>
 #include <gdkmm/display.h>
 
 // The RESOURCE-PIPELINE paradigm's build-side seam. The app logo ships in a
@@ -63,6 +65,13 @@ void App::on_activate() {
     if (auto display = Gdk::Display::get_default()) {
         auto icons = Gtk::IconTheme::get_for_display(display);
         icons->add_resource_path("/io/github/scott8420/Acorn/icons");
+
+        // s004: Acorn's own skin, from the same bundle. It styles only what
+        // sits under window.acorn, so dialogs keep the desktop's look.
+        auto css = Gtk::CssProvider::create();
+        css->load_from_resource("/io/github/scott8420/Acorn/acorn.css");
+        Gtk::StyleContext::add_provider_for_display(display, css,
+                                                    GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
     }
 
     m_shell = new Shell();       // lifetime owned by the application

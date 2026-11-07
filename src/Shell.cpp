@@ -23,11 +23,28 @@ Shell::Shell()
       m_stone_size("shell.undo.size", Gtk::Orientation::HORIZONTAL),
       m_undo_button("shell.undo.undo"),
       m_redo_button("shell.undo.redo"),
-      m_undo_said("shell.undo.said") {
+      m_undo_said("shell.undo.said"),
+      m_connect_page("shell.connect.page", Gtk::Orientation::VERTICAL, 14),
+      m_file_rows("shell.connect.file_rows", Gtk::Orientation::VERTICAL, 6),
+      m_server_rows("shell.connect.server_rows", Gtk::Orientation::VERTICAL, 6),
+      m_path("shell.connect.path"),
+      m_host("shell.connect.host"),
+      m_port("shell.connect.port"),
+      m_database("shell.connect.database"),
+      m_user("shell.connect.user"),
+      m_password("shell.connect.password"),
+      m_browse("shell.connect.browse"),
+      m_connect("shell.connect.connect"),
+      m_status("shell.connect.status"),
+      m_tables("shell.connect.tables") {
     set_name("shell.window");
 }
 
-Shell::~Shell() = default;
+Shell::~Shell() {
+    // A connect in flight finishes on its own (it has a timeout); wait for it
+    // so no thread outlives the loader whose plugin code it is running.
+    if (m_worker.joinable()) m_worker.join();
+}
 
 // The ordered pass Scott's Controller/MainWindow shape names: construct the
 // shell, build the pages, bind actions + accelerators, load persisted state,

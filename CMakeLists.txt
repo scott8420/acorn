@@ -130,7 +130,8 @@ find_program(GLIB_COMPILE_RESOURCES glib-compile-resources REQUIRED)
 set(ACORN_GRESOURCE_XML "${CMAKE_CURRENT_SOURCE_DIR}/resources/acorn.gresource.xml")
 set(ACORN_RESOURCES_C   "${CMAKE_CURRENT_BINARY_DIR}/acorn-resources.c")
 file(GLOB ACORN_RESOURCE_FILES
-     "${CMAKE_CURRENT_SOURCE_DIR}/resources/icons/scalable/apps/*.svg")
+     "${CMAKE_CURRENT_SOURCE_DIR}/resources/icons/scalable/apps/*.svg"
+     "${CMAKE_CURRENT_SOURCE_DIR}/resources/*.css")
 add_custom_command(
     OUTPUT  "${ACORN_RESOURCES_C}"
     COMMAND "${GLIB_COMPILE_RESOURCES}"
@@ -159,6 +160,9 @@ add_executable(acorn
     src/Shell_bindings.cpp
     src/Shell_handlers.cpp
     src/Shell_helpers.cpp
+    # s004: the Connect page -- engines, the form, connect + introspect on a
+    # worker. Its own category file so the area grows without crowding zones.
+    src/Shell_connect.cpp
     src/AboutWindow.cpp
     src/ShortcutsDialog.cpp
     src/Registry.cpp
