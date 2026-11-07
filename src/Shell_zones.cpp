@@ -69,6 +69,7 @@ Glib::RefPtr<Gio::Menu> Shell::build_menu() {  // zone: hamburger model
 
     auto file = Gio::Menu::create();
     file->append("New Database File\u2026", "win.new-file");
+    file->append("New Address Book\u2026", "win.new-address-book");   // s009b: a starter
     file->append("Open a Database File\u2026", "win.open-file");
     m_recents_menu = Gio::Menu::create();
     file->append_submenu("Open Recent", m_recents_menu);

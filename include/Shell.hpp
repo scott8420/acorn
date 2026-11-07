@@ -101,6 +101,8 @@ private:
     void on_open_file();                         // category: connect: Ctrl+O -- SQLite + the file dialog
     void on_browse_file();                       // category: connect: pick an SQLite file
     void on_new_file();                          // category: connect: Ctrl+N -- make an empty SQLite file, open it
+    void on_new_address_book();                  // category: connect: s009b -- a new file with the Address Book starter
+    void new_file_dialog(bool starter);          // category: connect: the save dialog -> db::new_file -> connect
     void on_connect();                           // category: connect: read the form -> keyring -> start
     void start_connect(db::Engine* e, db::ConnectParams p);  // category: connect: open + introspect on a worker
     void on_connect_done();                      // category: connect: back on the UI thread
@@ -249,6 +251,7 @@ private:
     std::string                     m_pending_password;
     bool                            m_pending_remember = false;
     bool                            m_pending_from_keyring = false;
+    bool                            m_pending_starter = false;   // s009b: fill the new file with the Address Book
 
     // s004c -- the Tables area: pick a table on the left, its columns,
     // indexes and links on the right. Read-only; painted from m_schema.

@@ -16,6 +16,7 @@ namespace acorn {
 
 void Shell::bind_actions() {  // bindings: actions + recents group
     add_action("new-file",      sigc::mem_fun(*this, &Shell::on_new_file));
+    add_action("new-address-book", sigc::mem_fun(*this, &Shell::on_new_address_book));   // s009b
     add_action("open-file",     sigc::mem_fun(*this, &Shell::on_open_file));
     add_action("dump-registry", sigc::mem_fun(*this, &Shell::on_dump_registry));
     add_action("about",         sigc::mem_fun(*this, &Shell::on_about));

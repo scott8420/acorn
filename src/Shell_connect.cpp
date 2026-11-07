@@ -1,4 +1,5 @@
 #include "Shell.hpp"
+#include "db/Starter.hpp"
 #include "Log.hpp"
 #include "db/NewFile.hpp"
 
@@ -244,7 +245,10 @@ void Shell::on_engine_changed() {  // connect: file vs server rows
         m_port.set_placeholder_text(e->dialect() == db::Dialect::MariaDB ? "3306" : "5432");
 }
 
-void Shell::on_new_file() {  // connect: Ctrl+N -- make an empty SQLite file, open it
+void Shell::on_new_file() { new_file_dialog(false); }            // connect: Ctrl+N -- an empty file
+void Shell::on_new_address_book() { new_file_dialog(true); }     // connect: s009b -- the Address Book starter
+
+void Shell::new_file_dialog(bool starter) {  // connect: make an SQLite file, open it (starter: then fill it)
     // s005a. db::new_file is the one place Acorn creates a database, and it
     // refuses ANY existing path -- even if the save dialog's own "Replace?"
     // was answered yes. Nothing existing is ever overwritten.
@@ -255,10 +259,10 @@ void Shell::on_new_file() {  // connect: Ctrl+N -- make an empty SQLite file, op
     if (!e) { set_status("No file engine (SQLite) is installed.", "error"); return; }
 
     auto dialog = Gtk::FileDialog::create();
-    dialog->set_title("New database file");
-    dialog->set_initial_name("untitled.sqlite");
+    dialog->set_title(starter ? "New address book" : "New database file");
+    dialog->set_initial_name(starter ? "address-book.sqlite" : "untitled.sqlite");
     dialog->set_accept_label("Create");
-    dialog->save(*this, [this, dialog, e](const Glib::RefPtr<Gio::AsyncResult>& res) {
+    dialog->save(*this, [this, dialog, e, starter](const Glib::RefPtr<Gio::AsyncResult>& res) {
         std::filesystem::path path;
         try {
             auto f = dialog->save_finish(res);
@@ -278,6 +282,7 @@ void Shell::on_new_file() {  // connect: Ctrl+N -- make an empty SQLite file, op
             return;
         }
         m_path.set_text(path.string());
+        m_pending_starter = starter;   // s009b: filled once it is open read-write
         on_connect();   // the normal open (stamped -> read-write behind the gate); it becomes a recent
     });
 }
@@ -449,6 +454,7 @@ void Shell::on_connect_done() {  // connect: back on the UI thread
         if (conn) m_schema = std::move(m_result_schema);
     }
     const std::string typed = std::exchange(m_pending_password, std::string{});
+    const bool starter = std::exchange(m_pending_starter, false);   // s009b
     if (!conn) {
         set_status("Could not connect: " + error +
                    (m_pending_from_keyring ? " (The stored password may be out of date -- type it again.)" : ""),
@@ -463,6 +469,18 @@ void Shell::on_connect_done() {  // connect: back on the UI thread
     m_writable = writable && !m_conn->read_only();
     attach_journal(m_pending_engine);
     open_solution(m_pending);   // s009: its .acorn -- box places in the Graph
+    // s009b: a new Address Book -- made through the door, then the journal
+    // cleared: the starter is not the user's step to undo.
+    std::string starter_note;
+    if (starter && m_writable && m_journal) {
+        auto r = db::make_address_book(*m_journal);
+        m_journal->clear();
+        if (auto again = m_conn->introspect()) m_schema = std::move(*again);
+        starter_note = r ? "A new Address Book: contacts, their addresses and phones, and three made-up people to "
+                           "delete when you like."
+                         : "The Address Book wasn't filled in: " + r.error().message + ".";
+        if (auto lg = log::get(log::Area::App)) lg->info("starter: address book: {}", r ? "made" : r.error().message);
+    }
 
     // It worked: remember the connection (never the password), and settle the
     // keyring the way the checkbox says.
@@ -497,6 +515,10 @@ void Shell::on_connect_done() {  // connect: back on the UI thread
     m_browse_table.clear(); // s006b: a new connection starts Browse fresh
     m_browse_sel.clear();
     rebuild_browse_pick();
+    if (!starter_note.empty()) {   // s009b: land on the people
+        open_browse("contacts");
+        journal_note(starter_note, starter_note.rfind("A new", 0) == 0 ? "ok" : "error");
+    }
 }
 
 void Shell::show_schema() {  // connect: paint the table list

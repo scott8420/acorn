@@ -7,6 +7,7 @@
 // every engine; an engine that can't run is reported SKIPPED, never a pass.
 #include "db/Engine.hpp"
 #include "db/Journal.hpp"
+#include "db/Starter.hpp"
 #include "db/Browse.hpp"
 #include "db/Convert.hpp"
 #include "db/Loader.hpp"
@@ -1851,6 +1852,40 @@ void test_boxes(Engine* e, const ConnectParams& ro, const std::string& P) {
     (void)m2;
 }
 
+
+// ── s009b: the Address Book starter ──────────────────────────────────────────
+void test_starter(Journal& j, Gate& g, const std::string& P) {
+    auto count = [&](const std::string& t) {
+        auto r = g.query("SELECT COUNT(*) FROM " + g.quote_ident(t));
+        return r && !r->rows.empty() ? num(r->rows[0][0]).value_or(-1) : -1.0;
+    };
+    auto made = make_address_book(j);
+    auto s = g.introspect();
+    bool links = false;
+    if (s && s->table("addresses") && s->table("phones")) {
+        const auto& a = s->table("addresses")->foreign_keys;
+        const auto& p = s->table("phones")->foreign_keys;
+        links = a.size() == 1 && p.size() == 1 && a[0].ref_table == "contacts" && p[0].ref_table == "contacts" &&
+                upper_of(a[0].on_delete) == "CASCADE" && upper_of(p[0].on_delete) == "CASCADE";
+    }
+    check(P + "starter: the Address Book -- three tables, both links Cascade to contacts",
+          made && s && s->table("contacts") && links, made ? "" : made.error().message);
+    check(P + "starter: three people, their addresses and phones",
+          count("contacts") == 3.0 && count("addresses") == 3.0 && count("phones") == 4.0, "");
+    j.clear();
+    check(P + "starter: arrives with nothing to undo (the caller clears the journal)", !j.can_undo() && !j.can_redo(), "");
+    auto again = make_address_book(j);
+    check(P + "starter: refused where its tables already are -- nothing touched",
+          !again && again.error().code == Error::Code::Exists && count("contacts") == 3.0, again ? "made!" : again.error().message);
+    const auto before = snapshot(g);
+    auto del = verbs::delete_record(j, Store::row_id("contacts", {"id"}, {Value(std::int64_t{1})}));
+    check(P + "starter: delete a contact -- its address and phones go with it",
+          del && count("contacts") == 2.0 && count("addresses") == 2.0 && count("phones") == 2.0, del ? "" : del.error().message);
+    auto u = j.undo();
+    check(P + "starter: ... Ctrl+Z brings all of them back", u && snapshot(g) == before, u ? "" : u.error().message);
+    j.clear();
+}
+
 void test_journal(Engine* e, const ConnectParams& rw, const ConnectParams& ro, const std::string& P0) {
     const std::string P = P0 + ": journal: ";
     auto opened = e->open(rw);
@@ -2002,6 +2037,7 @@ void test_journal(Engine* e, const ConnectParams& rw, const ConnectParams& ro, c
     test_design(j, g, e, P);
     test_key(j, g, e, P);
     test_links(j, g, e, P);
+    test_starter(j, g, P);
 }
 
 // SQLite-only behaviour: files.
