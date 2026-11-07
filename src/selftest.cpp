@@ -4,21 +4,30 @@
 // (CANON: "a claim in the doc isn't a fact until a consumer exercises it"). This
 // runs the GTK-free core with no display, so a future you can trust the pump and
 // the mapping before wiring any widget on top:
-//   * Recents  -- move-to-front + trim + the JSON round-trip with stale-prune;
+//   * Connections -- move-to-front + trim + the JSON round-trip with stale-prune;
+//   * Keyring  -- store / lookup / clear through libsecret (ACORN_TEST_KEYRING=1);
 //   * TextMap  -- forward(selection) -> inverse(map_range) round-trips byte-exact
 //                 across single-line / multi-line / cross-paragraph / UTF-8, and
 //                 chrome lines are never landed on.
 //
 //   cmake --build build --target acorn_selftest && ./build/acorn_selftest
 
-#include "core/Recents.hpp"
+#include "core/Connections.hpp"
+#include "Keyring.hpp"
+
+#include <glib.h>
+#include <cstdlib>
+#include <functional>
 #include "core/Shortcuts.hpp"
 #include "core/Stones.hpp"
 #include "core/Undo.hpp"
 #include "core/TextMap.hpp"
+#include "db/Schema.hpp"
 
 #include <algorithm>
 #include <filesystem>
+#include <fstream>
+#include <optional>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -274,40 +283,109 @@ int main() {
 
     std::cout << "-----------------------------------------------\n";
 
-    // -- Recents: list ops + JSON round-trip with prune -----------------------
+    // -- Connections: list ops + JSON round-trip with prune (s004b) ----------
     {
-        std::vector<std::string> l;
-        core::recents_add(l, "/a");
-        core::recents_add(l, "/b");
-        core::recents_add(l, "/c");
-        check("recents: newest first", l.size() == 3 && l.front() == "/c");
-        core::recents_add(l, "/a");
-        check("recents: re-add moves to front (no dup)",
-              l.size() == 3 && l.front() == "/a");
-        core::recents_add(l, "/x/");
-        check("recents: trailing slash normalised",
-              std::find(l.begin(), l.end(), "/x") != l.end() &&
-              std::find(l.begin(), l.end(), "/x/") == l.end());
-        std::vector<std::string> cap;
-        for (int i = 0; i < 20; ++i)
-            core::recents_add(cap, "/p" + std::to_string(i), 8);
-        check("recents: trim to max (8)", cap.size() == 8 && cap.front() == "/p19");
-
+        using core::SavedConnection;
         const std::string base =
-            (std::filesystem::temp_directory_path() / "acorn_selftest_recents").string();
+            (std::filesystem::temp_directory_path() / "acorn_selftest_conns").string();
         std::error_code ec;
         std::filesystem::remove_all(base, ec);
-        const std::string live = base + "/live";
-        std::filesystem::create_directories(live, ec);
-        const std::string file = base + "/recent.json";
+        std::filesystem::create_directories(base, ec);
+        const std::string live = base + "/shop.sqlite";
+        { std::ofstream(live) << ""; }
 
-        std::vector<std::string> to_save = {live, base + "/GONE"};
-        check("recents: save ok", core::save_recents(file, to_save));
-        auto loaded = core::load_recents(file);
-        check("recents: load prunes the missing path",
-              loaded.size() == 1 && loaded.front() == live);
-        check("recents: missing file -> empty",
-              core::load_recents(base + "/nope.json").empty());
+        SavedConnection f{"sqlite", live, "", 0, "", ""};
+        SavedConnection m{"mariadb", "", "db.lan", 3307, "shop", "scott"};
+        SavedConnection pg{"postgres", "", "", 0, "shop", "scott"};
+        check("connections: file label is the file name", f.label() == "shop.sqlite", f.label());
+        check("connections: server label + detail",
+              m.label() == "shop on db.lan" && m.detail() == "scott@db.lan:3307",
+              m.label() + " / " + m.detail());
+        check("connections: empty host reads as localhost",
+              pg.label() == "shop on localhost" && pg.detail() == "scott@localhost");
+        check("connections: keys differ by engine", m.key() != SavedConnection{"postgres", "", "db.lan", 3307, "shop", "scott"}.key());
+
+        std::vector<SavedConnection> l;
+        core::connections_add(l, f);
+        core::connections_add(l, m);
+        core::connections_add(l, pg);
+        check("connections: newest first", l.size() == 3 && l.front() == pg);
+        core::connections_add(l, f);
+        check("connections: re-add moves to front (no dup)", l.size() == 3 && l.front() == f);
+        core::connections_add(l, SavedConnection{"sqlite", "", "", 0, "", ""});
+        check("connections: an empty entry is refused", l.size() == 3);
+        std::vector<SavedConnection> cap;
+        for (int i = 0; i < 20; ++i)
+            core::connections_add(cap, SavedConnection{"postgres", "", "h", 0, "d" + std::to_string(i), "u"});
+        check("connections: trim to max (8)", cap.size() == 8 && cap.front().database == "d19");
+        core::connections_remove(l, m.key());
+        check("connections: remove by key", l.size() == 2 && !core::connections_find(l, m.key()));
+
+        const std::string file = base + "/connections.json";
+        std::vector<SavedConnection> to_save = {f, m, SavedConnection{"sqlite", base + "/GONE.sqlite", "", 0, "", ""}, pg};
+        check("connections: save ok", core::save_connections(file, to_save));
+        std::string text;
+        { std::ifstream in(file); text.assign(std::istreambuf_iterator<char>(in), {}); }
+        check("connections: the file holds no password field", text.find("password") == std::string::npos);
+        auto loaded = core::load_connections(file);
+        check("connections: round-trip keeps servers, prunes the vanished file",
+              loaded.size() == 3 && loaded[0] == f && loaded[1] == m && loaded[2] == pg,
+              std::to_string(loaded.size()) + " loaded");
+        check("connections: missing file -> empty", core::load_connections(base + "/nope.json").empty());
+        { std::ofstream(base + "/bad.json") << "{ not json"; }
+        check("connections: garbage file -> empty", core::load_connections(base + "/bad.json").empty());
+        std::filesystem::remove_all(base, ec);
+    }
+
+    // -- Schema links (s004c): an implicit target resolves to the PK ------------
+    {
+        acorn::db::Schema sc;
+        acorn::db::Table a{"a", acorn::db::Table::Kind::Table, {}, {}, {}};
+        a.columns.push_back({"k1", "INTEGER", {}, false, {}, 2, false});
+        a.columns.push_back({"k0", "TEXT", {}, false, {}, 1, false});
+        acorn::db::Table b{"b", acorn::db::Table::Kind::Table, {}, {}, {}};
+        b.foreign_keys.push_back({"", {"x", "y"}, "a", {}, "NO ACTION", "CASCADE"});
+        b.foreign_keys.push_back({"", {"p"}, "b", {"q"}, "NO ACTION", "NO ACTION"});   // self
+        sc.tables = {a, b};
+        check("schema: implicit FK target = the referenced PK, in key order",
+              sc.ref_columns(sc.tables[1].foreign_keys[0]) == std::vector<std::string>{"k0", "k1"});
+        check("schema: links_to counts a self-reference",
+              sc.links_to("b").size() == 1 && sc.links_to("a").size() == 1 && sc.links_to("zz").empty());
+    }
+
+    // -- Keyring: store / lookup / clear through libsecret (s004b) ------------
+    // Talks to the real Secret Service, so it runs only when asked: on Scott's
+    // desktop it writes ONE test entry (user "acorn_selftest") and removes it.
+    if (const char* k = std::getenv("ACORN_TEST_KEYRING"); k && *k == '1') {
+        namespace kr = acorn::keyring;
+        const auto spin = [](const bool& done) {
+            for (int i = 0; i < 1000 && !done; ++i) g_main_context_iteration(nullptr, TRUE);
+        };
+        kr::Account a{"postgres", "", 5433, "acorn_selftest_db", "acorn_selftest", "Acorn selftest -- safe to delete"};
+        bool done = false, ok = false; std::string err;
+        kr::store(a, "s3cr3t p\xC3\xA4ss", [&](bool o, std::string e) { ok = o; err = e; done = true; });
+        spin(done);
+        check("keyring: store", done && ok, err);
+        done = false; std::optional<std::string> got;
+        kr::lookup(a, [&](std::optional<std::string> pw, std::string e) { got = pw; err = e; done = true; });
+        spin(done);
+        check("keyring: lookup returns the same bytes", done && got && *got == "s3cr3t p\xC3\xA4ss", err);
+        auto other = a; other.port = 5434;
+        done = false; got.reset();
+        kr::lookup(other, [&](std::optional<std::string> pw, std::string e) { got = pw; err = e; done = true; });
+        spin(done);
+        check("keyring: another port is another entry", done && !got, err);
+        done = false; bool removed = false;
+        kr::clear(a, [&](bool r, std::string e) { removed = r; err = e; done = true; });
+        spin(done);
+        check("keyring: clear removes it", done && removed, err);
+        done = false; got = std::string("x");
+        kr::lookup(a, [&](std::optional<std::string> pw, std::string e) { got = pw; err = e; done = true; });
+        spin(done);
+        check("keyring: gone after clear", done && !got, err);
+    } else {
+        std::cout << "  SKIP  keyring  (ACORN_TEST_KEYRING not set)\n";
+        ++g_skip;
     }
 
     // -- TextMap: forward/inverse round-trip ----------------------------------

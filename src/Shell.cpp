@@ -14,16 +14,7 @@ Shell::Shell()
       m_body("shell.body", Gtk::Orientation::HORIZONTAL),
       m_sidebar("shell.sidebar"),
       m_stack("shell.stack"),
-      m_recents_page("shell.recents_page", Gtk::Orientation::VERTICAL),
-      m_recents_scroll("shell.recents_scroll"),
-      m_recents_list("shell.recents_list"),
-      m_undo_page("shell.undo.page", Gtk::Orientation::VERTICAL, 8),
-      m_stone_list("shell.undo.list"),
-      m_stone_name("shell.undo.name"),
-      m_stone_size("shell.undo.size", Gtk::Orientation::HORIZONTAL),
-      m_undo_button("shell.undo.undo"),
-      m_redo_button("shell.undo.redo"),
-      m_undo_said("shell.undo.said"),
+      m_recent_list("shell.connect.recents"),
       m_connect_page("shell.connect.page", Gtk::Orientation::VERTICAL, 14),
       m_file_rows("shell.connect.file_rows", Gtk::Orientation::VERTICAL, 6),
       m_server_rows("shell.connect.server_rows", Gtk::Orientation::VERTICAL, 6),
@@ -33,14 +24,20 @@ Shell::Shell()
       m_database("shell.connect.database"),
       m_user("shell.connect.user"),
       m_password("shell.connect.password"),
+      m_remember("shell.connect.remember"),
       m_browse("shell.connect.browse"),
       m_connect("shell.connect.connect"),
       m_status("shell.connect.status"),
-      m_tables("shell.connect.tables") {
+      m_tables("shell.connect.tables"),
+      m_tables_page("shell.tables.page", Gtk::Orientation::VERTICAL, 12),
+      m_table_list("shell.tables.list"),
+      m_table_detail("shell.tables.detail", Gtk::Orientation::VERTICAL, 10),
+      m_tables_where("shell.tables.where") {
     set_name("shell.window");
 }
 
 Shell::~Shell() {
+    *m_alive = false;   // keyring callbacks still in flight become no-ops
     // A connect in flight finishes on its own (it has a timeout); wait for it
     // so no thread outlives the loader whose plugin code it is running.
     if (m_worker.joinable()) m_worker.join();
@@ -54,13 +51,10 @@ void Shell::build_ui() {
     build_pages();     // zone
     bind_actions();    // bindings
 
-    // Load persisted recents (the UI resolves the XDG path -- the seam -- and
-    // hands the core a plain string), then paint both surfaces.
-    m_recents_file = recents_file();
-    // m_recents filled by note_recent / load; load happens in bind_actions after
-    // the action group exists so a click can route. Paint whatever's there.
+    // The recents list was loaded in bind_actions (after its action group
+    // exists, so a click can route); paint both surfaces.
     rebuild_recents_menu();
-    rebuild_recents_page();
+    rebuild_recents_list();
 
     if (auto lg = log::get(log::Area::Shell))
         lg->info("ready -- {} widget(s) registered", 0);  // dump-registry shows the real count

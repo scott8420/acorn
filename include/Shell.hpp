@@ -1,6 +1,7 @@
 #pragma once
 #include "widgets/Widgets.hpp"
-#include "core/Stones.hpp"   // s046: the undo stone's demo model + journal
+#include "core/Connections.hpp"  // s004b: recent connections
+#include "Keyring.hpp"             // s004b: passwords in the GNOME keyring
 #include "db/Loader.hpp"     // s004: engine plugins
 #include "db/Schema.hpp"
 
@@ -48,9 +49,9 @@
 //   "Where is the window built?"        -> Shell_zones.cpp    (build_shell)
 //   "Where are actions registered?"     -> Shell_bindings.cpp (bind_actions)
 //   "What does 'Dump registry' do?"     -> Shell_handlers.cpp (on_dump_registry)
-//   "Where does the recents list sync?" -> Shell_helpers.cpp  (note_recent / rebuild_*)
-//   "Where does Ctrl+Z go?"             -> Shell_bindings.cpp (the window's undo keys)
-//                                          + Shell_handlers.cpp (on_undo / on_redo)
+//   "Where does the recents list sync?" -> Shell_helpers.cpp  (remember_connection / rebuild_*)
+//   "Where does a password come from?"  -> Shell_connect.cpp  (on_connect -> keyring lookup)
+//   "Where is a table's detail drawn?"  -> Shell_tables.cpp   (show_table)
 // ─────────────────────────────────────────────────────────────────────────────
 namespace acorn {
 
@@ -67,51 +68,46 @@ public:
 private:
     // ── zones ──────────────────────────────────────────────────────────────
     void build_shell();                          // category: zone: window + sidebar + stack
-    void build_pages();                          // category: zone: the pattern pages
-    void build_demo_pages();                     // category: zone: Cairn's demo pages (retired s004, not called)
+    void build_pages();                          // category: zone: Acorn's areas
     Glib::RefPtr<Gio::Menu> build_menu();        // category: zone: hamburger model
 
     // ── bindings ───────────────────────────────────────────────────────────
     void bind_actions();                         // category: bindings: actions + recents group
 
     // ── handlers ───────────────────────────────────────────────────────────
-    void on_pick_folder();                       // category: handler: folder chooser -> remember it
-    void on_recent_open(const std::string& p);   // category: handler: open a recent (parameterised)
-    void on_recent_clear();                      // category: handler: empty the recents list
     void on_dump_registry();                     // category: handler: print the live widget tree
     void on_about();                             // category: handler: open the About window (dialog-lifetime exemplar)
-    void on_shortcuts();   // handler: open the keyboard reference (renders from core::shortcut_registry)
-    // s046 -- the undo stone. Every verb on the Undo page goes through the
-    // journal (core/Undo.hpp); nothing on it writes the model any other way.
-    void on_undo();                              // category: handler: Ctrl+Z / menu / button
-    void on_redo();                              // category: handler: Ctrl+Shift+Z, Ctrl+Y / menu / button
-    void on_stone_add();                         // category: handler: a new stone below the selection
-    void on_stone_delete();                      // category: handler: delete; the neighbour takes the selection
-    void on_stone_up();                          // category: handler: swap with the one above
-    void on_stone_down();                        // category: handler: swap with the one below
-    void on_stone_rename();                      // category: handler: the name field, on Enter / leaving it
-    void on_stone_size();                        // category: handler: the slider (keys merge; a drag is one step)
+    void on_shortcuts();                         // category: handler: open the keyboard reference
+    void on_recent_open(const std::string& key); // category: handler: connect to a recent (parameterised)
+    void on_recent_forget(const std::string& key); // category: handler: drop one recent + its stored password
+    void on_recents_clear();                     // category: handler: drop them all + their passwords
 
     // ── connect (s004) -- src/Shell_connect.cpp ─────────────────────────────
     void build_connect_page();                   // category: connect: the Connect area
     void on_engine_changed();                    // category: connect: file vs server rows
+    void on_open_file();                         // category: connect: Ctrl+O -- SQLite + the file dialog
     void on_browse_file();                       // category: connect: pick an SQLite file
-    void on_connect();                           // category: connect: open read-only + introspect on a worker
+    void on_connect();                           // category: connect: read the form -> keyring -> start
+    void start_connect(db::Engine* e, db::ConnectParams p);  // category: connect: open + introspect on a worker
     void on_connect_done();                      // category: connect: back on the UI thread
     void show_schema();                          // category: connect: paint the table list
     void set_status(const std::string& text, const char* kind);  // category: connect: "", "ok", "error"
+    void fill_form(const core::SavedConnection& c);  // category: connect: a recent -> the form
+    db::Engine* engine_by_id(const std::string& id) const;  // category: connect
+
+    // ── tables (s004c) -- src/Shell_tables.cpp ──────────────────────────────
+    void build_tables_page();                    // category: tables: the read-only schema browser
+    void rebuild_table_list();                   // category: tables: the left list, after a connect
+    void show_table(const std::string& name);    // category: tables: paint one table's detail
+    void open_table(const std::string& name);    // category: tables: go to the Tables area, that table selected
 
     // ── helpers ────────────────────────────────────────────────────────────
-    void note_recent(const std::string& path);   // category: helper: push onto the list + persist
-    void rebuild_recents_menu();                  // category: helper: repaint the submenu
-    void rebuild_recents_page();                  // category: helper: repaint the live list page
-    std::string recents_file() const;             // category: helper: the XDG path (UI-side resolution)
-    void build_undo_page();                       // category: zone: the Undo page (s046)
-    void queue_stones_repaint();                  // category: helper: one repaint per idle, after the writes
-    void repaint_stones();                        // category: helper: the list + the detail fields from the model
-    void select_stone(const std::string& id, bool keys);   // category: helper: select (+ keyboard) after a repaint
-    void update_undo_ui();                        // category: helper: Undo / Redo say what they would do, grey when nothing
-    bool focus_is_text() const;                   // category: helper: the keyboard is in a text box (its own Ctrl+Z)
+    std::string connections_file() const;        // category: helper: the XDG path (UI-side resolution)
+    void remember_connection(const core::SavedConnection& c);  // category: helper: push + persist + repaint
+    void rebuild_recents_menu();                 // category: helper: repaint the submenu
+    void rebuild_recents_list();                 // category: helper: repaint the Connect page's list
+    std::string engine_name(const std::string& id) const;  // category: helper: "sqlite" -> "SQLite"
+    keyring::Account account_for(const core::SavedConnection& c) const;  // category: helper: the keyring's key
 
     // Titlebar: brand logo (start) + hamburger (end).
     widgets::Button     m_logo_button;   // frameless brand mark; opens About
@@ -122,34 +118,18 @@ private:
     widgets::StackSidebar m_sidebar;
     widgets::Stack        m_stack;
 
-    // The recents "live page": a label + a scrolling list rebuilt on change.
-    widgets::Box            m_recents_page;   // vertical
-    widgets::ScrolledWindow m_recents_scroll;
-    widgets::ListBox        m_recents_list;
-
-    // Recents state (core data; UI holds it + resolves the path -- the seam).
-    std::vector<std::string>        m_recents;
+    // s004b -- recent connections. Core data (no passwords); the UI resolves
+    // the XDG path and drives the two surfaces: the Connect page's list and
+    // the hamburger's "Open recent" submenu (CANON: two surfaces, one mechanism).
+    std::vector<core::SavedConnection> m_recents;
     std::string                     m_recents_file;
     Glib::RefPtr<Gio::Menu>         m_recents_menu;   // live submenu, rebuilt in place
     Glib::RefPtr<Gio::SimpleAction> m_recents_clear;  // held to toggle enabled state
+    widgets::ListBox                m_recent_list;
 
-    // s046 -- the undo stone. Declaration order matters: the store before the
-    // journal that holds a reference to it.
-    core::Stones       m_stones;
-    core::StoneJournal m_journal{m_stones};
-    std::string        m_sel;                  // the selected stone's id ("" = none)
-    bool               m_painting = false;     // a repaint sets fields: not a user choice
-    bool               m_repaint_queued = false;
-    bool               m_keys_to_list = false; // after the repaint, give the list the keyboard
-    widgets::Box       m_undo_page;
-    widgets::ListBox   m_stone_list;
-    widgets::Entry     m_stone_name;
-    widgets::Scale     m_stone_size;
-    widgets::Button    m_undo_button;
-    widgets::Button    m_redo_button;
-    widgets::Label     m_undo_said;            // "Undid: Delete “Jade”"
-    Glib::RefPtr<Gio::Menu>         m_edit_menu;   // Undo / Redo items, re-labelled live
-    Glib::RefPtr<Gio::SimpleAction> m_act_undo, m_act_redo;
+    // Keyring callbacks arrive later on the main loop; they hold a weak copy
+    // of this and do nothing once the window is gone.
+    std::shared_ptr<bool>           m_alive = std::make_shared<bool>(true);
 
     // s004 -- the Connect area. DECLARATION ORDER MATTERS: the loader owns the
     // plugin code, so it is declared before (destroyed after) the connection.
@@ -165,6 +145,7 @@ private:
     widgets::Box                    m_server_rows;
     widgets::Entry                  m_path;
     widgets::Entry                  m_host, m_port, m_database, m_user, m_password;
+    widgets::CheckButton            m_remember;      // "Remember the password in the keyring"
     widgets::Button                 m_browse;
     widgets::Button                 m_connect;
     widgets::Label                  m_status;
@@ -177,6 +158,22 @@ private:
     std::unique_ptr<db::Connection> m_result_conn;
     db::Schema                      m_result_schema;
     std::string                     m_result_error;
+    // What the connect in flight was asked for: on success it becomes a
+    // recent, and (server, Remember ticked, password typed) the typed password
+    // goes to the keyring. The password is dropped as soon as it is handed on.
+    core::SavedConnection           m_pending;
+    std::string                     m_pending_password;
+    bool                            m_pending_remember = false;
+    bool                            m_pending_from_keyring = false;
+
+    // s004c -- the Tables area: pick a table on the left, its columns,
+    // indexes and links on the right. Read-only; painted from m_schema.
+    widgets::Box                    m_tables_page;
+    widgets::ListBox                m_table_list;
+    widgets::Box                    m_table_detail;
+    widgets::Label                  m_tables_where;  // "PostgreSQL -- shop on db.lan · 2 tables, 1 view"
+    std::string                     m_table_sel;     // the shown table ("" = none)
+    bool                            m_table_painting = false;
 
     // The About window: a hide-on-close singleton, built lazily on first open.
     std::unique_ptr<AboutWindow>    m_about;

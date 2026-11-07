@@ -12,9 +12,9 @@ point at any engine.
 
 Acorns grow into trees. So do schemas.
 
-> **Status:** s003 -- all three engines. Acorn's own engine interface, a
-> runtime plugin loader, and SQLite, MariaDB and PostgreSQL plugins with full
-> schema introspection, all passing one shared test suite. No database UI yet.
+> **Status:** s004 -- connect to SQLite, MariaDB or PostgreSQL **read-only**
+> and browse the schema: every table's columns, types, keys, indexes and links. Recent connections are remembered; server passwords go
+> to the GNOME keyring (libsecret), never to a file. Nothing writes yet.
 
 ## Engines
 
@@ -30,6 +30,17 @@ whose client library isn't installed simply isn't offered.
 
 Acorn SQL uses `?` placeholders on every engine (rewritten to `$n` for
 PostgreSQL), and values are always bound, never spliced into the SQL.
+
+### Passwords
+
+A server password is used for the connect and then dropped. With
+"Remember the password in the GNOME keyring" ticked, it is stored in the
+Secret Service under `io.github.scott8420.Acorn.Connection` -- visible and
+deletable in Seahorse ("Passwords and Keys"). The recent-connections list
+(`~/.local/share/acorn/connections.json`) holds engine, host, port, database
+and user only. Forgetting a recent (its x) also removes its stored password.
+`ACORN_TEST_KEYRING=1 ./build/acorn_selftest` adds a keyring round-trip (one
+test entry, user `acorn_selftest`, removed again).
 
 ### Testing against servers
 
@@ -50,7 +61,7 @@ variable that engine is reported *skipped*.
 
 ```bash
 # Fedora
-sudo dnf install gtkmm4.0-devel spdlog-devel cmake gcc-c++ ninja-build \
+sudo dnf install gtkmm4.0-devel spdlog-devel libsecret-devel cmake gcc-c++ ninja-build \
                  sqlite-devel mariadb-connector-c-devel libpq-devel
 ./build.sh
 ./build/acorn_selftest

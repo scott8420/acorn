@@ -4,6 +4,7 @@
 #include <giomm/liststore.h>
 #include <algorithm>
 #include <filesystem>
+#include <utility>
 #include <gtkmm/filedialog.h>
 #include <gtkmm/filefilter.h>
 #include <gtkmm/grid.h>
@@ -95,8 +96,8 @@ void Shell::build_connect_page() {  // connect: the Connect area
     // The form, on a calm panel.
     auto panel = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 10);
     panel->add_css_class("acorn-panel");
-    panel->set_size_request(520, -1);
-    panel->set_halign(Gtk::Align::START);
+    panel->set_size_request(480, -1);
+    panel->set_hexpand(false);   // explicit: its entries would otherwise propagate expand
 
     auto engine_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 10);
     auto el = field_label("Engine");
@@ -140,9 +141,12 @@ void Shell::build_connect_page() {  // connect: the Connect area
     add("Port", m_port, "default");
     add("Database", m_database, "name");
     add("User", m_user, "user name");
-    add("Password", m_password, "not stored");
+    add("Password", m_password, "from the keyring, if remembered");
     m_password.set_visibility(false);
     m_password.set_input_purpose(Gtk::InputPurpose::PASSWORD);
+    m_remember.set_label("Remember the password in the GNOME keyring");
+    m_remember.set_active(true);
+    grid->attach(m_remember, 1, row);
     m_server_rows.append(*grid);
     panel->append(m_server_rows);
 
@@ -161,7 +165,35 @@ void Shell::build_connect_page() {  // connect: the Connect area
     m_status.set_wrap(true);
     m_status.add_css_class("acorn-status");
     panel->append(m_status);
-    m_connect_page.append(*panel);
+
+    // Recent connections, beside the form (s004b). A click connects again;
+    // the x forgets it (and its stored password).
+    auto recent = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 6);
+    recent->add_css_class("acorn-panel");
+    recent->set_hexpand(true);
+    recent->set_size_request(240, -1);
+    auto rt = Gtk::make_managed<Gtk::Label>("Recent");
+    rt->set_xalign(0.0f);
+    rt->add_css_class("acorn-field-label");
+    auto rscroll = Gtk::make_managed<Gtk::ScrolledWindow>();
+    rscroll->set_policy(Gtk::PolicyType::NEVER, Gtk::PolicyType::AUTOMATIC);
+    rscroll->set_vexpand(true);
+    rscroll->set_min_content_height(120);
+    m_recent_list.set_selection_mode(Gtk::SelectionMode::NONE);
+    m_recent_list.set_activate_on_single_click(true);
+    m_recent_list.signal_row_activated().connect([this](Gtk::ListBoxRow* row) {
+        const int i = row ? row->get_index() : -1;
+        if (i >= 0 && static_cast<std::size_t>(i) < m_recents.size())
+            on_recent_open(m_recents[i].key());
+    });
+    rscroll->set_child(m_recent_list);
+    recent->append(*rt);
+    recent->append(*rscroll);
+
+    auto top = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 14);
+    top->append(*panel);
+    top->append(*recent);
+    m_connect_page.append(*top);
 
     // What we found: tables and views, on their own panel.
     auto found = Gtk::make_managed<Gtk::ScrolledWindow>();
@@ -169,6 +201,12 @@ void Shell::build_connect_page() {  // connect: the Connect area
     found->set_vexpand(true);
     found->add_css_class("acorn-panel");
     m_tables.set_selection_mode(Gtk::SelectionMode::NONE);
+    m_tables.set_activate_on_single_click(true);
+    m_tables.signal_row_activated().connect([this](Gtk::ListBoxRow* row) {   // s004c
+        const int i = row ? row->get_index() : -1;
+        if (i >= 0 && static_cast<std::size_t>(i) < m_schema.tables.size())
+            open_table(m_schema.tables[i].name);
+    });
     found->set_child(m_tables);
     m_connect_page.append(*found);
 
@@ -221,37 +259,101 @@ void Shell::on_browse_file() {  // connect: pick an SQLite file
     });
 }
 
-void Shell::on_connect() {  // connect: open read-only + introspect on a worker
+void Shell::on_open_file() {  // connect: Ctrl+O -- SQLite + the file dialog
+    for (std::size_t i = 0; i < m_engines.size(); ++i)
+        if (!m_engines[i]->caps().needs_server) { m_engine_pick.set_selected(i); break; }
+    m_stack.set_visible_child("connect");
+    on_browse_file();
+}
+
+db::Engine* Shell::engine_by_id(const std::string& id) const {  // connect
+    for (auto* e : m_engines)
+        if (e->id() == id) return e;
+    return nullptr;
+}
+
+void Shell::fill_form(const core::SavedConnection& c) {  // connect: a recent -> the form
+    for (std::size_t i = 0; i < m_engines.size(); ++i)
+        if (m_engines[i]->id() == c.engine) { m_engine_pick.set_selected(i); break; }
+    if (c.is_file()) {
+        m_path.set_text(c.path);
+    } else {
+        m_host.set_text(c.host);
+        m_port.set_text(c.port > 0 ? std::to_string(c.port) : "");
+        m_database.set_text(c.database);
+        m_user.set_text(c.user);
+        m_password.set_text("");   // the keyring supplies it
+    }
+}
+
+void Shell::on_connect() {  // connect: read the form -> keyring -> start
     if (m_worker.joinable()) return;                 // one at a time
     const auto i = m_engine_pick.get_selected();
     if (i >= m_engines.size()) return;
     db::Engine* e = m_engines[i];
 
     db::ConnectParams p;                             // read_only = true by default
+    core::SavedConnection saved;
+    saved.engine = e->id();
     if (e->caps().needs_server) {
         p.host = m_host.get_text();
         p.port = std::atoi(m_port.get_text().c_str());
         p.database = m_database.get_text();
         p.user = m_user.get_text();
         p.password = m_password.get_text();
-        m_password.set_text("");                     // never kept (keyring: s004b)
-        m_conn_label = e->name() + " — " + (p.database.empty() ? "(server)" : p.database) +
-                       " on " + (p.host.empty() ? "localhost" : p.host);
+        m_password.set_text("");                     // never left in the form
+        saved.host = p.host;
+        saved.port = p.port;
+        saved.database = p.database;
+        saved.user = p.user;
     } else {
         p.path = m_path.get_text();
         if (p.path.empty()) { set_status("Choose a database file first.", "error"); return; }
-        m_conn_label = e->name() + " — " + std::filesystem::path(p.path).filename().string();
+        saved.path = p.path;
     }
-
+    m_conn_label = e->name() + " — " + saved.label();
+    m_pending = saved;
+    m_pending_remember = e->caps().needs_server && m_remember.get_active();
+    m_pending_password = p.password;
+    m_pending_from_keyring = false;
     m_connect.set_sensitive(false);
-    set_status("Connecting to " + m_conn_label + "…", "");
-    if (auto lg = log::get(log::Area::App)) lg->info("connect (read-only): {}", m_conn_label);
 
-    m_worker = std::thread([this, e, p]() {
+    // A server with no typed password: ask the keyring first (async -- a
+    // locked keyring may prompt). Nothing stored -> try without one; some
+    // servers trust local users.
+    if (e->caps().needs_server && p.password.empty()) {
+        set_status("Looking up the password in the keyring…", "");
+        std::weak_ptr<bool> alive = m_alive;
+        keyring::lookup(account_for(saved),
+            [this, alive, e, p](std::optional<std::string> pw, std::string err) mutable {
+                if (alive.expired() || !*alive.lock()) return;
+                if (!err.empty())
+                    if (auto lg = log::get(log::Area::App)) lg->warn("keyring lookup: {}", err);
+                if (pw) {
+                    p.password = std::move(*pw);
+                    m_pending_from_keyring = true;
+                }
+                start_connect(e, std::move(p));
+            });
+        return;
+    }
+    start_connect(e, std::move(p));
+}
+
+void Shell::start_connect(db::Engine* e, db::ConnectParams p) {  // connect: open + introspect on a worker
+    set_status("Connecting to " + m_conn_label + "…", "");
+    if (auto lg = log::get(log::Area::App))
+        lg->info("connect (read-only): {}{}", m_conn_label,
+                 m_pending_from_keyring ? " [password from keyring]" : "");
+
+    m_worker = std::thread([this, e, p = std::move(p)]() mutable {
         std::unique_ptr<db::Connection> conn;
         db::Schema schema;
         std::string error;
-        if (auto c = e->open(p)) {
+        auto c = e->open(p);
+        std::fill(p.password.begin(), p.password.end(), '\0');
+        p.password.clear();
+        if (c) {
             if (auto s = (*c)->introspect()) {
                 conn = std::move(*c);
                 schema = std::move(*s);
@@ -282,12 +384,36 @@ void Shell::on_connect_done() {  // connect: back on the UI thread
         error = std::move(m_result_error);
         if (conn) m_schema = std::move(m_result_schema);
     }
+    const std::string typed = std::exchange(m_pending_password, std::string{});
     if (!conn) {
-        set_status("Could not connect: " + error, "error");
+        set_status("Could not connect: " + error +
+                   (m_pending_from_keyring ? " (The stored password may be out of date -- type it again.)" : ""),
+                   "error");
         if (auto lg = log::get(log::Area::App)) lg->warn("connect failed: {}", error);
         return;
     }
     m_conn = std::move(conn);
+
+    // It worked: remember the connection (never the password), and settle the
+    // keyring the way the checkbox says.
+    remember_connection(m_pending);
+    if (!m_pending.is_file()) {
+        const auto acct = account_for(m_pending);
+        if (m_pending_remember && !typed.empty()) {
+            keyring::store(acct, typed, [](bool ok, std::string err) {
+                if (auto lg = log::get(log::Area::App)) {
+                    if (ok) lg->info("password stored in the keyring");
+                    else lg->warn("keyring store failed: {}", err);
+                }
+            });
+        } else if (!m_pending_remember) {
+            keyring::clear(acct, [](bool removed, std::string err) {
+                if (auto lg = log::get(log::Area::App))
+                    if (removed || !err.empty())
+                        lg->info("keyring clear: {}", err.empty() ? "removed" : err);
+            });
+        }
+    }
     std::size_t tables = 0, views = 0;
     for (auto& t : m_schema.tables) (t.kind == db::Table::Kind::View ? views : tables)++;
     set_status("Connected to " + m_conn_label + " (read-only): " + std::to_string(tables) +
@@ -295,6 +421,7 @@ void Shell::on_connect_done() {  // connect: back on the UI thread
                (views == 1 ? "" : "s") + ".", "ok");
     set_title("Acorn — " + m_conn_label);
     show_schema();
+    rebuild_table_list();   // s004c: the Tables area follows the connection
 }
 
 void Shell::show_schema() {  // connect: paint the table list

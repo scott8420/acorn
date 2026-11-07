@@ -111,14 +111,8 @@ const std::vector<ShortcutSpec>& shortcut_registry() {
         {"Diagnostics", "win.dump-registry", {"<Ctrl>d"}, "",
          "Dump the widget registry to the log"},
 
-        // ── Edit (s046) ───────────────────────────────────────────────────────
-        // Doc-only ON PURPOSE: an accelerator would take Ctrl+Z from every text
-        // box. The window hears these instead (Shell_bindings.cpp).
-        {"Edit", "", {}, "Ctrl+Z", "Undo -- anywhere but a text box (which keeps its own)"},
-        {"Edit", "", {}, "Ctrl+Shift+Z  /  Ctrl+Y", "Redo"},
-
         // ── General ───────────────────────────────────────────────────────────
-        {"General", "win.pick-folder",   {"<Ctrl>o"}, "", "Pick a folder"},
+        {"General", "win.open-file",     {"<Ctrl>o"}, "", "Open a database file"},
         {"General", "win.shortcuts",     {"<Ctrl>question", "<Ctrl>slash"}, "",
          "Keyboard shortcuts (this window)"},
         {"General", "win.about",         {"F1"}, "", "About Acorn"},
@@ -126,7 +120,7 @@ const std::vector<ShortcutSpec>& shortcut_registry() {
 
         // ── Mouse ─────────────────────────────────────────────────────────────
         // Doc-only: a gesture is not a GAction, but the reader still needs it.
-        {"Mouse", "", {}, "Click a recent", "Open that folder"},
+        {"Mouse", "", {}, "Click a recent connection", "Connect to it again (read-only)"},
 
     };
     return kReg;

@@ -3,6 +3,7 @@
 
 #include <gtkmm/box.h>
 #include <gtkmm/button.h>
+#include <gtkmm/checkbutton.h>
 #include <gtkmm/entry.h>
 #include <gtkmm/image.h>
 #include <gtkmm/label.h>
@@ -19,6 +20,7 @@ namespace acorn::widgets {
 
 using Box            = Named<Gtk::Box>;
 using Button         = Named<Gtk::Button>;
+using CheckButton    = Named<Gtk::CheckButton>;
 using Entry          = Named<Gtk::Entry>;
 using Image          = Named<Gtk::Image>;
 using Label          = Named<Gtk::Label>;

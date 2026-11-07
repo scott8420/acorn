@@ -385,6 +385,21 @@ void test_suite(const Target& T) {
               v && v->kind == Table::Kind::View && v->columns.size() == 2 &&
               v->column("spent") && v->indexes.empty() && v->foreign_keys.empty(), "");
 
+        // s004c -- what the Tables browser's "links in" reads.
+        {
+            const auto in_c = s->links_to("customers");
+            const auto in_o = s->links_to("orders");
+            check(P + "links in: customers <- orders.customer_id",
+                  in_c.size() == 1 && in_c[0].from->name == "orders" &&
+                  in_c[0].fk->columns == std::vector<std::string>{"customer_id"}, "");
+            check(P + "links in: orders <- order_lines",
+                  in_o.size() == 1 && in_o[0].from->name == "order_lines", "");
+            check(P + "links in: none into tags", s->links_to("tags").empty(), "");
+            check(P + "link targets resolve to columns",
+                  ol && !ol->foreign_keys.empty() &&
+                  s->ref_columns(ol->foreign_keys[0]) == std::vector<std::string>{"id"}, "");
+        }
+
         auto after = C.query("SELECT count(*) FROM customers");
         auto s2 = C.introspect();
         check(P + "nothing changed during the read-only session",

@@ -50,9 +50,21 @@ struct Table {
     std::vector<std::string> primary_key() const;   // in key order
 };
 
+// A link INTO a table: `from`'s foreign key `fk` points at it (s004c).
+struct LinkIn {
+    const Table*      from = nullptr;
+    const ForeignKey* fk = nullptr;
+};
+
 struct Schema {
     std::vector<Table> tables;               // tables then views, each by name
     const Table* table(const std::string& n) const;
+    // Every foreign key in the schema that points at `n`, in table order then
+    // key order (a self-reference counts). Pointers into `tables`.
+    std::vector<LinkIn> links_to(const std::string& n) const;
+    // The columns `fk` points at -- its own list, or (SQLite's REFERENCES t
+    // with no column list) the referenced table's primary key.
+    std::vector<std::string> ref_columns(const ForeignKey& fk) const;
 };
 
 } // namespace acorn::db

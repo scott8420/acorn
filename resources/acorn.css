@@ -115,3 +115,23 @@ window.acorn button.acorn-primary:disabled { background: rgba(245, 185, 66, 0.35
     border-radius: 999px;
     padding: 1px 8px;
 }
+
+/* s004b: the recent-connections list. */
+.acorn-small { font-size: 9pt; }
+window.acorn button.acorn-forget:not(.acorn-primary):not(.titlebutton) { background: transparent; border: none; opacity: 0.55; }
+window.acorn button.acorn-forget:not(.acorn-primary):not(.titlebutton):hover { opacity: 1; background: rgba(255, 255, 255, 0.10); }
+window.acorn checkbutton { color: @acorn_ink_dim; }
+
+/* s004c: the Tables area. */
+.acorn-section     { font-weight: 700; color: @acorn_amber; }
+.acorn-table-title { font-size: 16pt; font-weight: 800; }
+.acorn-th          { font-weight: 700; color: @acorn_ink_dim; font-size: 9pt; }
+.acorn-mono        { font-family: monospace; }
+.acorn-field       { color: #9fd3e0; }
+.acorn-key         { color: @acorn_amber; font-weight: 700; }
+.acorn-dim-icon    { color: @acorn_ink_dim; }
+.acorn-table-list row:selected { background: rgba(245, 185, 66, 0.20); border-radius: 8px; }
+window.acorn button.acorn-link:not(.acorn-primary):not(.titlebutton) {
+    background: transparent; border: none; color: @acorn_amber; padding: 0 4px; min-height: 0;
+}
+window.acorn button.acorn-link:not(.acorn-primary):not(.titlebutton):hover { text-decoration: underline; }

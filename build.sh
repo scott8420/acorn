@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Acorn build.
-#   Fedora: sudo dnf install gtkmm4.0-devel spdlog-devel cmake gcc-c++ ninja-build sqlite-devel \
+#   Fedora: sudo dnf install gtkmm4.0-devel spdlog-devel libsecret-devel cmake gcc-c++ ninja-build sqlite-devel \
 #           mariadb-connector-c-devel libpq-devel   (each engine is optional)
-#   Ubuntu: sudo apt install libgtkmm-4.0-dev libspdlog-dev cmake g++ ninja-build libsqlite3-dev \
+#   Ubuntu: sudo apt install libgtkmm-4.0-dev libspdlog-dev libsecret-1-dev cmake g++ ninja-build libsqlite3-dev \
 #           libmariadb-dev libpq-dev
 # Ninja is used when installed and the build dir is fresh; ccache / mold are
 # picked up by CMake if present.

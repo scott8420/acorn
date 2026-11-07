@@ -1,11 +1,9 @@
 #include "Shell.hpp"
-#include "core/Recents.hpp"
 #include "Log.hpp"
 
+#include <gtkmm/button.h>
 #include <gtkmm/label.h>
-#include <gtkmm/editable.h>
-#include <gtkmm/textview.h>
-#include <glibmm/main.h>
+#include <gtkmm/listboxrow.h>
 #include <giomm/menuitem.h>
 #include <glibmm/miscutils.h>
 #include <glibmm/variant.h>
@@ -13,163 +11,103 @@
 #include <filesystem>
 
 // Shell_helpers.cpp -- HELPERS. Reusable orchestration called from zones,
-// bindings, and handlers: the recents seam (path resolution, persist, and the
-// two-surface repaint).
+// bindings, handlers and the Connect area: the recent-connections seam (path
+// resolution, persist, and the two-surface repaint) and the keyring's key.
 
 namespace acorn {
 
-std::string Shell::recents_file() const {  // helper: XDG path (UI-side resolution)
+std::string Shell::connections_file() const {  // helper: XDG path (UI-side resolution)
     // The UI resolves the XDG dir (Glib here) and hands the core a plain path --
-    // the core stays GTK-free (docs/two-layer-seam.md).
-    return (std::filesystem::path(Glib::get_user_data_dir()) / "acorn" / "recent.json")
+    // the core stays GTK-free (docs/two-layer-seam.md). Cairn's folder list
+    // lived in recent.json; connections get their own file.
+    return (std::filesystem::path(Glib::get_user_data_dir()) / "acorn" / "connections.json")
         .string();
 }
 
-void Shell::note_recent(const std::string& path) {  // helper: push + persist + repaint
-    if (path.empty()) return;
-    core::recents_add(m_recents, path);
-    core::save_recents(m_recents_file, m_recents);
+void Shell::remember_connection(const core::SavedConnection& c) {  // helper: push + persist + repaint
+    core::connections_add(m_recents, c);
+    if (!core::save_connections(m_recents_file, m_recents))
+        if (auto lg = log::get(log::Area::Recents))
+            lg->warn("could not write {}", m_recents_file);
     rebuild_recents_menu();
-    rebuild_recents_page();
+    rebuild_recents_list();
+}
+
+std::string Shell::engine_name(const std::string& id) const {  // helper
+    for (auto* e : m_engines)
+        if (e->id() == id) return e->name();
+    return id;   // a recent for an engine this machine no longer has
+}
+
+keyring::Account Shell::account_for(const core::SavedConnection& c) const {  // helper
+    keyring::Account a;
+    a.engine = c.engine;
+    a.host = c.host;
+    a.port = c.port;
+    a.database = c.database;
+    a.user = c.user;
+    a.label = "Acorn — " + engine_name(c.engine) + ": " + c.label() +
+              (c.user.empty() ? "" : " (" + c.user + ")");
+    return a;
 }
 
 void Shell::rebuild_recents_menu() {  // helper: repaint the submenu
     if (!m_recents_menu) return;
     m_recents_menu->remove_all();
-
-    // Display name = folder basename; identical basenames get their parent dir
-    // appended so they're distinguishable (Curvz's disambiguation).
-    std::vector<std::string> names(m_recents.size());
-    for (std::size_t i = 0; i < m_recents.size(); ++i)
-        names[i] = std::filesystem::path(m_recents[i]).filename().string();
-    for (std::size_t i = 0; i < names.size(); ++i)
-        for (std::size_t j = i + 1; j < names.size(); ++j)
-            if (names[i] == names[j]) {
-                const std::string pi =
-                    std::filesystem::path(m_recents[i]).parent_path().filename().string();
-                const std::string pj =
-                    std::filesystem::path(m_recents[j]).parent_path().filename().string();
-                if (!pi.empty()) names[i] += "  (" + pi + ")";
-                if (!pj.empty()) names[j] += "  (" + pj + ")";
-            }
-
-    for (std::size_t i = 0; i < m_recents.size(); ++i) {
-        auto item = Gio::MenuItem::create(names[i], "");
-        item->set_action_and_target(
-            "recents.open", Glib::Variant<Glib::ustring>::create(m_recents[i]));
+    for (const auto& c : m_recents) {
+        auto item = Gio::MenuItem::create(engine_name(c.engine) + " — " + c.label(), "");
+        item->set_action_and_target("recents.open", Glib::Variant<Glib::ustring>::create(c.key()));
         m_recents_menu->append_item(item);
     }
-
     auto clear_section = Gio::Menu::create();
-    clear_section->append("Clear recent", "recents.clear");
+    clear_section->append("Forget All Recent Connections", "recents.clear");
     m_recents_menu->append_section("", clear_section);
     if (m_recents_clear) m_recents_clear->set_enabled(!m_recents.empty());
 }
 
-void Shell::rebuild_recents_page() {  // helper: repaint the live list page
-    // Clear existing rows.
-    while (auto* row = m_recents_list.get_row_at_index(0))
-        m_recents_list.remove(*row);
+void Shell::rebuild_recents_list() {  // helper: repaint the Connect page's list
+    // Rows are in m_recents order; on_connect_page's row-activated handler
+    // maps the row index back to the entry.
+    while (auto* row = m_recent_list.get_row_at_index(0)) m_recent_list.remove(*row);
 
     if (m_recents.empty()) {
-        auto* empty = Gtk::make_managed<Gtk::Label>("(nothing remembered yet)");
+        auto* empty = Gtk::make_managed<Gtk::Label>("Connections you open appear here.");
+        empty->add_css_class("acorn-status");
         empty->set_xalign(0.0f);
-        empty->set_margin(12);
-        m_recents_list.append(*empty);
+        empty->set_wrap(true);
+        empty->set_margin(8);
+        m_recent_list.append(*empty);
+        if (auto* r = m_recent_list.get_row_at_index(0)) r->set_activatable(false);
         return;
     }
-    for (const auto& p : m_recents) {
-        auto* lbl = Gtk::make_managed<Gtk::Label>(p);
-        lbl->set_xalign(0.0f);
-        lbl->set_margin(8);
-        lbl->set_selectable(true);
-        m_recents_list.append(*lbl);
+    for (const auto& c : m_recents) {
+        auto* box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        box->set_margin(6);
+        auto* text = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 1);
+        text->set_hexpand(true);
+        auto* name = Gtk::make_managed<Gtk::Label>(c.label());
+        name->set_xalign(0.0f);
+        name->set_ellipsize(Pango::EllipsizeMode::END);
+        auto* detail = Gtk::make_managed<Gtk::Label>(engine_name(c.engine) + " · " + c.detail());
+        detail->set_xalign(0.0f);
+        detail->set_ellipsize(Pango::EllipsizeMode::MIDDLE);
+        detail->add_css_class("acorn-status");
+        detail->add_css_class("acorn-small");
+        text->append(*name);
+        text->append(*detail);
+        auto* forget = Gtk::make_managed<Gtk::Button>();
+        forget->set_icon_name("window-close-symbolic");
+        forget->set_has_frame(false);
+        forget->set_valign(Gtk::Align::CENTER);
+        forget->add_css_class("acorn-forget");
+        forget->set_tooltip_text(c.is_file() ? "Forget this connection"
+                                             : "Forget this connection and its stored password");
+        forget->set_action_name("recents.forget");
+        forget->set_action_target_value(Glib::Variant<Glib::ustring>::create(c.key()));
+        box->append(*text);
+        box->append(*forget);
+        m_recent_list.append(*box);
     }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// s046 -- the undo stone's helpers.
-// ─────────────────────────────────────────────────────────────────────────────
-
-// One repaint per idle, AFTER the writes that caused it. A verb can write
-// several records (a move writes two); repainting per write would rebuild the
-// list mid-verb, and a row rebuilt under a live click or a focused row is torn
-// down (jot s045: "open UI after the rebuild you caused").
-void Shell::queue_stones_repaint() {  // helper
-    if (m_repaint_queued) return;
-    m_repaint_queued = true;
-    Glib::signal_idle().connect_once([this]() {
-        m_repaint_queued = false;
-        repaint_stones();
-    });
-}
-
-// The list and the detail fields, from the model. Setting a field here is not a
-// user choice: m_painting keeps the field's own signal from writing it back.
-void Shell::repaint_stones() {  // helper
-    m_painting = true;
-    while (auto* c = m_stone_list.get_first_child()) m_stone_list.remove(*c);
-    Gtk::ListBoxRow* chosen = nullptr;
-    for (const auto& id : m_stones.ids()) {
-        const auto v = m_stones.get(id);
-        auto row = Gtk::make_managed<Gtk::ListBoxRow>();
-        row->set_name(id);   // the row carries its stone's id
-        auto label = Gtk::make_managed<Gtk::Label>(
-            v->name + "   ·   size " + std::to_string(v->size));
-        label->set_xalign(0.0f);
-        label->set_margin(6);
-        row->set_child(*label);
-        m_stone_list.append(*row);
-        if (id == m_sel) chosen = row;
-    }
-    if (chosen) m_stone_list.select_row(*chosen);
-    else        m_stone_list.unselect_all();
-
-    const auto v = m_sel.empty() ? std::nullopt : m_stones.get(m_sel);
-    m_stone_name.set_sensitive(v.has_value());
-    m_stone_size.set_sensitive(v.has_value());
-    // Never overwrite a field the user is typing in.
-    if (!m_stone_name.has_focus() || !v) m_stone_name.set_text(v ? v->name : std::string{});
-    if (!m_journal.in_gesture()) m_stone_size.set_value(v ? v->size : 1);
-    m_painting = false;
-
-    if (m_keys_to_list) {
-        m_keys_to_list = false;
-        if (chosen) chosen->grab_focus();
-        else        m_stone_list.grab_focus();
-    }
-}
-
-// Select a stone (and, with `keys`, give its row the keyboard) once the
-// repaint the last write queued has run.
-void Shell::select_stone(const std::string& id, bool keys) {  // helper
-    m_sel = id;
-    m_keys_to_list = m_keys_to_list || keys;
-    queue_stones_repaint();
-}
-
-// Undo / Redo say what they would do, and grey when there is nothing: the
-// actions (so buttons and menu items follow), the button tooltips, and the
-// menu's labels -- "Undo Delete “Jade”" names the step before you take it.
-void Shell::update_undo_ui() {  // helper
-    if (m_act_undo) m_act_undo->set_enabled(m_journal.can_undo());
-    if (m_act_redo) m_act_redo->set_enabled(m_journal.can_redo());
-    const std::string u = m_journal.undo_label(), r = m_journal.redo_label();
-    m_undo_button.set_tooltip_text(u.empty() ? "Nothing to undo" : "Undo " + u + "  (Ctrl+Z)");
-    m_redo_button.set_tooltip_text(r.empty() ? "Nothing to redo" : "Redo " + r + "  (Ctrl+Shift+Z)");
-    if (m_edit_menu) {
-        m_edit_menu->remove_all();
-        m_edit_menu->append(u.empty() ? "Undo" : "Undo " + u, "win.undo");
-        m_edit_menu->append(r.empty() ? "Redo" : "Redo " + r, "win.redo");
-    }
-}
-
-// Is the keyboard in something that types? Then Ctrl+Z is that box's own,
-// whether or not it had anything to undo.
-bool Shell::focus_is_text() const {  // helper
-    for (const Gtk::Widget* w = get_focus(); w; w = w->get_parent())
-        if (dynamic_cast<const Gtk::TextView*>(w) || dynamic_cast<const Gtk::Editable*>(w)) return true;
-    return false;
 }
 
 }  // namespace acorn

@@ -11,6 +11,8 @@ endif()
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(GTKMM REQUIRED gtkmm-4.0)
 find_package(spdlog REQUIRED)
+# s004b: server passwords live in the GNOME keyring (Fedora: libsecret-devel).
+pkg_check_modules(LIBSECRET REQUIRED IMPORTED_TARGET libsecret-1)
 
 # ── acorn_db -- the database layer's shared code (s002) ────────────────────────
 # Value / Result / Schema helpers and the type map. Linked by acorn_core AND by
@@ -85,7 +87,8 @@ target_include_directories(acorn-engine-badabi PRIVATE include)
 # core/ fails to compile, so the seam is enforced by the build graph and the
 # core stays headless-testable. (docs/two-layer-seam.md.)
 add_library(acorn_core STATIC
-    src/core/Recents.cpp
+    # s004b: recent connections (no passwords) + their JSON pump.
+    src/core/Connections.cpp
     src/core/TextMap.cpp
     # The SHORTCUT-REGISTRY paradigm: one list, two consumers (App wires accels
     # from it, ShortcutsDialog renders from it) so a key and its advertised row
@@ -105,9 +108,15 @@ target_link_libraries(acorn_core PUBLIC acorn_db ${CMAKE_DL_LIBS})
 # of the pump, no consumer inherits the include (CANON: surprise-free build).
 target_include_directories(acorn_core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
 
+# ── acorn_keyring -- passwords via libsecret (s004b) ─────────────────────────
+# glib + libsecret, GTK-free, so the selftest can drive it headless too.
+add_library(acorn_keyring STATIC src/Keyring.cpp)
+target_include_directories(acorn_keyring PUBLIC include)
+target_link_libraries(acorn_keyring PUBLIC PkgConfig::LIBSECRET)
+
 # ── Headless selftest -- exercises the core with no display ────────────────────
 add_executable(acorn_selftest src/selftest.cpp src/selftest_db.cpp)
-target_link_libraries(acorn_selftest PRIVATE acorn_core)
+target_link_libraries(acorn_selftest PRIVATE acorn_core acorn_keyring)
 # The selftest loads the real plugins from build/engines/ and the test plugin
 # from build/engines-test/, so building it builds them.
 if(ACORN_ENGINES)
@@ -163,13 +172,15 @@ add_executable(acorn
     # s004: the Connect page -- engines, the form, connect + introspect on a
     # worker. Its own category file so the area grows without crowding zones.
     src/Shell_connect.cpp
+    # s004c: the Tables area -- the read-only schema browser.
+    src/Shell_tables.cpp
     src/AboutWindow.cpp
     src/ShortcutsDialog.cpp
     src/Registry.cpp
     src/Log.cpp
 )
 target_include_directories(acorn PRIVATE include ${GTKMM_INCLUDE_DIRS})
-target_link_libraries(acorn     PRIVATE ${GTKMM_LIBRARIES} acorn_core spdlog::spdlog)
+target_link_libraries(acorn     PRIVATE ${GTKMM_LIBRARIES} acorn_core acorn_keyring spdlog::spdlog)
 target_link_directories(acorn   PRIVATE ${GTKMM_LIBRARY_DIRS})
 target_compile_options(acorn    PRIVATE ${GTKMM_CFLAGS_OTHER})
 target_compile_definitions(acorn PRIVATE ACORN_VERSION="${PROJECT_VERSION}")

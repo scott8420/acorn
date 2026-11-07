@@ -87,4 +87,18 @@ const Table* Schema::table(const std::string& n) const {
     return nullptr;
 }
 
+std::vector<LinkIn> Schema::links_to(const std::string& n) const {
+    std::vector<LinkIn> out;
+    for (auto& t : tables)
+        for (auto& fk : t.foreign_keys)
+            if (fk.ref_table == n) out.push_back({&t, &fk});
+    return out;
+}
+
+std::vector<std::string> Schema::ref_columns(const ForeignKey& fk) const {
+    if (!fk.ref_columns.empty()) return fk.ref_columns;
+    if (auto* t = table(fk.ref_table)) return t->primary_key();
+    return {};
+}
+
 } // namespace acorn::db
