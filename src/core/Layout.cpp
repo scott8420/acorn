@@ -225,4 +225,59 @@ std::vector<std::string> fields_not_on(const Layout& l, const std::vector<std::s
     return out;
 }
 
+// ── s010e: several picked ───────────────────────────────────────────────────
+
+void toggle_pick(std::vector<int>& picks, int i) {
+    if (i < 0) return;
+    if (auto it = std::lower_bound(picks.begin(), picks.end(), i); it != picks.end() && *it == i) picks.erase(it);
+    else picks.insert(it, i);
+}
+
+bool is_picked(const std::vector<int>& picks, int i) { return std::binary_search(picks.begin(), picks.end(), i); }
+
+std::vector<int> body_objects(const Layout& l) {
+    std::vector<int> out;
+    for (std::size_t i = 0; i < l.objects.size(); ++i)
+        if (part_of(l, l.objects[i]) == Part::Body) out.push_back(static_cast<int>(i));
+    return out;
+}
+
+Layout moved_objects(const Layout& from, const std::vector<int>& picks, int anchor, int dx, int dy, int grid) {
+    Layout l = from;
+    const int n = static_cast<int>(from.objects.size());
+    std::vector<int> in;
+    for (int i : picks) if (i >= 0 && i < n) in.push_back(i);
+    if (in.empty()) return l;
+    if (anchor < 0 || anchor >= n || !is_picked(in, anchor)) anchor = in.front();
+    const auto& a = from.objects[static_cast<std::size_t>(anchor)];
+    const auto lone = dragged(a, Grab::Move, dx, dy, grid);
+    int ddx = lone.x - a.x, ddy = lone.y - a.y;
+    for (int i : in) {   // the group stops whole at the top / left
+        const auto& o = from.objects[static_cast<std::size_t>(i)];
+        ddx = std::max(ddx, -o.x);
+        ddy = std::max(ddy, -o.y);
+    }
+    for (int i : in) {
+        auto& o = l.objects[static_cast<std::size_t>(i)];
+        o.x += ddx;
+        o.y += ddy;
+    }
+    return l;
+}
+
+int remove_objects(Layout& l, const std::vector<int>& picks) {
+    std::vector<int> in;
+    for (int i : picks) if (i >= 0 && i < static_cast<int>(l.objects.size())) in.push_back(i);
+    std::sort(in.begin(), in.end());
+    in.erase(std::unique(in.begin(), in.end()), in.end());
+    for (auto it = in.rbegin(); it != in.rend(); ++it) l.objects.erase(l.objects.begin() + *it);
+    return static_cast<int>(in.size());
+}
+
+std::string picks_label(const Layout& l, const std::vector<int>& picks) {
+    if (picks.size() == 1 && picks.front() >= 0 && picks.front() < static_cast<int>(l.objects.size()))
+        return object_label(l.objects[static_cast<std::size_t>(picks.front())]);
+    return std::to_string(picks.size()) + " objects";
+}
+
 }  // namespace acorn::core

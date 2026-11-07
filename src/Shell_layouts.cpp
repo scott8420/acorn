@@ -29,6 +29,11 @@
 // snapped to the 8 px grid (Shift: by the pixel). The arrows nudge by 8 (Shift:
 // by 1); Delete takes it off the layout; Esc lets go of it.
 //
+// s010e: SEVERAL picked. Shift-click adds an object to the pick or drops it;
+// Ctrl+A picks every object in the body. A drag on any picked object moves
+// them all, the arrows nudge them all, Delete removes them all -- each ONE
+// step. Handles show (and resize) only with one picked.
+//
 // EVERY edit is one verbs::save_layout -- a step on the same Ctrl+Z list as a
 // record or a table ("Change Layout “contacts Form”"). Letting go of a drag is
 // one step, not one per pixel. The default layout stays computed until its
@@ -161,7 +166,7 @@ void Shell::build_layouts_page() {  // layouts: the Layouts area
         const auto i = m_lay_table_pick.get_selected();
         if (i == GTK_INVALID_LIST_POSITION || i >= m_schema.tables.size()) return;
         m_lay_table = m_schema.tables[i].name;
-        m_lay_sel = -1;
+        m_lay_picks.clear();
         Glib::signal_idle().connect_once([this] { paint_layouts(); });
     });
     top->append(m_lay_table_pick);
@@ -179,7 +184,7 @@ void Shell::build_layouts_page() {  // layouts: the Layouts area
         const auto i = m_lay_name_pick.get_selected();
         if (i == GTK_INVALID_LIST_POSITION || i >= names.size()) return;
         m_layout_pick[m_lay_table] = names[i];
-        m_lay_sel = -1;
+        m_lay_picks.clear();
         Glib::signal_idle().connect_once([this] { paint_layouts(); });
     });
     bar->append(m_lay_name_pick);
@@ -231,12 +236,16 @@ void Shell::build_layouts_page() {  // layouts: the Layouts area
     auto drag = Gtk::GestureDrag::create();
     drag->set_button(GDK_BUTTON_PRIMARY);
     auto* dg = drag.get();
-    drag->signal_drag_begin().connect([this](double px, double py) {
+    drag->signal_drag_begin().connect([this, dg](double px, double py) {
         m_lay_canvas.grab_focus();
         m_lay_grab = core::Grab::None;
-        if (m_lay_sel >= 0 && static_cast<std::size_t>(m_lay_sel) < m_lay.objects.size())
-            for (const auto& [g, p] : handles(m_lay.objects[static_cast<std::size_t>(m_lay_sel)]))
+        m_lay_release = -1;
+        m_lay_anchor = -1;
+        const int one = lay_one();
+        if (one >= 0 && static_cast<std::size_t>(one) < m_lay.objects.size())   // handles: only with one picked
+            for (const auto& [g, p] : handles(m_lay.objects[static_cast<std::size_t>(one)]))
                 if (std::abs(px - p.first) <= kHit && std::abs(py - p.second) <= kHit) m_lay_grab = g;
+        if (m_lay_grab != core::Grab::None) m_lay_anchor = one;
         m_lay_line = 0;
         if (m_lay_grab == core::Grab::None && m_journal && (m_lay_line = line_at(m_lay, px, py)) != 0) {
             m_lay_line_from = m_lay;   // a part line: no object is grabbed
@@ -249,12 +258,23 @@ void Shell::build_layouts_page() {  // layouts: the Layouts area
                 const auto& o = m_lay.objects[static_cast<std::size_t>(i)];
                 if (px >= o.x && px < o.x + o.w && py >= o.y && py < o.y + o.h) hit = i;
             }
-            const bool changed = hit != m_lay_sel;
-            m_lay_sel = hit;
-            if (hit >= 0) m_lay_grab = core::Grab::Move;
-            if (changed) { m_lay_focus.clear(); paint_inspector(); }
+            const bool shift = (dg->get_current_event_state() & Gdk::ModifierType::SHIFT_MASK) == Gdk::ModifierType::SHIFT_MASK;
+            const auto was = m_lay_picks;
+            if (hit < 0) {
+                if (!shift) m_lay_picks.clear();               // empty canvas: let go (Shift: keep the pick)
+            } else if (core::is_picked(m_lay_picks, hit)) {
+                // Already picked: a drag moves the whole pick. A press that
+                // doesn't move drops it (Shift) or picks only it (plain).
+                m_lay_release = shift ? -2 - hit : (m_lay_picks.size() > 1 ? hit : -1);
+            } else if (shift) {
+                core::toggle_pick(m_lay_picks, hit);            // Shift: joins the pick
+            } else {
+                m_lay_picks = {hit};
+            }
+            if (hit >= 0 && core::is_picked(m_lay_picks, hit)) { m_lay_grab = core::Grab::Move; m_lay_anchor = hit; }
+            if (m_lay_picks != was) { m_lay_focus.clear(); paint_inspector(); }
         }
-        if (m_lay_grab != core::Grab::None) m_lay_from = m_lay.objects[static_cast<std::size_t>(m_lay_sel)];
+        if (m_lay_grab != core::Grab::None) m_lay_drag_from = m_lay;
         m_lay_canvas.queue_draw();
     });
     drag->signal_drag_update().connect([this, dg](double dx, double dy) {
@@ -269,11 +289,16 @@ void Shell::build_layouts_page() {  // layouts: the Layouts area
             m_lay_canvas.queue_draw();
             return;
         }
-        if (m_lay_grab == core::Grab::None || m_lay_sel < 0 || !m_journal) return;
+        if (m_lay_grab == core::Grab::None || m_lay_anchor < 0 || !m_journal ||
+            static_cast<std::size_t>(m_lay_anchor) >= m_lay_drag_from.objects.size()) return;
         const bool fine = (dg->get_current_event_state() & Gdk::ModifierType::SHIFT_MASK) == Gdk::ModifierType::SHIFT_MASK;
-        m_lay.objects[static_cast<std::size_t>(m_lay_sel)] =
-            core::dragged(m_lay_from, m_lay_grab, static_cast<int>(std::lround(dx)), static_cast<int>(std::lround(dy)),
-                          fine ? 1 : core::kLayoutGrid);
+        const int ix = static_cast<int>(std::lround(dx)), iy = static_cast<int>(std::lround(dy));
+        const int grid = fine ? 1 : core::kLayoutGrid;
+        if (m_lay_grab == core::Grab::Move)   // s010e: every picked object, together
+            m_lay = core::moved_objects(m_lay_drag_from, m_lay_picks, m_lay_anchor, ix, iy, grid);
+        else
+            m_lay.objects[static_cast<std::size_t>(m_lay_anchor)] =
+                core::dragged(m_lay_drag_from.objects[static_cast<std::size_t>(m_lay_anchor)], m_lay_grab, ix, iy, grid);
         m_lay_canvas.queue_draw();
     });
     drag->signal_drag_end().connect([this](double, double) {
@@ -286,10 +311,21 @@ void Shell::build_layouts_page() {  // layouts: the Layouts area
         }
         const core::Grab g = m_lay_grab;
         m_lay_grab = core::Grab::None;
-        if (g == core::Grab::None || m_lay_sel < 0 || static_cast<std::size_t>(m_lay_sel) >= m_lay.objects.size()) return;
-        const auto& now = m_lay.objects[static_cast<std::size_t>(m_lay_sel)];
-        if (now == m_lay_from) return;   // a press, no move: only picked
-        const std::string what = (g == core::Grab::Move ? "Moved " : "Resized ") + core::object_label(now);
+        const int release = std::exchange(m_lay_release, -1);
+        if (g == core::Grab::None || m_lay_anchor < 0) return;
+        if (m_lay == m_lay_drag_from) {   // a press, no move: only picked
+            if (release != -1) {   // s010e: Shift drops it / a plain press picks only it
+                if (release <= -2) core::toggle_pick(m_lay_picks, -2 - release);
+                else m_lay_picks = {release};
+                m_lay_focus.clear();
+                paint_inspector();
+                m_lay_canvas.queue_draw();
+            }
+            return;
+        }
+        const std::string what = (g == core::Grab::Move ? "Moved " : "Resized ") +
+                                 (g == core::Grab::Move ? core::picks_label(m_lay, m_lay_picks)
+                                                        : core::object_label(m_lay.objects[static_cast<std::size_t>(m_lay_anchor)]));
         // After the gesture has finished with the canvas.
         Glib::signal_idle().connect_once([this, what] { keep_layout(m_lay, what); });
     });
@@ -300,8 +336,8 @@ void Shell::build_layouts_page() {  // layouts: the Layouts area
     motion->signal_motion().connect([this](double px, double py) {
         if (m_lay_grab != core::Grab::None) return;
         core::Grab g = core::Grab::None;
-        if (m_lay_sel >= 0 && static_cast<std::size_t>(m_lay_sel) < m_lay.objects.size())
-            for (const auto& [h, p] : handles(m_lay.objects[static_cast<std::size_t>(m_lay_sel)]))
+        if (const int one = lay_one(); one >= 0 && static_cast<std::size_t>(one) < m_lay.objects.size())
+            for (const auto& [h, p] : handles(m_lay.objects[static_cast<std::size_t>(one)]))
                 if (std::abs(px - p.first) <= kHit && std::abs(py - p.second) <= kHit) g = h;
         if (g == core::Grab::None && line_at(m_lay, px, py)) {
             gtk_widget_set_cursor_from_name(GTK_WIDGET(m_lay_canvas.gobj()), m_journal ? "ns-resize" : "default");
@@ -319,7 +355,12 @@ void Shell::build_layouts_page() {  // layouts: the Layouts area
     auto keys = Gtk::EventControllerKey::create();
     keys->signal_key_pressed().connect(
         [this](guint keyval, guint, Gdk::ModifierType state) -> bool {
-            if ((state & (Gdk::ModifierType::CONTROL_MASK | Gdk::ModifierType::ALT_MASK)) != Gdk::ModifierType{}) return false;
+            const auto mods = state & (Gdk::ModifierType::CONTROL_MASK | Gdk::ModifierType::ALT_MASK);
+            if (mods == Gdk::ModifierType::CONTROL_MASK && (keyval == GDK_KEY_a || keyval == GDK_KEY_A)) {
+                layout_pick_all();   // s010e
+                return true;
+            }
+            if (mods != Gdk::ModifierType{}) return false;
             const int step = (state & Gdk::ModifierType::SHIFT_MASK) == Gdk::ModifierType::SHIFT_MASK ? 1 : core::kLayoutGrid;
             switch (keyval) {
                 case GDK_KEY_Left:  layout_nudge(-step, 0); return true;
@@ -329,8 +370,8 @@ void Shell::build_layouts_page() {  // layouts: the Layouts area
                 case GDK_KEY_Delete:
                 case GDK_KEY_BackSpace: layout_remove_object(); return true;
                 case GDK_KEY_Escape:
-                    if (m_lay_sel < 0) return false;
-                    m_lay_sel = -1;
+                    if (m_lay_picks.empty()) return false;
+                    m_lay_picks.clear();
                     m_lay_canvas.queue_draw();
                     paint_inspector();
                     return true;
@@ -401,7 +442,7 @@ void Shell::paint_layouts() {  // layouts: pickers, canvas and inspector from th
     m_lay_name_pick.set_selected(lat);
     m_lay_name_pick.set_sensitive(!lnames.empty());
     m_lay_painting = false;
-    if (m_lay_sel >= static_cast<int>(m_lay.objects.size())) m_lay_sel = -1;
+    std::erase_if(m_lay_picks, [this](int i) { return i < 0 || i >= static_cast<int>(m_lay.objects.size()); });
 
     const bool on = m_journal && !m_lay_table.empty();
     if (!m_conn) m_layouts_where.set_text("Connect to a database first.");
@@ -409,7 +450,7 @@ void Shell::paint_layouts() {  // layouts: pickers, canvas and inspector from th
     else {
         const auto n = lnames.size();
         m_layouts_where.set_text(curly(m_lay_table) + " · " + std::to_string(n) + (n == 1 ? " layout" : " layouts") +
-                                 " · drag to move, a handle to resize (Shift: by the pixel) · arrows nudge · Delete removes");
+                                 " · drag to move, a handle to resize (Shift: by the pixel) · Shift-click picks several · arrows nudge · Delete removes");
     }
     m_layouts_caption.set_text(m_lay_table.empty() ? std::string{}
                                : m_lay_kept ? "kept in the solution"
@@ -534,14 +575,18 @@ void Shell::draw_layout(const Cairo::RefPtr<Cairo::Context>& cr, int w, int h) {
         }
     }
 
-    // The picked object: an amber edge and its eight handles.
-    if (m_lay_sel >= 0 && static_cast<std::size_t>(m_lay_sel) < m_lay.objects.size()) {
-        const auto& o = m_lay.objects[static_cast<std::size_t>(m_lay_sel)];
-        cr->set_source_rgb(kAmber.r, kAmber.g, kAmber.b);
-        cr->set_line_width(2);
+    // The picked objects: an amber edge each; the eight handles only with one.
+    cr->set_source_rgb(kAmber.r, kAmber.g, kAmber.b);
+    cr->set_line_width(2);
+    for (int i : m_lay_picks) {
+        if (i < 0 || static_cast<std::size_t>(i) >= m_lay.objects.size()) continue;
+        const auto& o = m_lay.objects[static_cast<std::size_t>(i)];
         cr->rectangle(o.x, o.y, o.w, o.h);
         cr->stroke();
-        for (const auto& [g, p] : handles(o)) cr->rectangle(p.first - kHandle / 2, p.second - kHandle / 2, kHandle, kHandle);
+    }
+    if (const int one = lay_one(); one >= 0 && static_cast<std::size_t>(one) < m_lay.objects.size()) {
+        for (const auto& [g, p] : handles(m_lay.objects[static_cast<std::size_t>(one)]))
+            cr->rectangle(p.first - kHandle / 2, p.second - kHandle / 2, kHandle, kHandle);
         cr->fill();
     }
 }
@@ -555,12 +600,48 @@ void Shell::paint_inspector() {  // layouts: the picked object's field / words /
     if (m_lay_table.empty()) return;
     const bool can = static_cast<bool>(m_journal);
 
-    if (m_lay_sel < 0 || static_cast<std::size_t>(m_lay_sel) >= m_lay.objects.size()) {
+    if (m_lay_picks.size() > 1) {   // s010e: several -- how many, what, and Remove
+        m_lay_inspector.append(*side_label(std::to_string(m_lay_picks.size()) + " objects", "acorn-field-name"));
+        int f = 0, w = 0, ln = 0, bx = 0;
+        for (int i : m_lay_picks) {
+            if (i < 0 || static_cast<std::size_t>(i) >= m_lay.objects.size()) continue;
+            switch (m_lay.objects[static_cast<std::size_t>(i)].kind) {
+                case core::ObjectKind::Field: ++f; break;
+                case core::ObjectKind::Text:  ++w; break;
+                case core::ObjectKind::Line:  ++ln; break;
+                case core::ObjectKind::Box:   ++bx; break;
+            }
+        }
+        std::string kinds;
+        auto add = [&kinds](int n, const char* one, const char* many) {
+            if (n == 0) return;
+            if (!kinds.empty()) kinds += ", ";
+            kinds += std::to_string(n) + " " + (n == 1 ? one : many);
+        };
+        add(f, "field box", "field boxes");
+        add(w, "set of words", "sets of words");
+        add(ln, "line", "lines");
+        add(bx, "box", "boxes");
+        m_lay_inspector.append(*side_label(kinds, "acorn-status"));
+        m_lay_inspector.append(*side_label(
+            "Drag any of them to move them all; the arrows nudge them all; Delete removes them all -- one step each. "
+            "Shift-click one to drop it from the pick. Place and size show for one object.", "acorn-status"));
+        auto rm = Gtk::make_managed<Gtk::Button>("Remove " + std::to_string(m_lay_picks.size()) + " from Layout");
+        rm->set_name("layouts.remove");
+        rm->set_margin_top(10);
+        rm->set_sensitive(can);
+        rm->set_tooltip_text("Take these off the layout (Delete) -- fields and their values are untouched; Ctrl+Z puts them back");
+        rm->signal_clicked().connect([this, gen] { if (gen == m_lay_gen) layout_remove_object(); });
+        m_lay_inspector.append(*rm);
+        return;
+    }
+    if (lay_one() < 0 || static_cast<std::size_t>(lay_one()) >= m_lay.objects.size()) {
         auto h = side_label(m_lay.name, "acorn-field-name");
         m_lay_inspector.append(*h);
         m_lay_inspector.append(*side_label(std::to_string(m_lay.width) + " × " + std::to_string(m_lay.height) + " px · " +
                                            std::to_string(m_lay.objects.size()) + " objects", "acorn-status"));
-        m_lay_inspector.append(*side_label("Click an object to pick it. Its field, its words and its place show here.",
+        m_lay_inspector.append(*side_label("Click an object to pick it -- Shift-click for several, Ctrl+A for the whole body. "
+                                           "Its field, its words and its place show here.",
                                            "acorn-status"));
         // s010d: the parts, and how to change them.
         m_lay_inspector.append(*side_label(
@@ -588,8 +669,9 @@ void Shell::paint_inspector() {  // layouts: the picked object's field / words /
             const auto i = dd->get_selected();
             if (i == GTK_INVALID_LIST_POSITION || i >= names->size()) return;
             auto l = m_lay;
-            core::add_object(l, core::ObjectKind::Field, (*names)[i]);
-            m_lay_sel = static_cast<int>(l.objects.size()) - 1;
+            const int n = core::add_object(l, core::ObjectKind::Field, (*names)[i]);
+            m_lay_picks.clear();   // s010e: the row picked -- its words and its box, to move together
+            for (int k = static_cast<int>(l.objects.size()) - n; k < static_cast<int>(l.objects.size()); ++k) m_lay_picks.push_back(k);
             const std::string what = "Added " + curly((*names)[i]);
             // The canvas takes the keys: the arrows / Esc / Delete act on what was added.
             Glib::signal_idle().connect_once([this, l, what] { m_lay_focus.clear(); keep_layout(l, what); m_lay_canvas.grab_focus(); });
@@ -612,7 +694,7 @@ void Shell::paint_inspector() {  // layouts: the picked object's field / words /
                 if (gen != m_lay_gen) return;
                 auto l = m_lay;
                 core::add_object(l, kind, kind == core::ObjectKind::Text ? "Words" : "");
-                m_lay_sel = static_cast<int>(l.objects.size()) - 1;
+                m_lay_picks = {static_cast<int>(l.objects.size()) - 1};
                 const std::string what = "Added " + core::object_label(l.objects.back());
                 Glib::signal_idle().connect_once([this, l, what] { m_lay_focus.clear(); keep_layout(l, what); m_lay_canvas.grab_focus(); });
             });
@@ -621,7 +703,7 @@ void Shell::paint_inspector() {  // layouts: the picked object's field / words /
         m_lay_inspector.append(*row);
         return;
     }
-    const auto idx = static_cast<std::size_t>(m_lay_sel);
+    const auto idx = static_cast<std::size_t>(lay_one());
     const core::LayoutObject o = m_lay.objects[idx];
     Gtk::Widget* focus_back = nullptr;
     auto remember = [this, gen](Gtk::Widget& w, const std::string& name) {
@@ -742,6 +824,7 @@ void Shell::keep_layout(core::Layout l, const std::string& did) {  // layouts: v
     if (!m_journal) return;
     core::fit(l);
     const auto before = m_journal->size();
+    const bool could_redo = m_journal->can_redo();   // s010e: a step after an undo drops the redo -- the count may not change
     auto r = db::verbs::save_layout(*m_journal, l);
     if (auto lg = log::get(log::Area::App))
         lg->info("solution: layout '{}' of '{}': {} -> {}", l.name, l.table, did, r ? m_journal->undo_label() : r.error().message);
@@ -750,35 +833,42 @@ void Shell::keep_layout(core::Layout l, const std::string& did) {  // layouts: v
     // journal_note: every area's note says it (Browse's would otherwise keep
     // the last step's words).
     if (!r) journal_note("Not kept: " + r.error().message + ".", "error");
-    else if (m_journal->size() != before) journal_note(did + ". Ctrl+Z puts it back.", "ok");
+    else if (m_journal->size() != before || could_redo != m_journal->can_redo()) journal_note(did + ". Ctrl+Z puts it back.", "ok");
 }
 
-void Shell::layout_nudge(int dx, int dy) {  // layouts: the arrows
-    if (!m_journal || m_lay_sel < 0 || static_cast<std::size_t>(m_lay_sel) >= m_lay.objects.size()) return;
-    auto l = m_lay;
-    auto& o = l.objects[static_cast<std::size_t>(m_lay_sel)];
-    o.x = std::max(0, o.x + dx);
-    o.y = std::max(0, o.y + dy);
-    if (o == m_lay.objects[static_cast<std::size_t>(m_lay_sel)]) return;   // against the edge
-    keep_layout(l, "Moved " + core::object_label(o));
+void Shell::layout_nudge(int dx, int dy) {  // layouts: the arrows -- every picked object, one step
+    if (!m_journal || m_lay_picks.empty()) return;
+    const auto l = core::moved_objects(m_lay, m_lay_picks, m_lay_picks.front(), dx, dy, 1);
+    if (l == m_lay) return;   // against the edge
+    keep_layout(l, "Moved " + core::picks_label(l, m_lay_picks));
     m_lay_canvas.grab_focus();
 }
 
-void Shell::layout_remove_object() {  // layouts: Delete
-    if (!m_journal || m_lay_sel < 0 || static_cast<std::size_t>(m_lay_sel) >= m_lay.objects.size()) return;
+void Shell::layout_remove_object() {  // layouts: Delete -- every picked object, one step
+    if (!m_journal || m_lay_picks.empty()) return;
     auto l = m_lay;
-    const std::string what = "Removed " + core::object_label(l.objects[static_cast<std::size_t>(m_lay_sel)]);
-    l.objects.erase(l.objects.begin() + m_lay_sel);
-    m_lay_sel = -1;
+    const std::string what = "Removed " + core::picks_label(l, m_lay_picks);
+    if (core::remove_objects(l, m_lay_picks) == 0) return;
+    m_lay_picks.clear();
     keep_layout(l, what);
     m_lay_canvas.grab_focus();
+}
+
+void Shell::layout_pick_all() {  // layouts: s010e -- Ctrl+A: every object in the body
+    if (m_lay_table.empty()) return;
+    auto all = core::body_objects(m_lay);
+    if (all == m_lay_picks) return;
+    m_lay_picks = std::move(all);
+    m_lay_focus.clear();
+    m_lay_canvas.queue_draw();
+    paint_inspector();
 }
 
 void Shell::on_layout_new() {  // layouts: the default, under a new name
     if (!m_journal || m_lay_table.empty()) return;
     auto l = core::default_layout(m_lay_table, fields_of(m_lay_table));
     l.name = core::unique_layout_name(l.name, layout_names(m_lay_table));
-    m_lay_sel = -1;
+    m_lay_picks.clear();
     keep_layout(l, "Made the layout " + curly(l.name));
 }
 
@@ -833,7 +923,7 @@ void Shell::on_layout_delete() {  // layouts: verbs::delete_layout
     auto r = db::verbs::delete_layout(*m_journal, table, name);
     if (auto lg = log::get(log::Area::App))
         lg->info("solution: delete layout '{}' of '{}': {}", name, table, r ? "gone" : r.error().message);
-    m_lay_sel = -1;
+    m_lay_picks.clear();
     paint_layouts();
     if (!r) journal_note("Not deleted: " + r.error().message + ".", "error");
     else journal_note(name == core::default_layout_name(table)

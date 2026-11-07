@@ -122,4 +122,21 @@ int add_object(Layout& l, ObjectKind kind, const std::string& what = {});
 // The table's fields this layout doesn't show yet, in the table's order.
 std::vector<std::string> fields_not_on(const Layout& l, const std::vector<std::string>& fields);
 
+// ── s010e: several picked ───────────────────────────────────────────────────
+// A pick is a list of object indexes, kept sorted, no repeats.
+// Shift-click: `i` joins the pick, or leaves it if it was in.
+void toggle_pick(std::vector<int>& picks, int i);
+bool is_picked(const std::vector<int>& picks, int i);
+// Ctrl+A: every object in the body (not the header's, not the footer's).
+std::vector<int> body_objects(const Layout& l);
+// The picked objects of `from` moved together by (dx, dy): the grabbed one
+// (`anchor`) lands where it would alone (snapped to `grid`), the rest by the
+// same amount, so the group keeps its shape; the group stops whole at the top
+// / left edge. Indexes not in `from` are ignored.
+Layout moved_objects(const Layout& from, const std::vector<int>& picks, int anchor, int dx, int dy, int grid = kLayoutGrid);
+// The picked objects off the layout. Returns how many went.
+int remove_objects(Layout& l, const std::vector<int>& picks);
+// One: object_label ("“first_name”"); several: "3 objects".
+std::string picks_label(const Layout& l, const std::vector<int>& picks);
+
 }  // namespace acorn::core

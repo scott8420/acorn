@@ -199,8 +199,10 @@ private:
     void layouts_note(const std::string& text, const char* kind);  // category: layouts: under the Layouts title
     void draw_layout(const Cairo::RefPtr<Cairo::Context>& cr, int w, int h);  // category: layouts: the canvas
     void keep_layout(core::Layout l, const std::string& did);  // category: layouts: verbs::save_layout, the note, a repaint
-    void layout_nudge(int dx, int dy);           // category: layouts: the arrows -- the picked object by 8 (Shift: 1)
-    void layout_remove_object();                 // category: layouts: Delete -- the picked object off the layout
+    void layout_nudge(int dx, int dy);           // category: layouts: the arrows -- the picked objects by 8 (Shift: 1), one step
+    void layout_remove_object();                 // category: layouts: Delete -- the picked objects off the layout (one step)
+    void layout_pick_all();                      // category: layouts: s010e -- Ctrl+A: every object in the body
+    int lay_one() const { return m_lay_picks.size() == 1 ? m_lay_picks.front() : -1; }  // category: layouts: s010e -- the one picked object, else -1
     void on_layout_new();                        // category: layouts: the default, under a new name
     void on_layout_duplicate();                  // category: layouts: the shown layout, under a new name
     void on_layout_rename();                     // category: layouts: a popover -> verbs::rename_layout
@@ -377,9 +379,11 @@ private:
     std::map<std::string, std::string> m_layout_pick;   // table -> the layout last picked (Layouts and Form share it)
     core::Layout                    m_lay;           // the shown layout (a drag changes it live, then keeps it)
     bool                            m_lay_kept = false;
-    int                             m_lay_sel = -1;  // the picked object
+    std::vector<int>                m_lay_picks;     // s010e: the picked objects (sorted; Shift-click adds / drops)
     core::Grab                      m_lay_grab = core::Grab::None;
-    core::LayoutObject              m_lay_from;      // the picked object as the drag began
+    core::Layout                    m_lay_drag_from; // the layout as an object drag began
+    int                             m_lay_anchor = -1;  // s010e: the object the drag grabbed
+    int                             m_lay_release = -1; // s010e: a press that didn't move -> on release: -2 - i drops i, i picks only i
     int                             m_lay_line = 0;  // s010d: a part line under the drag -- 1 header, 2 footer, 3 the bottom edge
     core::Layout                    m_lay_line_from; // the layout as that drag began
     bool                            m_lay_painting = false;

@@ -2032,6 +2032,47 @@ void test_layouts_pure(const fs::path& dir) {
         check("layouts: header + footer leaving no body -- refused in words", !core::check_layout(bad).empty(), "");
         (void)big;
     }
+    // s010e: several picked.
+    {
+        std::vector<int> pk;
+        core::toggle_pick(pk, 5);
+        core::toggle_pick(pk, 1);
+        core::toggle_pick(pk, 3);
+        core::toggle_pick(pk, 5);
+        core::toggle_pick(pk, -1);
+        check("layouts: Shift-click adds to the pick or drops -- kept sorted, no repeats",
+              pk == std::vector<int>{1, 3} && core::is_picked(pk, 3) && !core::is_picked(pk, 5), "");
+        auto ml = d;   // 504 x 112: labels at x 16, boxes at x 168; rows at 16, 48, 80
+        const auto m1 = core::moved_objects(ml, {0, 1}, 1, 13, 21);
+        check("layouts: a drag moves every picked object together -- the grabbed one snapped, the rest by as much",
+              m1.objects[1].x == 184 && m1.objects[1].y == 40 && m1.objects[0].x == 32 && m1.objects[0].y == 40 &&
+              m1.objects[2] == ml.objects[2] && m1.objects[3] == ml.objects[3],
+              std::to_string(m1.objects[0].x) + "," + std::to_string(m1.objects[0].y));
+        const auto m2 = core::moved_objects(ml, {0, 1, 3}, 1, -100, -100);
+        check("layouts: the group stops whole at the top / left -- it keeps its shape",
+              m2.objects[0].x == 0 && m2.objects[1].x == 152 && m2.objects[0].y == 0 && m2.objects[3].y == 32 &&
+              m2.objects[3].x == 152, std::to_string(m2.objects[1].x) + "," + std::to_string(m2.objects[3].y));
+        const auto m3 = core::moved_objects(ml, {2, 3}, 2, 1, 0, 1);
+        check("layouts: Shift (grid 1) moves the group by the pixel",
+              m3.objects[2].x == 17 && m3.objects[3].x == 169 && m3.objects[0] == ml.objects[0], "");
+        check("layouts: no pick, nothing moves", core::moved_objects(ml, {}, -1, 40, 40) == ml, "");
+        auto rl = d;
+        const auto keep = rl.objects[2];
+        const int gone = core::remove_objects(rl, {5, 0, 1, 1, 99});
+        check("layouts: Delete takes every picked object off -- the rest stay in order",
+              gone == 3 && rl.objects.size() == d.objects.size() - 3 && rl.objects[0] == keep, std::to_string(gone));
+        check("layouts: what a step calls the pick -- one by its name, several by count",
+              core::picks_label(d, {1}) == "“" + d.objects[1].field + "”" && core::picks_label(d, {0, 1, 2}) == "3 objects", "");
+        auto pa = d;
+        core::move_part_line(pa, core::Part::Header, 40);
+        pa.objects.push_back({ObjectKind::Text, "", "Title", 16, 8, 144, 24});   // in the header
+        core::move_part_line(pa, core::Part::Footer, pa.height + 40);
+        pa.objects.push_back({ObjectKind::Text, "", "Page", 16, core::footer_top(pa) + 8, 144, 24});
+        const auto all = core::body_objects(pa);
+        check("layouts: Ctrl+A picks the body's objects -- not the header's, not the footer's",
+              all.size() == d.objects.size() && !core::is_picked(all, static_cast<int>(pa.objects.size()) - 1) &&
+              !core::is_picked(all, static_cast<int>(pa.objects.size()) - 2), std::to_string(all.size()));
+    }
     check("layouts: a free name -- contacts Form 2, 3 ...",
           core::unique_layout_name("contacts Form", {"x"}) == "contacts Form" &&
           core::unique_layout_name("contacts Form", {"contacts Form", "contacts Form 2"}) == "contacts Form 3", "");

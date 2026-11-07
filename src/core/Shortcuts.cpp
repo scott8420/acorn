@@ -129,14 +129,16 @@ const std::vector<ShortcutSpec>& shortcut_registry() {
 
         // ── Layouts (s010b) ───────────────────────────────────────────────────
         // Doc-only: the canvas's own keys, heard only while it has the focus.
-        {"Layouts", "", {}, "← → ↑ ↓", "Nudge the picked object by 8 px (Shift: by 1)"},
-        {"Layouts", "", {}, "Del", "Take the picked object off the layout"},
-        {"Layouts", "", {}, "Esc", "Let go of the picked object"},
+        {"Layouts", "", {}, "← → ↑ ↓", "Nudge the picked objects by 8 px (Shift: by 1)"},
+        {"Layouts", "", {}, "Del", "Take the picked objects off the layout"},
+        {"Layouts", "", {}, "Esc", "Let go of the picked objects"},
+        {"Layouts", "", {}, "Ctrl+A", "Pick every object in the body (s010e)"},
 
         // ── Mouse ─────────────────────────────────────────────────────────────
         // Doc-only: a gesture is not a GAction, but the reader still needs it.
         {"Mouse", "", {}, "Click a recent connection", "Connect to it again (read-only)"},
         {"Mouse", "", {}, "Drag in Layouts", "Move an object; a handle resizes it (Shift: by the pixel)"},
+        {"Mouse", "", {}, "Shift-click in Layouts", "Add an object to the pick, or drop it -- a drag then moves them all"},
 
     };
     return kReg;
