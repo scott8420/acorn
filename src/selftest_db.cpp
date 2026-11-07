@@ -1515,6 +1515,268 @@ void test_key(Journal& j, Gate& g, Engine* e, const std::string& P) {
     check(P + "key: nothing strayed", j.strays() == 1, std::to_string(j.strays()));
 }
 
+
+// ── s008: links ──────────────────────────────────────────────────────────────
+std::string upper_of(std::string v) {
+    for (auto& ch : v) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+    return v;
+}
+void test_links_pure() {
+    TableDef orders;
+    orders.name = "orders";
+    orders.columns = {{"id", "INTEGER", false, std::nullopt, 1, true},
+                      {"customer_id", "INTEGER", true, std::nullopt, 0, false},
+                      {"note", "TEXT", true, std::nullopt, 0, false}};
+    TableDef linked = orders;
+    linked.links = {{"", {"customer_id"}, "customers", {"id"}, "RESTRICT", "NO ACTION"}};
+
+    check("link: the SQL a link is written as",
+          link_sql('"', linked.links[0]) ==
+          "FOREIGN KEY (\"customer_id\") REFERENCES \"customers\" (\"id\") ON DELETE RESTRICT", link_sql('"', linked.links[0]));
+    const std::string ct = create_table_sql(Dialect::PostgreSQL, '"', linked);
+    check("link: CREATE TABLE writes the table's links in", ct.find(",\n  FOREIGN KEY (\"customer_id\")") != std::string::npos, ct);
+
+    auto ps = plan_alter(Dialect::SQLite, '"', orders, linked);
+    bool fk_in_create = ps && !ps->empty() && (*ps)[0].rfind("CREATE TABLE \"acorn_rebuild_orders\"", 0) == 0 &&
+                        (*ps)[0].find("REFERENCES \"customers\" (\"id\") ON DELETE RESTRICT") != std::string::npos;
+    bool swap = false;
+    if (ps) for (auto& st : *ps) if (st == "ALTER TABLE \"acorn_rebuild_orders\" RENAME TO \"orders\"") swap = true;
+    check("link: SQLite makes the child again with the link written in (copy, swap)", fk_in_create && swap,
+          ps && !ps->empty() ? (*ps)[0] : (ps ? "" : ps.error()));
+    auto pp = plan_alter(Dialect::PostgreSQL, '"', orders, linked);
+    check("link: PostgreSQL -- ALTER TABLE .. ADD FOREIGN KEY, one statement",
+          pp && pp->size() == 1 && (*pp)[0] == "ALTER TABLE \"orders\" ADD FOREIGN KEY (\"customer_id\") REFERENCES "
+                                                "\"customers\" (\"id\") ON DELETE RESTRICT",
+          pp && !pp->empty() ? (*pp)[0] : (pp ? "" : pp.error()));
+    auto pm = plan_alter(Dialect::MariaDB, '`', orders, linked);
+    check("link: MariaDB -- ONE ALTER TABLE with ADD FOREIGN KEY",
+          pm && pm->size() == 1 && (*pm)[0] == "ALTER TABLE `orders`\n  ADD FOREIGN KEY (`customer_id`) REFERENCES "
+                                                "`customers` (`id`) ON DELETE RESTRICT",
+          pm && !pm->empty() ? (*pm)[0] : (pm ? "" : pm.error()));
+
+    TableDef named = linked;
+    named.links[0].name = "orders_customer_id_fkey";
+    auto up = plan_alter(Dialect::PostgreSQL, '"', named, orders);
+    check("link: unlink on PostgreSQL drops the constraint by its name",
+          up && up->size() == 1 && (*up)[0] == "ALTER TABLE \"orders\" DROP CONSTRAINT \"orders_customer_id_fkey\"",
+          up && !up->empty() ? (*up)[0] : (up ? "" : up.error()));
+    TableDef mnamed = named;
+    mnamed.links[0].name = "orders_ibfk_1";
+    mnamed.indexes = {{"customer_id", {"customer_id"}, false, false}};   // MariaDB's own index for the link
+    TableDef mgone = orders;
+    auto um = plan_alter(Dialect::MariaDB, '`', mnamed, mgone);
+    check("link: unlink on MariaDB -- the link dropped first, then the index it made, one ALTER",
+          um && um->size() == 1 && (*um)[0] == "ALTER TABLE `orders`\n  DROP FOREIGN KEY `orders_ibfk_1`,\n  DROP INDEX `customer_id`",
+          um && !um->empty() ? (*um)[0] : (um ? "" : um.error()));
+
+    TableDef cascade = named;
+    cascade.links[0].on_delete = "CASCADE";
+    cascade.links[0].name.clear();
+    auto cp = plan_alter(Dialect::PostgreSQL, '"', named, cascade);
+    check("link: changing what a delete does is drop + add, in one step",
+          cp && cp->size() == 2 && (*cp)[0].find("DROP CONSTRAINT") != std::string::npos &&
+          (*cp)[1].find("ON DELETE CASCADE") != std::string::npos, cp ? "" : cp.error());
+
+    TableDef noaction = named;
+    noaction.links[0].on_delete = "NO ACTION";
+    noaction.links[0].on_update = "RESTRICT";
+    check("link: NO ACTION and RESTRICT read as the same rule; the name isn't compared",
+          noaction == linked && !(cascade == linked), "");
+    check("link: labels -- Link / Unlink / Change Link",
+          verbs::design_label(orders, linked) == "Link “orders” to “customers”" &&
+          verbs::design_label(named, orders) == "Unlink “orders” from “customers”" &&
+          verbs::design_label(named, cascade) == "Change Link “orders” to “customers”", verbs::design_label(orders, linked));
+
+    TableDef mixed = linked;
+    mixed.columns.push_back({"extra", "TEXT", true, std::nullopt, 0, false});
+    auto mx = plan_alter(Dialect::PostgreSQL, '"', orders, mixed);
+    check("link: a link with another change is refused -- a step of its own",
+          !mx && mx.error().find("step of its own") != std::string::npos, mx ? "planned!" : mx.error());
+    TableDef gone = named;
+    gone.columns.erase(gone.columns.begin() + 1);   // customer_id, its link kept
+    auto gd = plan_alter(Dialect::PostgreSQL, '"', named, gone);
+    check("link: deleting a field a link uses is refused in words",
+          !gd && gd.error().find("the link to “customers” uses “customer_id”") != std::string::npos, gd ? "planned!" : gd.error());
+    TableDef ren = named;
+    ren.columns[1].name = "cust";
+    ren.links[0].columns = {"cust"};
+    auto rn = plan_alter(Dialect::PostgreSQL, '"', named, ren);
+    check("link: renaming a linked field is a plain rename -- the link goes with it",
+          rn && rn->size() == 1 && (*rn)[0] == "ALTER TABLE \"orders\" RENAME COLUMN \"customer_id\" TO \"cust\"",
+          rn && !rn->empty() ? (*rn)[0] : (rn ? "" : rn.error()));
+
+    Table cust;
+    cust.name = "customers";
+    cust.columns = {{"id", "INTEGER", FieldType::Integer, false, std::nullopt, 1, true}};
+    auto lk = verbs::linked(orders, cust, {"customer_id"}, OnDelete::Cascade);
+    check("link: linked() points the fields at the parent's key, with the rule",
+          lk && lk->links.size() == 1 && lk->links[0].ref_columns == std::vector<std::string>{"id"} &&
+          lk->links[0].deleting() == OnDelete::Cascade, lk ? "" : lk.error());
+    auto two = verbs::linked(orders, cust, {"customer_id", "note"}, OnDelete::Restrict);
+    Table keyless = cust;
+    keyless.columns[0].pk_position = 0;
+    auto nk = verbs::linked(orders, keyless, {"customer_id"}, OnDelete::Restrict);
+    check("link: linked() refuses -- fields that don't match the key in number; a parent without a key",
+          !two && two.error().find("needs 1 field") != std::string::npos && !nk &&
+          nk.error().find("has no key") != std::string::npos, two ? "made!" : two.error());
+}
+
+void test_links(Journal& j, Gate& g, Engine* e, const std::string& P) {
+    const Dialect d = e->dialect();
+    const std::string C = "acorn_customers", O = "acorn_orders";
+    TableDef c;
+    c.name = C;
+    c.columns = {{"id", decl_for(d, FieldType::Integer), false, std::nullopt, 1, true},
+                 {"name", decl_for(d, FieldType::Text), true, std::nullopt, 0, false}};
+    TableDef o;
+    o.name = O;
+    o.columns = {{"id", decl_for(d, FieldType::Integer), false, std::nullopt, 1, true},
+                 {"customer_id", decl_for(d, FieldType::Integer), true, std::nullopt, 0, false},
+                 {"code", decl_for(d, FieldType::Text), true, std::nullopt, 0, false},
+                 {"note", decl_for(d, FieldType::Text), false, std::string("'x'"), 0, false}};
+    if (auto r = verbs::new_table(j, c); !r) { check(P + "links: fixture", false, r.error().message); return; }
+    if (auto r = verbs::new_table(j, o); !r) { check(P + "links: fixture", false, r.error().message); return; }
+    for (const char* n : {"Ada", "Grace"}) (void)verbs::new_record(j, C, {"name"}, {Value(n)});
+    // orders 1, 2 -> customer 1; 3 -> 2; 4, 5 -> customer 7 and 9 (not there); 6 -> none
+    const std::int64_t cust[] = {1, 1, 2, 7, 9, 0};
+    for (auto k : cust) (void)verbs::new_record(j, O, {"customer_id"}, {k ? Value(k) : Value()});
+    auto links_of = [&](const std::string& t) {
+        auto s = g.introspect();
+        return s && s->table(t) ? s->table(t)->foreign_keys : std::vector<ForeignKey>{};
+    };
+    auto count = [&](const std::string& t) {
+        auto r = g.query("SELECT COUNT(*) FROM " + g.quote_ident(t));
+        return r && !r->rows.empty() ? num(r->rows[0][0]).value_or(-1) : -1.0;
+    };
+
+    // Records that don't match: refused in words, named by unmatched(), nothing touched.
+    const auto steps = j.size();
+    auto orphan = verbs::new_link(j, O, {"customer_id"}, C);
+    check(P + "links: records pointing at nothing are refused, in words -- nothing deleted, no step",
+          !orphan && orphan.error().message.find("2 records in “acorn_orders” point at “acorn_customers” records that "
+                                                 "aren't there -- fix them first") != std::string::npos &&
+          j.size() == steps && links_of(O).empty() && count(O) == 6.0, orphan ? "linked!" : orphan.error().message);
+    auto um = verbs::unmatched(j, O, {"customer_id"}, C);
+    check(P + "links: unmatched() names exactly those records (4 and 5), so they can be marked",
+          um && um->size() == 2 && (*um)[0] == Store::row_id(O, {"id"}, {Value(4)}) &&
+          (*um)[1] == Store::row_id(O, {"id"}, {Value(5)}), um ? std::to_string(um->size()) : um.error().message);
+    auto kind = verbs::new_link(j, O, {"code"}, C);
+    check(P + "links: fields of another kind are refused, in words",
+          !kind && kind.error().message.find("a link joins fields of the same kind") != std::string::npos && j.size() == steps,
+          kind ? "linked!" : kind.error().message);
+    auto req = verbs::new_link(j, O, {"note"}, C, OnDelete::SetEmpty);
+    check(P + "links: Set Empty on a required field is refused, in words (or the kind first)",
+          !req && j.size() == steps, req ? "linked!" : req.error().message);
+
+    // Fix them (another tool) -- then the link is made.
+    for (int k : {4, 5}) (void)verbs::set_field(j, Store::row_id(O, {"id"}, {Value(k)}), "customer_id", Value());
+    auto made = verbs::new_link(j, O, {"customer_id"}, C);
+    auto fks = links_of(O);
+    check(P + "links: New Link -- one step, the link is in the database, pointing at the key",
+          made && fks.size() == 1 && fks[0].ref_table == C && fks[0].columns == std::vector<std::string>{"customer_id"} &&
+          j.undo_label() == "Link “acorn_orders” to “acorn_customers”" && count(O) == 6.0,
+          made ? j.undo_label() : made.error().message);
+    auto bad = g.inner().query("INSERT INTO " + g.quote_ident(O) + " (" + g.quote_ident("customer_id") + ") VALUES (42)");
+    check(P + "links: the engine now refuses a record pointing at nothing", !bad, bad ? "inserted!" : bad.error().message);
+    auto ed = verbs::set_field(j, Store::row_id(O, {"id"}, {Value(6)}), "customer_id", Value(std::int64_t{2}));
+    check(P + "links: a record still edits through the link", ed.has_value(), ed ? "" : ed.error().message);
+    (void)j.undo();
+
+    // Restrict: deleting a customer with orders is refused in words.
+    const auto s2 = j.size();
+    auto rd = verbs::delete_record(j, Store::row_id(C, {"id"}, {Value(1)}));
+    check(P + "links: Restrict -- deleting a record others point at is refused, in words",
+          !rd && rd.error().message.find("2 records in “acorn_orders” point at this record") != std::string::npos &&
+          j.size() == s2 && count(C) == 2.0, rd ? "deleted!" : rd.error().message);
+
+    // The parent stays as it is while linked.
+    auto pdrop = verbs::rename_field(j, C, "id", "cid");
+    check(P + "links: renaming a field others point at is refused, in words",
+          !pdrop && pdrop.error().message.find("remove the link before renaming it") != std::string::npos && j.size() == s2,
+          pdrop ? "renamed!" : pdrop.error().message);
+    auto pkey = verbs::change_key(j, C, {"name"}, false);
+    check(P + "links: changing the key others point at is refused, in words",
+          !pkey && pkey.error().message.find("remove the link before changing") != std::string::npos && j.size() == s2,
+          pkey ? "changed!" : pkey.error().message);
+    auto cdel = verbs::delete_field(j, O, "customer_id");
+    check(P + "links: deleting a linked field is refused, in words",
+          !cdel && cdel.error().message.find("remove the link first") != std::string::npos && j.size() == s2,
+          cdel ? "deleted!" : cdel.error().message);
+    auto crn = verbs::rename_field(j, O, "customer_id", "cust");
+    auto fr = links_of(O);
+    check(P + "links: renaming the child's field takes its link along",
+          crn && fr.size() == 1 && fr[0].columns == std::vector<std::string>{"cust"}, crn ? "" : crn.error().message);
+    auto crb = j.undo();
+    check(P + "links: ... and undo renames it back, link and all",
+          crb && links_of(O).size() == 1 && links_of(O)[0].columns == std::vector<std::string>{"customer_id"},
+          crb ? "" : crb.error().message);
+
+    // Cascade: the orders go IN the step; undo brings every one back.
+    auto ch = verbs::change_link(j, O, {"customer_id"}, OnDelete::Cascade);
+    auto lc = links_of(O);
+    check(P + "links: Change Link to Cascade", ch && lc.size() == 1 && upper_of(lc[0].on_delete) == "CASCADE" &&
+          j.undo_label() == "Change Link “acorn_orders” to “acorn_customers”", ch ? j.undo_label() : ch.error().message);
+    const auto before = snapshot(g);
+    auto cd = verbs::delete_record(j, Store::row_id(C, {"id"}, {Value(1)}));
+    check(P + "links: Cascade -- the customer and its 2 orders go, one step",
+          cd && count(C) == 1.0 && count(O) == 4.0, cd ? "" : cd.error().message);
+    auto cu = j.undo();
+    check(P + "links: ... Ctrl+Z puts the customer AND its orders back exactly", cu && snapshot(g) == before,
+          cu ? "" : cu.error().message);
+    auto cr = j.redo();
+    check(P + "links: ... redo deletes them again", cr && count(O) == 4.0, cr ? "" : cr.error().message);
+    (void)j.undo();
+
+    // Set Empty: the orders stay, their customer emptied, in the step.
+    (void)verbs::change_link(j, O, {"customer_id"}, OnDelete::SetEmpty);
+    const auto before_se = snapshot(g);
+    auto sd = verbs::delete_record(j, Store::row_id(C, {"id"}, {Value(1)}));
+    auto nul = g.query("SELECT COUNT(*) FROM " + g.quote_ident(O) + " WHERE " + g.quote_ident("customer_id") + " IS NULL");
+    check(P + "links: Set Empty -- the customer goes, its orders stay with no customer",
+          sd && count(C) == 1.0 && count(O) == 6.0 && nul && num(nul->rows[0][0]) == 5.0, sd ? "" : sd.error().message);
+    auto su = j.undo();
+    check(P + "links: ... Ctrl+Z puts the customer back and the orders point at it again",
+          su && snapshot(g) == before_se, su ? "" : su.error().message);
+
+    // Unlink, undo, redo.
+    auto ul = verbs::delete_link(j, O, {"customer_id"});
+    check(P + "links: Unlink -- the link is gone, the records untouched",
+          ul && links_of(O).empty() && count(O) == 6.0 && j.undo_label() == "Unlink “acorn_orders” from “acorn_customers”",
+          ul ? j.undo_label() : ul.error().message);
+    auto uu = j.undo();
+    check(P + "links: ... undo puts the link back", uu && links_of(O).size() == 1, uu ? "" : uu.error().message);
+
+    // A table others point at is not dropped (undo of its New Table).
+    {
+        TableDef p;
+        p.name = "acorn_parent2";
+        p.columns = {{"id", decl_for(d, FieldType::Integer), false, std::nullopt, 1, true}};
+        TableDef k;
+        k.name = "acorn_child2";
+        k.columns = {{"id", decl_for(d, FieldType::Integer), false, std::nullopt, 1, true},
+                     {"p", decl_for(d, FieldType::Integer), true, std::nullopt, 0, false}};
+        (void)verbs::new_table(j, p);
+        (void)verbs::new_table(j, k);
+        (void)verbs::new_link(j, k.name, {"p"}, p.name);
+        auto s = j.store().connection().introspect();
+        // the drop is refused by the store, whatever asks for it
+        auto dr = j.run("Drop", {Store::table_id(p.name)}, [&](Store& st) { st.put(Store::table_id(p.name), std::nullopt); });
+        check(P + "links: a table others link to is never dropped -- refused in words",
+              !dr && dr.error().message.find("“acorn_child2” links to “acorn_parent2” -- remove the link first") != std::string::npos &&
+              has_table(g, p.name), dr ? "dropped!" : dr.error().message);
+    }
+    if (d == Dialect::SQLite) {
+        auto self = verbs::new_link(j, C, {"id"}, C);
+        check(P + "links: SQLite -- a table linking to itself is refused, in words",
+              !self && self.error().message.find("link to itself") != std::string::npos,
+              self ? "linked!" : self.error().message);
+        auto rb = verbs::change_field(j, C, {"name", decl_for(d, FieldType::Integer), true, std::nullopt, 0, false});
+        check(P + "links: SQLite -- the parent can't be made again (others point at it), in words",
+              !rb && rb.error().message.find("links to “acorn_customers”") != std::string::npos,
+              rb ? "changed!" : rb.error().message);
+    }
+}
+
 void test_journal(Engine* e, const ConnectParams& rw, const ConnectParams& ro, const std::string& P0) {
     const std::string P = P0 + ": journal: ";
     auto opened = e->open(rw);
@@ -1652,6 +1914,7 @@ void test_journal(Engine* e, const ConnectParams& rw, const ConnectParams& ro, c
     test_browse(j, g, e, P);
     test_design(j, g, e, P);
     test_key(j, g, e, P);
+    test_links(j, g, e, P);
 }
 
 // SQLite-only behaviour: files.
@@ -1747,6 +2010,7 @@ void db_tests(CheckFn fn, int& skip_count) {
     test_journal_pure();
     test_design_pure();
     test_key_pure();
+    test_links_pure();
     test_convert_pure();
     test_row_ids();
     test_browse_pure();

@@ -96,17 +96,41 @@ struct IndexDef {
     bool operator==(const IndexDef&) const = default;
 };
 
+// s008 -- a link: this table's fields that point at another table's key (a
+// foreign key). The child holds the link; the parent is pointed at. Acorn
+// always points a link at the parent's KEY, written out field by field.
+// Compared without its name (the engine names it; PostgreSQL / MariaDB drop
+// it by that name). NO ACTION and RESTRICT read as the same rule.
+enum class OnDelete { Restrict, Cascade, SetEmpty };
+struct LinkDef {
+    std::string              name;            // the engine's; "" for SQLite (and a link not made yet)
+    std::vector<std::string> columns;         // the child's fields, in the parent key's order
+    std::string              ref_table;       // the parent
+    std::vector<std::string> ref_columns;     // the parent's key fields
+    std::string              on_delete = "RESTRICT";
+    std::string              on_update = "NO ACTION";
+    bool operator==(const LinkDef& o) const;
+    OnDelete deleting() const;                // on_delete as Acorn's three choices (SET DEFAULT -> Restrict)
+};
+std::string on_delete_sql(OnDelete o);        // "RESTRICT" / "CASCADE" / "SET NULL"
+std::string on_delete_words(OnDelete o);      // "Restrict" / "Cascade" / "Set Empty"
+
 struct TableDef {
     std::string            name;
     std::vector<ColumnDef> columns;
     std::int64_t           rows = 0;          // live count -- a step never drops data
     std::vector<IndexDef>  indexes;           // by name (s007)
+    std::vector<LinkDef>   links;             // s008: this table's links out, by fields
     std::string            key_name;          // the engine's name for the key's own index / constraint
                                               // (s007d: PostgreSQL drops it by name); not compared
-    // Same fields by name (order is display only), same indexes, same rows.
+    // Same fields by name (order is display only), same indexes, same links,
+    // same rows.
     bool operator==(const TableDef& o) const;
 
-    static TableDef from(const Table& t);     // introspection -> picture (rows = 0)
+    // introspection -> picture (rows = 0). With the schema, a SQLite link
+    // written `REFERENCES t` (no fields) reads as t's key fields.
+    static TableDef from(const Table& t, const Schema* s = nullptr);
+    const LinkDef* link(const std::vector<std::string>& columns) const;   // by its fields
     const ColumnDef* column(const std::string& n) const;
 };
 
@@ -138,7 +162,9 @@ using Record = std::variant<TableDef, RowDef, FieldData>;
 // ── the DDL writer: one place, per dialect, shared by preview and act ─────────
 // The New Table window shows exactly the string the store will run.
 std::string decl_for(Dialect d, FieldType t);          // FieldType::Text -> "TEXT" / "VARCHAR(255)" / "text"
-std::string create_table_sql(Dialect d, char quote, const TableDef& t);
+std::string create_table_sql(Dialect d, char quote, const TableDef& t);   // links written in (s008)
+// s008: "FOREIGN KEY ("customer_id") REFERENCES "customers" ("id") ON DELETE RESTRICT"
+std::string link_sql(char quote, const LinkDef& l);
 std::string drop_table_sql(char quote, const std::string& name);
 // A name Acorn will make: not empty, no leading / trailing space, no control
 // characters, at most 64 bytes (MariaDB's limit; Postgres truncates at 63 --
@@ -355,7 +381,11 @@ std::expected<Store::Id, Error> new_record(Journal& j, const std::string& table,
 // A key field is refused. Label: Edit “column”.
 std::expected<void, Error> set_field(Journal& j, const Store::Id& row, const std::string& column,
                                      const Value& v);
-// Label: Delete Record from “table”.
+// Label: Delete Record from “table”. s008: records of other tables pointing
+// at it -- a Restrict link refuses in words ("2 “orders” point at this
+// record -- delete them first, or change the link"); Cascade deletes them and
+// Set Empty empties their link fields, IN the step (declared, so Ctrl+Z puts
+// every one back), never by the engine behind the journal's back.
 std::expected<void, Error> delete_record(Journal& j, const Store::Id& row);
 
 // s007 -- the table designer. Each is one step; undo puts the table back.
@@ -407,6 +437,37 @@ std::expected<void, Error> change_key(Journal& j, const std::string& table, cons
 // The table as change_key would make it (the designer builds its picture
 // with this, so the window and the verb agree). Refused: no such field.
 std::expected<TableDef, std::string> keyed(const TableDef& live, const std::vector<std::string>& fields, bool counting);
+// s008 -- links. Each is a step on the CHILD table (the one that points);
+// the parent is only read. SQLite makes the child again (it can't add a link
+// any other way) -- refused in words where that would lose something (a
+// trigger, a view, a table that links to the child, a link to itself);
+// PostgreSQL ADD / DROP CONSTRAINT; MariaDB one ALTER TABLE.
+// Refused in words, before anything runs: the parent has no key, the fields
+// don't match its key in number or kind, Set Empty on a required field, and
+// records that point at a parent record that isn't there ("3 records in
+// “orders” point at a “customers” record that isn't there -- fix them
+// first"; unmatched() names them, so they can be marked). Nothing is ever
+// deleted or emptied to make a link fit.
+// A link changes in a step of its own. Label: Link “orders” to “customers”.
+std::expected<void, Error> new_link(Journal& j, const std::string& table, const std::vector<std::string>& fields,
+                                    const std::string& parent, OnDelete on_delete = OnDelete::Restrict);
+// Unlink “orders” from “customers”: the link by its fields.
+std::expected<void, Error> delete_link(Journal& j, const std::string& table, const std::vector<std::string>& fields);
+// What deleting a parent record does to the records pointing at it.
+// Label: Change Link “orders” to “customers”.
+std::expected<void, Error> change_link(Journal& j, const std::string& table, const std::vector<std::string>& fields,
+                                       OnDelete on_delete);
+// The table as new_link would make it (the graph window builds its picture
+// with this, so window and verb agree). Refused: no such field / parent.
+std::expected<TableDef, std::string> linked(const TableDef& live, const Table& parent,
+                                            const std::vector<std::string>& fields, OnDelete on_delete);
+// The records of `table` whose `fields` point at a `parent` record that isn't
+// there (all fields filled, no parent record with that key) -- by record id,
+// in key order, at most `limit`. A read; no step.
+std::expected<std::vector<Store::Id>, Error> unmatched(Journal& j, const std::string& table,
+                                                       const std::vector<std::string>& fields,
+                                                       const std::string& parent, std::size_t limit = 1000);
+
 // What a design step would do to the live table, as the SQL put() will run
 // (the designer's preview): `want` is the table as the designer has it.
 std::expected<std::vector<std::string>, Error> preview(Journal& j, const TableDef& want);

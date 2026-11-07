@@ -21,6 +21,11 @@ std::string lower(std::string s) {
     return s;
 }
 std::string curly(const std::string& name) { return "“" + name + "”"; }
+std::string field_list_of(const std::vector<std::string>& f) {   // “a”, “b” and “c”
+    std::string s;
+    for (std::size_t i = 0; i < f.size(); ++i) s += (i == 0 ? "" : i + 1 == f.size() ? " and " : ", ") + curly(f[i]);
+    return s;
+}
 template <class Step>
 std::vector<Store::Id> ids_of(const Step& st) {
     std::vector<Store::Id> v;
@@ -34,7 +39,49 @@ std::string name_of(const Store::Id& id) {
 }  // namespace
 
 // ── pictures ────────────────────────────────────────────────────────────────
-TableDef TableDef::from(const Table& t) {
+namespace {
+// An engine's words for a rule, as Acorn compares them: NO ACTION is RESTRICT.
+std::string rule_of(const std::string& r) {
+    std::string u = upper(r);
+    for (auto& ch : u) if (ch == '_') ch = ' ';
+    return u == "NO ACTION" || u.empty() ? "RESTRICT" : u;
+}
+}  // namespace
+
+bool LinkDef::operator==(const LinkDef& o) const {
+    return columns == o.columns && ref_table == o.ref_table && ref_columns == o.ref_columns &&
+           rule_of(on_delete) == rule_of(o.on_delete) && rule_of(on_update) == rule_of(o.on_update);
+}
+
+OnDelete LinkDef::deleting() const {
+    const std::string r = rule_of(on_delete);
+    if (r == "CASCADE") return OnDelete::Cascade;
+    if (r == "SET NULL") return OnDelete::SetEmpty;
+    return OnDelete::Restrict;
+}
+
+std::string on_delete_sql(OnDelete o) {
+    switch (o) {
+    case OnDelete::Cascade:  return "CASCADE";
+    case OnDelete::SetEmpty: return "SET NULL";
+    default:                 return "RESTRICT";
+    }
+}
+
+std::string on_delete_words(OnDelete o) {
+    switch (o) {
+    case OnDelete::Cascade:  return "Cascade";
+    case OnDelete::SetEmpty: return "Set Empty";
+    default:                 return "Restrict";
+    }
+}
+
+const LinkDef* TableDef::link(const std::vector<std::string>& cols) const {
+    for (const auto& l : links) if (l.columns == cols) return &l;
+    return nullptr;
+}
+
+TableDef TableDef::from(const Table& t, const Schema* sch) {
     TableDef d;
     d.name = t.name;
     for (const auto& c : t.columns)
@@ -44,6 +91,10 @@ TableDef TableDef::from(const Table& t) {
         else d.key_name = ix.name;
     }
     std::sort(d.indexes.begin(), d.indexes.end(), [](auto& a, auto& b) { return a.name < b.name; });
+    for (const auto& fk : t.foreign_keys)
+        d.links.push_back({fk.name, fk.columns, fk.ref_table, sch ? sch->ref_columns(fk) : fk.ref_columns,
+                           fk.on_delete, fk.on_update});
+    std::sort(d.links.begin(), d.links.end(), [](auto& a, auto& b) { return a.columns < b.columns; });
     return d;
 }
 
@@ -62,7 +113,12 @@ bool TableDef::operator==(const TableDef& o) const {
     auto by_name = [](const IndexDef& x, const IndexDef& y) { return x.name < y.name; };
     std::sort(a.begin(), a.end(), by_name);
     std::sort(b.begin(), b.end(), by_name);
-    return a == b;
+    if (!(a == b)) return false;
+    auto la = links, lb = o.links;
+    auto by_fields = [](const LinkDef& x, const LinkDef& y) { return x.columns < y.columns; };
+    std::sort(la.begin(), la.end(), by_fields);
+    std::sort(lb.begin(), lb.end(), by_fields);
+    return la == lb;
 }
 
 bool RowDef::operator==(const RowDef& o) const {
@@ -142,7 +198,20 @@ std::string create_table_sql(Dialect d, char q, const TableDef& t) {
             s += (i ? ", " : "") + quote_ident_with(q, pk[i]->name);
         s += ")";
     }
+    for (const auto& l : t.links) s += ",\n  " + link_sql(q, l);
     s += "\n)";
+    return s;
+}
+
+std::string link_sql(char q, const LinkDef& l) {
+    auto list = [&](const std::vector<std::string>& v) {
+        std::string out;
+        for (std::size_t i = 0; i < v.size(); ++i) out += (i ? ", " : "") + quote_ident_with(q, v[i]);
+        return out;
+    };
+    std::string s = "FOREIGN KEY (" + list(l.columns) + ") REFERENCES " + quote_ident_with(q, l.ref_table) + " (" +
+                    list(l.ref_columns) + ") ON DELETE " + rule_of(l.on_delete);
+    if (rule_of(l.on_update) != "RESTRICT") s += " ON UPDATE " + rule_of(l.on_update);
     return s;
 }
 
@@ -206,6 +275,9 @@ struct Diff {
     std::vector<std::string>      idx_drop;                       // names, live's
     std::vector<const IndexDef*>  idx_make;                       // want's
     bool                          key = false;                    // s007d: the key changes (a step of its own)
+    std::vector<const LinkDef*>   link_drop;                      // s008: live's
+    std::vector<const LinkDef*>   link_make;                      // want's
+    bool links() const { return !link_drop.empty() || !link_make.empty(); }
 };
 
 // The key's fields in key order; the fields that count up.
@@ -316,6 +388,53 @@ std::expected<Diff, std::string> diff_tables(const TableDef& live, const TableDe
             if (!want.column(col))
                 return std::unexpected("the index " + curly(wx.name) + " uses " + curly(col) + ", which is going");
     if (df.key && (!df.idx_drop.empty() || !df.idx_make.empty())) return std::unexpected(kKeyAlone);
+
+    // s008 -- links: live's (the rename applied) against want's, by fields.
+    auto relinked = [&](LinkDef l) {
+        if (df.rename)
+            for (auto& col : l.columns) if (col == df.rename->first) col = df.rename->second;
+        return l;
+    };
+    for (const auto& ll : live.links) {
+        const LinkDef r = relinked(ll);
+        const LinkDef* w = want.link(r.columns);
+        if (!w || !(*w == r)) df.link_drop.push_back(&ll);
+    }
+    for (const auto& wl : want.links) {
+        bool kept = false;
+        for (const auto& ll : live.links) if (relinked(ll) == wl) kept = true;
+        if (kept) continue;
+        if (wl.columns.empty() || wl.columns.size() != wl.ref_columns.size())
+            return std::unexpected("a link joins as many fields as the key it points at");
+        df.link_make.push_back(&wl);
+    }
+    for (const auto& wl : want.links)
+        for (std::size_t i = 0; i < wl.columns.size(); ++i) {
+            if (!want.column(wl.columns[i]))
+                return std::unexpected("the link to " + curly(wl.ref_table) + " uses " + curly(wl.columns[i]) +
+                                       ", which is going -- remove the link first");
+            for (std::size_t k = 0; k < i; ++k)
+                if (wl.columns[k] == wl.columns[i])
+                    return std::unexpected("the link to " + curly(wl.ref_table) + " names " + curly(wl.columns[i]) + " twice");
+        }
+    if (df.links()) {
+        // A link changes in a step of its own -- with one exception: an index on
+        // exactly a link's fields (MariaDB makes one for a link, and keeps it
+        // when the link goes) may come and go with it.
+        constexpr const char* kLinkAlone = "a link changes in a step of its own -- apply the other changes first";
+        if (df.key || df.rename || !df.dropped.empty() || !df.added.empty() || !df.changed.empty())
+            return std::unexpected(kLinkAlone);
+        auto backs = [&](const std::vector<std::string>& cols) {
+            for (const auto* l : df.link_drop) if (l->columns == cols) return true;
+            for (const auto* l : df.link_make) if (l->columns == cols) return true;
+            return false;
+        };
+        for (const auto& n : df.idx_drop)
+            for (const auto& lx : live.indexes)
+                if (lx.name == n && !backs(lx.columns)) return std::unexpected(kLinkAlone);
+        for (const auto* ix : df.idx_make)
+            if (!backs(ix->columns)) return std::unexpected(kLinkAlone);
+    }
     return df;
 }
 
@@ -441,7 +560,9 @@ plan_steps(Dialect d, char q, const TableDef& live, const TableDef& want, bool i
         return s;
     };
     const bool misplaced = out_of_place(want, *df);
-    if (d == Dialect::SQLite && !df->changed.empty()) {
+    // s008: SQLite can't add or drop a link in place either -- the child is
+    // made again with its links written in.
+    if (d == Dialect::SQLite && (!df->changed.empty() || df->links())) {
         for (const auto& lx : live.indexes)
             if (lower(lx.name).rfind("sqlite_autoindex", 0) == 0)
                 return std::unexpected(curly(live.name) + " has a UNIQUE rule written into the table -- Acorn can't "
@@ -460,6 +581,10 @@ plan_steps(Dialect d, char q, const TableDef& live, const TableDef& want, bool i
     }
     if (d == Dialect::MariaDB) {   // ONE statement: atomic on an engine that can't roll DDL back
         std::vector<std::string> cl;
+        for (const auto* l : df->link_drop) {   // s008: links first, so an index they used may go
+            if (l->name.empty()) return std::unexpected("the link to " + curly(l->ref_table) + " has no name Acorn can read");
+            cl.push_back("DROP FOREIGN KEY " + quote_ident_with(q, l->name));
+        }
         if (new_key && !lk.empty()) cl.push_back("DROP PRIMARY KEY");
         for (const auto& n : df->idx_drop) cl.push_back("DROP INDEX " + quote_ident_with(q, n));
         if (df->rename)
@@ -483,6 +608,7 @@ plan_steps(Dialect d, char q, const TableDef& live, const TableDef& want, bool i
             for (std::size_t i = 0; i < ix->columns.size(); ++i) a += (i ? ", " : "") + quote_ident_with(q, ix->columns[i]);
             cl.push_back(a + ")");
         }
+        for (const auto* l : df->link_make) cl.push_back("ADD " + link_sql(q, *l));
         if (cl.empty()) return out;
         std::string s = "ALTER TABLE " + t;
         for (std::size_t i = 0; i < cl.size(); ++i) s += (i ? ",\n  " : "\n  ") + cl[i];
@@ -496,6 +622,10 @@ plan_steps(Dialect d, char q, const TableDef& live, const TableDef& want, bool i
     // so a field leaving the key may become optional; the new key and its
     // counting come after the fields are required -- the count starting past
     // the highest number already there.
+    for (const auto* l : df->link_drop) {   // s008: PostgreSQL drops a link by its name
+        if (l->name.empty()) return std::unexpected("the link to " + curly(l->ref_table) + " has no name Acorn can read");
+        out.push_back({"ALTER TABLE " + t + " DROP CONSTRAINT " + quote_ident_with(q, l->name), {}});
+    }
     if (df->key) {
         for (const auto& ch : df->changed)
             if (ch.live->auto_increment && !ch.want->auto_increment)
@@ -544,6 +674,7 @@ plan_steps(Dialect d, char q, const TableDef& live, const TableDef& want, bool i
     }
     for (const auto* c : df->added) out.push_back({"ALTER TABLE " + t + " ADD COLUMN " + field_decl(q, *c), {}});
     for (const auto* ix : df->idx_make) out.push_back({create_index_sql(d, q, live.name, *ix), {}});
+    for (const auto* l : df->link_make) out.push_back({"ALTER TABLE " + t + " ADD " + link_sql(q, *l), {}});
     return out;
 }
 
@@ -571,7 +702,9 @@ std::string rebuild_blocker(Connection& c, const std::string& table) {
         const std::string sql = row[3].as_text() ? *row[3].as_text() : "";
         if (type == "table" && name == table) {
             const std::string s = strip(sql);
-            for (const char* word : {"CHECK", "COLLATE", "REFERENCES", "UNIQUE", "GENERATED", "CONSTRAINT",
+            // s008: REFERENCES is no longer here -- the picture carries the
+            // table's links and the rebuild writes them back.
+            for (const char* word : {"CHECK", "COLLATE", "UNIQUE", "GENERATED", "CONSTRAINT", "DEFERRABLE", "MATCH",
                                      "WITHOUT ROWID", " AS "})
                 if (s.find(word) != std::string::npos)
                     return curly(table) + " was made with rules Acorn doesn't write (" + std::string(word) +
@@ -588,10 +721,16 @@ std::string rebuild_blocker(Connection& c, const std::string& table) {
             return "the trigger " + curly(name) + " belongs to " + curly(table) + " -- Acorn can't make the table again yet";
         if (type == "view" && sql.find(table) != std::string::npos)
             return "the view " + curly(name) + " reads " + curly(table) + " -- Acorn can't make the table again yet";
-        if (type == "table" && name != table && strip(sql).find("REFERENCES") != std::string::npos &&
-            sql.find(table) != std::string::npos)
-            return curly(name) + " links to " + curly(table) + " -- Acorn can't make the table again yet";
     }
+    // A table others point at (or that points at itself) can't be dropped and
+    // made again inside a transaction: SQLite would need foreign_keys off,
+    // which it allows only outside one (s008: the parent keeps this refusal).
+    auto sch = c.introspect();
+    if (!sch) return "could not read the schema: " + sch.error().message;
+    for (const auto& in : sch->links_to(table))
+        return in.from->name == table
+                   ? curly(table) + " links to itself -- SQLite can't make such a table again inside a step"
+                   : curly(in.from->name) + " links to " + curly(table) + " -- Acorn can't make the table again yet";
     return {};
 }
 
@@ -665,6 +804,76 @@ std::string key_blocker(Connection& c, Dialect d, const TableDef& live, const Ta
                        "starts counting; change it first";
         }
     }
+    return {};
+}
+
+// s008: the records of `table` whose `l` points at no record of its parent
+// -- every link field filled, no parent record with that key. SQL shared by
+// the count (the refusal) and the list (unmatched()).
+std::string unmatched_where(Connection& c, const std::string& table, const LinkDef& l) {
+    const std::string a = c.quote_ident("acorn_c"), b = c.quote_ident("acorn_p");
+    std::string filled, match;
+    for (std::size_t i = 0; i < l.columns.size(); ++i) {
+        filled += (i ? " AND " : "") + a + "." + c.quote_ident(l.columns[i]) + " IS NOT NULL";
+        match += (i ? " AND " : "") + b + "." + c.quote_ident(l.ref_columns[i]) + " = " + a + "." + c.quote_ident(l.columns[i]);
+    }
+    return " FROM " + c.quote_ident(table) + " " + a + " WHERE " + filled + " AND NOT EXISTS (SELECT 1 FROM " +
+           c.quote_ident(l.ref_table) + " " + b + " WHERE " + match + ")";
+}
+
+// s008: why this step can't change the links it changes, or the fields other
+// tables' links point at ("" = it can). Read from the live database: the
+// parent's key, the kinds, the records that don't match.
+std::string link_blocker(Connection& c, Dialect d, const TableDef& live, const TableDef& want, const Diff& df) {
+    auto sch = c.introspect();
+    if (!sch) return "could not read the schema: " + sch.error().message;
+    // The parent side: what other tables point at stays as it is.
+    for (const auto& in : sch->links_to(live.name)) {
+        if (in.from->name == live.name) continue;   // a link to itself is this table's own, below
+        const auto refs = sch->ref_columns(*in.fk);
+        const std::string who = curly(in.from->name) + " links to " + curly(live.name);
+        if (df.key) return who + " -- remove the link before changing " + curly(live.name) + "'s key";
+        for (const auto& rc : refs) {
+            if (df.rename && df.rename->first == rc) return who + "'s " + curly(rc) + " -- remove the link before renaming it";
+            for (const auto* x : df.dropped)
+                if (x->name == rc) return who + "'s " + curly(rc) + " -- remove the link first";
+        }
+    }
+    // The child side: each link this step makes.
+    for (const auto* l : df.link_make) {
+        const Table* p = sch->table(l->ref_table);
+        const std::string to = curly(l->ref_table);
+        if (!p || p->kind != Table::Kind::Table) return "there is no table " + to + " to link to";
+        const auto pk = p->primary_key();
+        if (pk.empty()) return to + " has no key -- a link points at a table's key";
+        if (pk != l->ref_columns) return "a link points at " + to + "'s key (" + field_list_of(pk) + ")";
+        if (pk.size() != l->columns.size())
+            return to + "'s key has " + std::to_string(pk.size()) + " field" + (pk.size() == 1 ? "" : "s") +
+                   " -- the link needs as many";
+        for (std::size_t i = 0; i < pk.size(); ++i) {
+            const ColumnDef* mine = want.column(l->columns[i]);
+            const Column* theirs = p->column(pk[i]);
+            if (!mine || !theirs) return "the link to " + to + " names a field that isn't there";
+            const FieldType a = map_type(d, mine->decl_type), b = theirs->type;
+            if (a != b)
+                return curly(mine->name) + " is " + kind_words(a) + ", " + to + "'s " + curly(theirs->name) + " is " +
+                       kind_words(b) + " -- a link joins fields of the same kind";
+            if (l->deleting() == OnDelete::SetEmpty && !mine->nullable)
+                return curly(mine->name) + " is required -- Set Empty needs it optional (or choose Restrict or Cascade)";
+        }
+        if (d == Dialect::SQLite && l->ref_table == live.name)
+            return curly(live.name) + " would link to itself -- SQLite can't make such a table again inside a step";
+        auto n = c.query("SELECT COUNT(*)" + unmatched_where(c, live.name, *l));
+        if (!n || n->rows.empty()) return "could not look for records that don't match " + to;
+        const auto& v = n->rows[0][0];
+        const std::int64_t k = v.as_int() ? *v.as_int() : (v.as_text() ? std::stoll(*v.as_text()) : 0);
+        if (k > 0)
+            return k == 1 ? "1 record in " + curly(live.name) + " points at a " + to + " record that isn't there -- fix it first"
+                          : std::to_string(k) + " records in " + curly(live.name) + " point at " + to +
+                                " records that aren't there -- fix them first";
+    }
+    if (d == Dialect::SQLite && df.links())
+        if (auto why = rebuild_blocker(c, live.name); !why.empty()) return why;
     return {};
 }
 
@@ -890,7 +1099,7 @@ std::optional<Record> Store::get_table(const std::string& name) const {
     m_schema.reset();   // a table's shape is always read fresh
     const Table* t = table_info(name);
     if (failed() || !t || t->kind != Table::Kind::Table) return std::nullopt;
-    TableDef d = TableDef::from(*t);
+    TableDef d = TableDef::from(*t, &*m_schema);   // s008: links read as their parent's key fields
     auto n = m_conn.query("SELECT COUNT(*) FROM " + m_conn.quote_ident(name));
     if (!n || n->rows.empty()) { fail(Error::Code::Internal, "could not count the rows of " + curly(name)); return d; }
     const auto& v = n->rows[0][0];
@@ -1160,6 +1369,12 @@ void Store::put_table(const Id& id, const std::optional<TableDef>& v) {
                  " row" + (live->rows == 1 ? "" : "s") + " -- Acorn will not drop a table with data in it");
             return;
         }
+        if (auto sch = m_conn.introspect(); sch)   // s008: a table others point at stays
+            for (const auto& in : sch->links_to(name))
+                if (in.from->name != name) {
+                    fail(Error::Code::Constraint, curly(in.from->name) + " links to " + curly(name) + " -- remove the link first");
+                    return;
+                }
         exec(drop_table_sql(q, name));
         return;
     }
@@ -1222,6 +1437,10 @@ void Store::put_table(const Id& id, const std::optional<TableDef>& v) {
                     return;
                 }
             }
+        }
+        if (auto why = link_blocker(m_conn, m_dialect, *live, *v, *df); !why.empty()) {   // s008: first, in its own words
+            fail(Error::Code::Constraint, why);
+            return;
         }
         if (!df->changed.empty() && m_dialect == Dialect::SQLite)
             if (auto why = rebuild_blocker(m_conn, name); !why.empty()) { fail(Error::Code::Unsupported, why); return; }
@@ -1559,17 +1778,128 @@ std::expected<void, Error> set_field(Journal& j, const Store::Id& row, const std
     });
 }
 
+namespace {
+// s008: what deleting `row` does to the records pointing at it, through every
+// link into its table -- read before the step, so the step can declare them.
+// Restrict: refused in words. Cascade: those records go too (and theirs, in
+// turn). Set Empty: their link fields are emptied. The journal does each one
+// itself, so undo puts every record back.
+struct Fallout {
+    std::vector<Store::Id> gone;      // deepest first; the record itself last
+    std::vector<std::pair<Store::Id, std::vector<std::string>>> emptied;   // record, fields
+};
+std::expected<void, Error> fallout(Connection& c, const Schema& sch, const Store::Id& row, int depth, Fallout& out) {
+    if (depth > 32) return std::unexpected(Error{Error::Code::Unsupported, "the links go deeper than Acorn follows"});
+    std::string table;
+    std::vector<std::string> kf;
+    std::vector<Value> key;
+    if (!Store::parse_row_id(row, table, kf, key)) return std::unexpected(Error{Error::Code::Internal, "not a record: " + row});
+    if (std::find(out.gone.begin(), out.gone.end(), row) != out.gone.end()) return {};
+    const Table* t = sch.table(table);
+    if (!t) return std::unexpected(Error{Error::Code::NotFound, "there is no table " + curly(table)});
+    std::vector<Store::Id> below;
+    for (const auto& in : sch.links_to(table)) {
+        const auto refs = sch.ref_columns(*in.fk);
+        // the values this record holds in the fields pointed at
+        std::string sel;
+        for (std::size_t i = 0; i < refs.size(); ++i) sel += (i ? ", " : "") + c.quote_ident(refs[i]);
+        std::string wk;
+        for (std::size_t i = 0; i < kf.size(); ++i) wk += (i ? " AND " : " WHERE ") + c.quote_ident(kf[i]) + " = ?";
+        auto mine = c.query("SELECT " + sel + " FROM " + c.quote_ident(table) + wk, key);
+        if (!mine) return std::unexpected(mine.error());
+        if (mine->rows.empty()) continue;
+        const auto& vals = mine->rows[0];
+        bool null = false;
+        for (const auto& v : vals) if (v.is_null()) null = true;
+        if (null) continue;
+        const Table& ch = *in.from;
+        const auto cpk = ch.primary_key();
+        std::string sel2, w2;
+        for (std::size_t i = 0; i < cpk.size(); ++i) sel2 += (i ? ", " : "") + c.quote_ident(cpk[i]);
+        for (std::size_t i = 0; i < in.fk->columns.size(); ++i)
+            w2 += (i ? " AND " : " WHERE ") + c.quote_ident(in.fk->columns[i]) + " = ?";
+        auto kids = c.query("SELECT " + (cpk.empty() ? std::string("COUNT(*)") : sel2) + " FROM " + c.quote_ident(ch.name) + w2, vals);
+        if (!kids) return std::unexpected(kids.error());
+        if (cpk.empty()) {
+            const auto& v = kids->rows[0][0];
+            const std::int64_t n = v.as_int() ? *v.as_int() : (v.as_text() ? std::stoll(*v.as_text()) : 0);
+            if (n > 0)
+                return std::unexpected(Error{Error::Code::Unsupported, curly(ch.name) + " has no key and " +
+                    std::to_string(n) + (n == 1 ? " of its records points" : " of its records point") +
+                    " at this record -- Acorn couldn't bring " + (n == 1 ? "it" : "them") + " back, so it won't delete it"});
+            continue;
+        }
+        if (kids->rows.empty()) continue;
+        const std::int64_t n = static_cast<std::int64_t>(kids->rows.size());
+        LinkDef l{in.fk->name, in.fk->columns, table, refs, in.fk->on_delete, in.fk->on_update};
+        switch (l.deleting()) {
+        case OnDelete::Restrict:
+            return std::unexpected(Error{Error::Code::Constraint,
+                std::to_string(n) + (n == 1 ? " record in " : " records in ") + curly(ch.name) +
+                (n == 1 ? " points" : " point") + " at this record -- delete " + (n == 1 ? "it" : "them") +
+                " first, or change the link to Cascade"});
+        case OnDelete::Cascade:
+            for (const auto& k : kids->rows) {
+                const auto id = Store::row_id(ch.name, cpk, k);
+                if (id.empty()) return std::unexpected(Error{Error::Code::Unsupported, curly(ch.name) + " has a key Acorn can't write by"});
+                below.push_back(id);
+            }
+            break;
+        case OnDelete::SetEmpty:
+            for (const auto& k : kids->rows) {
+                const auto id = Store::row_id(ch.name, cpk, k);
+                if (id.empty()) return std::unexpected(Error{Error::Code::Unsupported, curly(ch.name) + " has a key Acorn can't write by"});
+                out.emptied.push_back({id, in.fk->columns});
+            }
+            break;
+        }
+    }
+    for (const auto& b : below)
+        if (auto r = fallout(c, sch, b, depth + 1, out); !r) return r;
+    out.gone.push_back(row);
+    return {};
+}
+}  // namespace
+
 std::expected<void, Error> delete_record(Journal& j, const Store::Id& row) {
     std::string table;
     std::vector<Value> key;
     if (!Store::parse_row_id(row, table, key))
         return std::unexpected(Error{Error::Code::Internal, "not a record: " + row});
-    return j.run("Delete Record from " + curly(table), {row}, [&](Store& s) {
+    Connection& c = j.store().connection();
+    auto sch = c.introspect();
+    if (!sch) return std::unexpected(sch.error());
+    Fallout fo;
+    if (auto r = fallout(c, *sch, row, 0, fo); !r) return std::unexpected(r.error());
+    // A record that goes isn't also emptied; each emptied record once, all its fields.
+    std::vector<std::pair<Store::Id, std::vector<std::string>>> emptied;
+    for (auto& [id, cols] : fo.emptied) {
+        if (std::find(fo.gone.begin(), fo.gone.end(), id) != fo.gone.end()) continue;
+        auto it = std::find_if(emptied.begin(), emptied.end(), [&](auto& e) { return e.first == id; });
+        if (it == emptied.end()) emptied.push_back({id, cols});
+        else it->second.insert(it->second.end(), cols.begin(), cols.end());
+    }
+    // Declared emptied first, then the gone deepest-first, the record last --
+    // undo puts them back in reverse: the record, the ones below it, then the
+    // emptied fields filled again.
+    std::vector<Store::Id> ids;
+    for (const auto& e : emptied) ids.push_back(e.first);
+    ids.insert(ids.end(), fo.gone.begin(), fo.gone.end());
+    return j.run("Delete Record from " + curly(table), ids, [&](Store& s) {
         if (!s.get(row) && !s.failed()) {
             s.refuse(Error{Error::Code::Changed, Store::describe(row) + " is not there any more"});
             return;
         }
-        s.put(row, std::nullopt);
+        for (const auto& [id, cols] : emptied) {
+            auto got = s.get(id);
+            if (s.failed()) return;
+            if (!got) continue;
+            RowDef d = std::get<RowDef>(*got);
+            for (std::size_t i = 0; i < d.columns.size(); ++i)
+                if (std::find(cols.begin(), cols.end(), d.columns[i]) != cols.end()) d.values[i] = Value();
+            s.put(id, d);
+        }
+        for (const auto& id : fo.gone) s.put(id, std::nullopt);
     });
 }
 
@@ -1643,6 +1973,8 @@ std::expected<void, Error> rename_field(Journal& j, const std::string& table, co
         for (auto& c : t->columns) if (c.name == from) c.name = to;
         for (auto& ix : t->indexes)
             for (auto& col : ix.columns) if (col == from) col = to;
+        for (auto& l : t->links)   // s008: its link goes with it
+            for (auto& col : l.columns) if (col == from) col = to;
         s.put(id, *t);
     });
 }
@@ -1731,6 +2063,13 @@ std::string design_label(const TableDef& live, const TableDef& want) {
         for (std::size_t i = 0; i < wk.size(); ++i) f += (i ? ", " : "") + curly(wk[i]);
         return "Change Key of " + t + " to " + f;
     }
+    if (d.links()) {   // s008
+        if (d.link_make.size() == 1 && d.link_drop.empty()) return "Link " + t + " to " + curly(d.link_make[0]->ref_table);
+        if (d.link_drop.size() == 1 && d.link_make.empty()) return "Unlink " + t + " from " + curly(d.link_drop[0]->ref_table);
+        if (d.link_drop.size() == 1 && d.link_make.size() == 1 && d.link_drop[0]->columns == d.link_make[0]->columns)
+            return "Change Link " + t + " to " + curly(d.link_make[0]->ref_table);
+        return "Change Links of " + t;
+    }
     const bool fields = d.rename || !d.dropped.empty() || !d.added.empty() || !d.changed.empty();
     const bool others = d.rename || !d.dropped.empty() || !d.added.empty();
     if (d.rename && d.dropped.empty() && d.added.empty() && d.idx_drop.empty() && d.idx_make.empty())
@@ -1796,6 +2135,19 @@ std::expected<Reckoning, Error> reckon(Journal& j, const TableDef& want) {
     out.keyless = true;
     for (const auto& c : out.live.columns) if (c.pk_position > 0) out.keyless = false;
     Connection& cn = st.connection();
+    {   // s008: what other tables point at, and the links this step changes
+        if (auto why = link_blocker(cn, dl, out.live, want, *df); !why.empty())
+            return std::unexpected(Error{Error::Code::Constraint, why});
+        for (const auto* l : df->link_make) {
+            if (l->deleting() == OnDelete::Cascade)
+                out.words.push_back("Deleting a " + curly(l->ref_table) + " record deletes the " + curly(want.name) +
+                                    " records that point at it (Ctrl+Z brings them back)");
+            if (l->deleting() == OnDelete::SetEmpty)
+                out.words.push_back("Deleting a " + curly(l->ref_table) + " record empties " + field_list_of(l->columns) +
+                                    " in the " + curly(want.name) + " records that point at it");
+        }
+        if (df->links()) return out;
+    }
     if (df->key) {   // s007d: the shape first, then the records
         const char q = cn.quote_ident("x").front();
         if (auto plan = plan_alter(dl, q, out.live, want); !plan)
@@ -1964,6 +2316,104 @@ std::expected<void, Error> change_key(Journal& j, const std::string& table, cons
     return design_table(j, *w);
 }
 
+// ── s008: links ─────────────────────────────────────────────────────────────
+std::expected<TableDef, std::string> linked(const TableDef& live, const Table& parent,
+                                            const std::vector<std::string>& fields, OnDelete on_delete) {
+    if (fields.empty()) return std::unexpected("a link needs at least one field");
+    for (const auto& f : fields)
+        if (!live.column(f)) return std::unexpected(curly(live.name) + " has no field " + curly(f));
+    if (parent.kind != Table::Kind::Table) return std::unexpected(curly(parent.name) + " is a view -- a link points at a table");
+    const auto pk = parent.primary_key();
+    if (pk.empty()) return std::unexpected(curly(parent.name) + " has no key -- a link points at a table's key");
+    if (pk.size() != fields.size())
+        return std::unexpected(curly(parent.name) + "'s key is " + field_list_of(pk) + " -- the link needs " +
+                               std::to_string(pk.size()) + " field" + (pk.size() == 1 ? "" : "s") + " to match it");
+    if (live.link(fields)) return std::unexpected(field_list_of(fields) + " already link" + (fields.size() == 1 ? "s" : "") +
+                                                  " to " + curly(live.link(fields)->ref_table));
+    TableDef w = live;
+    w.links.push_back({"", fields, parent.name, pk, on_delete_sql(on_delete), "NO ACTION"});
+    std::sort(w.links.begin(), w.links.end(), [](auto& a, auto& b) { return a.columns < b.columns; });
+    return w;
+}
+
+namespace {
+std::expected<TableDef, Error> live_def(Journal& j, const std::string& table) {
+    Store& st = j.store();
+    st.forget_schema();
+    auto got = st.get(Store::table_id(table));
+    if (st.failed()) { Error e = st.error(); st.clear_failed(); return std::unexpected(e); }
+    if (!got) return std::unexpected(Error{Error::Code::NotFound, "there is no table " + curly(table)});
+    return std::get<TableDef>(*got);
+}
+}  // namespace
+
+std::expected<void, Error> new_link(Journal& j, const std::string& table, const std::vector<std::string>& fields,
+                                    const std::string& parent, OnDelete on_delete) {
+    auto live = live_def(j, table);
+    if (!live) return std::unexpected(live.error());
+    const Table* p = j.store().table_info(parent);
+    if (j.store().failed()) { Error e = j.store().error(); j.store().clear_failed(); return std::unexpected(e); }
+    if (!p) return std::unexpected(Error{Error::Code::NotFound, "there is no table " + curly(parent)});
+    auto w = linked(*live, *p, fields, on_delete);
+    if (!w) return std::unexpected(Error{Error::Code::Unsupported, w.error()});
+    return design_table(j, *w);
+}
+
+std::expected<void, Error> delete_link(Journal& j, const std::string& table, const std::vector<std::string>& fields) {
+    auto live = live_def(j, table);
+    if (!live) return std::unexpected(live.error());
+    TableDef w = *live;
+    const auto n = w.links.size();
+    std::erase_if(w.links, [&](const LinkDef& l) { return l.columns == fields; });
+    if (w.links.size() == n)
+        return std::unexpected(Error{Error::Code::NotFound, field_list_of(fields) + " in " + curly(table) + " link to nothing"});
+    return design_table(j, w);
+}
+
+std::expected<void, Error> change_link(Journal& j, const std::string& table, const std::vector<std::string>& fields,
+                                       OnDelete on_delete) {
+    auto live = live_def(j, table);
+    if (!live) return std::unexpected(live.error());
+    TableDef w = *live;
+    LinkDef* l = nullptr;
+    for (auto& x : w.links) if (x.columns == fields) l = &x;
+    if (!l) return std::unexpected(Error{Error::Code::NotFound, field_list_of(fields) + " in " + curly(table) + " link to nothing"});
+    if (l->deleting() == on_delete) return {};   // no change: no step
+    l->on_delete = on_delete_sql(on_delete);
+    l->name.clear();
+    return design_table(j, w);
+}
+
+std::expected<std::vector<Store::Id>, Error> unmatched(Journal& j, const std::string& table,
+                                                       const std::vector<std::string>& fields,
+                                                       const std::string& parent, std::size_t limit) {
+    Connection& c = j.store().connection();
+    auto sch = c.introspect();
+    if (!sch) return std::unexpected(sch.error());
+    const Table* t = sch->table(table);
+    const Table* p = sch->table(parent);
+    if (!t || !p) return std::unexpected(Error{Error::Code::NotFound, "there is no table " + curly(t ? parent : table)});
+    const auto pk = t->primary_key(), ppk = p->primary_key();
+    if (pk.empty()) return std::unexpected(Error{Error::Code::Unsupported, curly(table) + " has no key -- its records can't be named"});
+    if (ppk.size() != fields.size())
+        return std::unexpected(Error{Error::Code::Unsupported, curly(parent) + "'s key is " + field_list_of(ppk)});
+    const LinkDef l{"", fields, parent, ppk};
+    std::string sel, order;
+    const std::string a = c.quote_ident("acorn_c");
+    for (std::size_t i = 0; i < pk.size(); ++i) {
+        sel += (i ? ", " : "") + a + "." + c.quote_ident(pk[i]);
+        order += (i ? ", " : "") + std::to_string(i + 1);
+    }
+    auto r = c.query("SELECT " + sel + unmatched_where(c, table, l) + " ORDER BY " + order);
+    if (!r) return std::unexpected(r.error());
+    std::vector<Store::Id> out;
+    for (const auto& row : r->rows) {
+        if (out.size() >= limit) break;
+        out.push_back(Store::row_id(table, pk, row));
+    }
+    return out;
+}
+
 std::expected<std::vector<std::string>, Error> preview(Journal& j, const TableDef& want) {
     Store& st = j.store();
     st.forget_schema();
@@ -2073,6 +2523,56 @@ std::expected<Store::Id, Error> newest_row(Journal& j) {
 }
 }  // namespace
 
+namespace {
+// s008 -- the walk's fixture for links: a parent with a counting key and a
+// child whose "parent_id" points at it (or not yet), each with records --
+// made through the door. `link`: whether the child should be linked, and how.
+constexpr const char* kParent = "acorn_verb_parent";
+constexpr const char* kChild = "acorn_verb_child";
+std::expected<void, Error> link_fixture(Journal& j, std::optional<OnDelete> link) {
+    const Dialect d = j.store().dialect();
+    j.store().forget_schema();
+    if (!j.store().table_info(kParent)) {
+        j.store().clear_failed();
+        TableDef p;
+        p.name = kParent;
+        p.columns = {{"id", decl_for(d, FieldType::Integer), false, std::nullopt, 1, true},
+                     {"name", decl_for(d, FieldType::Text), true, std::nullopt, 0, false}};
+        if (auto r = new_table(j, p); !r) return r;
+        TableDef c;
+        c.name = kChild;
+        c.columns = {{"id", decl_for(d, FieldType::Integer), false, std::nullopt, 1, true},
+                     {"parent_id", decl_for(d, FieldType::Integer), true, std::nullopt, 0, false},
+                     {"note", decl_for(d, FieldType::Text), true, std::nullopt, 0, false}};
+        if (auto r = new_table(j, c); !r) return r;
+    }
+    // One more parent with two children pointing at it (steps, like the others).
+    auto pid = new_record(j, kParent, {"name"}, {Value("parent")});
+    if (!pid) return std::unexpected(pid.error());
+    std::string t;
+    std::vector<Value> key;
+    (void)Store::parse_row_id(*pid, t, key);
+    for (const char* n : {"first", "second"})
+        if (auto r = new_record(j, kChild, {"parent_id", "note"}, {key[0], Value(n)}); !r) return std::unexpected(r.error());
+    auto live = live_def(j, kChild);
+    if (!live) return std::unexpected(live.error());
+    const LinkDef* l = live->link({"parent_id"});
+    if (l && (!link || l->deleting() != *link))
+        if (auto r = delete_link(j, kChild, {"parent_id"}); !r) return r;
+    if (link && (!l || l->deleting() != *link))
+        if (auto r = new_link(j, kChild, {"parent_id"}, kParent, *link); !r) return r;
+    return {};
+}
+// The newest parent record (the one the fixture just made).
+std::expected<Store::Id, Error> newest_parent(Journal& j) {
+    Connection& c = j.store().connection();
+    auto r = c.query("SELECT MAX(" + c.quote_ident("id") + ") FROM " + c.quote_ident(kParent));
+    if (!r) return std::unexpected(r.error());
+    if (r->rows.empty() || r->rows[0][0].is_null()) return std::unexpected(Error{Error::Code::NotFound, "no record"});
+    return Store::row_id(kParent, {"id"}, {r->rows[0][0]});
+}
+}  // namespace
+
 const std::vector<Verb>& all() {
     static const std::vector<Verb> kVerbs = {
         {"New Table", [](Journal& j) {
@@ -2133,6 +2633,23 @@ const std::vector<Verb>& all() {
              w.indexes.push_back({"acorn_verb_design_title", {"title"}, false, false});
              return design_table(j, w);
          }, design_fixture},
+        // s008 -- links
+        {"New Link", [](Journal& j) { return new_link(j, kChild, {"parent_id"}, kParent); },
+         [](Journal& j) { return link_fixture(j, std::nullopt); }},
+        {"Change Link", [](Journal& j) { return change_link(j, kChild, {"parent_id"}, OnDelete::Cascade); },
+         [](Journal& j) { return link_fixture(j, OnDelete::Restrict); }},
+        {"Delete Link", [](Journal& j) { return delete_link(j, kChild, {"parent_id"}); },
+         [](Journal& j) { return link_fixture(j, OnDelete::Restrict); }},
+        {"Delete Record (Cascade)", [](Journal& j) -> std::expected<void, Error> {
+             auto row = newest_parent(j);
+             if (!row) return std::unexpected(row.error());
+             return delete_record(j, *row);
+         }, [](Journal& j) { return link_fixture(j, OnDelete::Cascade); }},
+        {"Delete Record (Set Empty)", [](Journal& j) -> std::expected<void, Error> {
+             auto row = newest_parent(j);
+             if (!row) return std::unexpected(row.error());
+             return delete_record(j, *row);
+         }, [](Journal& j) { return link_fixture(j, OnDelete::SetEmpty); }},
     };
     return kVerbs;
 }

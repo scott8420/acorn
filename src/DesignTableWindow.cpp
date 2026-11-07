@@ -513,6 +513,11 @@ db::TableDef DesignTableWindow::want() const {
         w.indexes.push_back(ix);
     }
     std::sort(w.indexes.begin(), w.indexes.end(), [](auto& a, auto& b) { return a.name < b.name; });
+    // s008: the table's links stay as they are (the graph changes them); a
+    // renamed field takes its link along, a deleted one is refused in words.
+    w.links = m_live.links;
+    for (auto& l : w.links)
+        for (auto& col : l.columns) col = renamed(col);
     // s007d: the key as the Key ticks have it (the verb's own rules: fields
     // joining become required, leaving stay required).
     bool counting = false;
