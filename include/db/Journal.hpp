@@ -249,6 +249,9 @@ private:
     std::optional<Record> get_field(const Id& id) const;
     void put_field(const Id& id, const FieldData* v);
     bool exec_all(const std::vector<std::string>& sql);
+    std::int64_t count_where(const std::string& table, const std::string& column, const char* cond) const;   // -1: failed
+    std::vector<std::string> primary_key_of(const std::string& table) const;
+    bool write_back(const std::string& table, const ColumnDef& from, const ColumnDef& to, const FieldData& before);
     std::string where_key(const Table& t) const;
 
     Connection&           m_conn;
@@ -357,9 +360,19 @@ std::expected<void, Error> delete_index(Journal& j, const std::string& table, co
 std::expected<void, Error> design_table(Journal& j, const TableDef& want);
 std::string design_label(const TableDef& live, const TableDef& want);
 // What the change takes with it, in words -- one line per field that holds
-// values ("“notes” holds 37 values -- they go with the field"). Empty:
-// nothing is lost. The designer never pre-ticks its "I understand".
+// values ("“notes” holds 37 values -- they go with the field"), and (s007c)
+// per changed field: values that won't fit its new kind ("2 of “age”'s 5
+// values won't fit a whole number -- they become empty"), empty records a
+// new "required" fills ("3 records have no “name” -- they take the default
+// “none”"). Empty: nothing is lost. The designer never pre-ticks its "I
+// understand". Refused (in words): required with empties and no default;
+// on MariaDB any emptying or filling (it can't roll the ALTER back).
 std::expected<std::vector<std::string>, Error> design_losses(Journal& j, const TableDef& want);
+// s007c -- Change Field “c” in “t”: `c` (by name) as the field should be --
+// its type, required, default. Values are converted by Acorn's rules
+// (db/Convert) and KEPT in the step, so undo puts back exactly what was there.
+// Not the key (s007d). A design_table step of one change.
+std::expected<void, Error> change_field(Journal& j, const std::string& table, const ColumnDef& c);
 // What a design step would do to the live table, as the SQL put() will run
 // (the designer's preview): `want` is the table as the designer has it.
 std::expected<std::vector<std::string>, Error> preview(Journal& j, const TableDef& want);

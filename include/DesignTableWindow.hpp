@@ -2,7 +2,9 @@
 #include "db/Journal.hpp"
 #include "widgets/Widgets.hpp"
 
+#include <gtkmm/checkbutton.h>
 #include <gtkmm/dropdown.h>
+#include <gtkmm/entry.h>
 #include <gtkmm/textview.h>
 #include <gtkmm/window.h>
 
@@ -21,8 +23,9 @@
 //
 // RULES (the data is sacred): a change that takes values with it says so in
 // words, with an "I understand" that is never ticked for you; Apply stays grey
-// until it is. Changing a field's type / required / default / the key is
-// s007c -- shown, not editable.
+// until it is. s007c: a field's type, required and default are edited in its
+// row (values that won't fit the new kind, empties a "required" fills -- said
+// in words first). The key is shown, not editable (s007d).
 //
 // The window never touches a connection: Preview / Losses / Apply are Shell's.
 // Lifetime: the NewTableWindow shape -- a hide-on-close singleton; start()
@@ -46,7 +49,9 @@ private:
         std::string    orig;               // "" = a new field
         Gtk::Box*      box = nullptr;
         Gtk::Entry*    name = nullptr;
-        Gtk::DropDown* type = nullptr;     // new fields only
+        Gtk::DropDown* type = nullptr;     // s007c: every field but the key
+        Gtk::CheckButton* required = nullptr;
+        Gtk::Entry*    dflt = nullptr;     // the default as typed ("" = none)
         Gtk::Button*   del = nullptr;
         bool           deleted = false;
     };
@@ -66,6 +71,9 @@ private:
     bool field_going(const std::string& orig) const;
     db::TableDef want() const;
     std::string why_not() const;           // the window's own refusals, in words ("" = fine)
+    // s007c: the field a row asks for (its type, required, default); the
+    // reason in words when the typed default won't do.
+    std::expected<db::ColumnDef, std::string> field_of(const FieldRow& f) const;
     void refresh();
     void on_apply();
 

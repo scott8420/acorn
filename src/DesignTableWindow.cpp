@@ -1,5 +1,6 @@
 #include "DesignTableWindow.hpp"
 #include "Registry.hpp"
+#include "db/Convert.hpp"
 
 #include <glibmm/main.h>
 #include <gtkmm/headerbar.h>
@@ -71,7 +72,7 @@ DesignTableWindow::DesignTableWindow(Gtk::Window& parent)
     set_modal(true);
     set_transient_for(parent);
     set_hide_on_close(true);
-    set_default_size(640, 800);
+    set_default_size(860, 820);
 
     auto* hb = Gtk::make_managed<Gtk::HeaderBar>();
     set_titlebar(*hb);
@@ -84,7 +85,7 @@ DesignTableWindow::DesignTableWindow(Gtk::Window& parent)
     page->append(m_title);
 
     // Fields.
-    page->append(*label("Fields -- edit a name to rename it", "heading"));
+    page->append(*label("Fields -- edit a name to rename it; pick a kind, Required, a default to change one", "heading"));
     auto* fscroll = Gtk::make_managed<Gtk::ScrolledWindow>();
     fscroll->set_policy(Gtk::PolicyType::NEVER, Gtk::PolicyType::AUTOMATIC);
     // A fixed height: the controls below must not jump as rows come and go
@@ -223,18 +224,44 @@ void DesignTableWindow::add_field_row(const db::ColumnDef* live) {
     r.name->set_name(live ? "design.field." + live->name : "design.field.new");
     r.name->signal_changed().connect([this] { rebuild_index_fields(); refresh(); });
     r.box->append(*r.name);
-    if (live) {
-        std::string what = db::to_string(db::map_type(m_dialect, live->decl_type));
-        if (live->pk_position > 0) what += live->auto_increment ? " · key, counts up" : " · key";
-        else if (!live->nullable) what += " · required";
+    const bool key = live && live->pk_position > 0;
+    const db::FieldType kind = live ? db::map_type(m_dialect, live->decl_type) : db::FieldType::Text;
+    if (key || kind == db::FieldType::Unknown) {
+        // The key (s007d), or a type Acorn doesn't map: shown, not changed.
+        std::string what = key ? std::string(db::to_string(kind)) + (live->auto_increment ? " · key, counts up" : " · key")
+                               : live->decl_type;
         auto* t = label(what, "dim-label");
-        t->set_size_request(150, -1);
-        t->set_tooltip_text(live->decl_type + " -- changing a field's type, required or default comes next (s007c)");
+        t->set_size_request(330, -1);
+        t->set_tooltip_text(key ? live->decl_type + " -- the key is not changed here yet"
+                                : live->decl_type + " -- a type Acorn doesn't map; not changed here");
         r.box->append(*t);
-        r.del = Gtk::make_managed<Gtk::Button>();
+    } else {
+        std::vector<Glib::ustring> types(std::begin(kTypeNames), std::end(kTypeNames));
+        r.type = Gtk::make_managed<Gtk::DropDown>(Gtk::StringList::create(types));
+        r.type->set_selected(static_cast<unsigned>(kind));
+        r.type->set_size_request(120, -1);
+        r.type->set_tooltip_text(live ? live->decl_type + " -- pick another kind to convert its values" : "The kind of field");
+        r.type->property_selected().signal_changed().connect([this] { refresh(); });
+        r.box->append(*r.type);
+        r.required = Gtk::make_managed<Gtk::CheckButton>("Required");
+        r.required->set_active(live && !live->nullable);
+        r.required->set_tooltip_text("Every record must hold a value here");
+        r.required->signal_toggled().connect([this] { refresh(); });
+        r.box->append(*r.required);
+        r.dflt = Gtk::make_managed<Gtk::Entry>();
+        r.dflt->set_placeholder_text("no default");
+        r.dflt->set_text(live ? db::default_text(live->default_sql) : "");
+        r.dflt->set_width_chars(10);
+        r.dflt->set_tooltip_text("What a new record holds here when nothing is given");
+        r.dflt->set_name(live ? "design.default." + live->name : "design.default.new");
+        r.dflt->signal_changed().connect([this] { refresh(); });
+        r.box->append(*r.dflt);
+    }
+    r.del = Gtk::make_managed<Gtk::Button>();
+    r.del->set_has_frame(false);
+    if (live) {
         r.del->set_icon_name("user-trash-symbolic");
-        r.del->set_has_frame(false);
-        if (live->pk_position > 0) {
+        if (key) {
             r.del->set_sensitive(false);
             r.del->set_tooltip_text("The key is not changed here");
         } else {
@@ -246,23 +273,26 @@ void DesignTableWindow::add_field_row(const db::ColumnDef* live) {
                 if (f.orig == orig) {
                     f.deleted = !f.deleted;
                     f.name->set_sensitive(!f.deleted);
-                    if (f.deleted) f.name->set_text(orig);   // a field going is not also renamed
+                    if (f.type) f.type->set_sensitive(!f.deleted);
+                    if (f.required) f.required->set_sensitive(!f.deleted);
+                    if (f.dflt) f.dflt->set_sensitive(!f.deleted);
+                    if (f.deleted) {   // a field going is not also renamed or changed
+                        const db::ColumnDef* c = m_live.column(orig);
+                        m_resetting = true;
+                        f.name->set_text(orig);
+                        if (c && f.type) f.type->set_selected(static_cast<unsigned>(db::map_type(m_dialect, c->decl_type)));
+                        if (c && f.required) f.required->set_active(!c->nullable);
+                        if (c && f.dflt) f.dflt->set_text(db::default_text(c->default_sql));
+                        m_resetting = false;
+                    }
                     f.del->set_icon_name(f.deleted ? "edit-undo-symbolic" : "user-trash-symbolic");
                     f.del->set_tooltip_text(f.deleted ? "Keep this field" : "Delete this field");
                 }
             rebuild_index_fields();
             refresh();
         });
-        r.box->append(*r.del);
     } else {
-        std::vector<Glib::ustring> types(std::begin(kTypeNames), std::end(kTypeNames));
-        r.type = Gtk::make_managed<Gtk::DropDown>(Gtk::StringList::create(types));
-        r.type->set_selected(0);
-        r.type->property_selected().signal_changed().connect([this] { refresh(); });
-        r.box->append(*r.type);
-        r.del = Gtk::make_managed<Gtk::Button>();
         r.del->set_icon_name("list-remove-symbolic");
-        r.del->set_has_frame(false);
         r.del->set_tooltip_text("Don't add this field");
         Gtk::Box* box = r.box;
         r.del->signal_clicked().connect([this, box] {
@@ -270,12 +300,34 @@ void DesignTableWindow::add_field_row(const db::ColumnDef* live) {
                 if (it->box == box) { m_field_box.remove(*box); m_fields.erase(it); break; }
             refresh();
         });
-        r.box->append(*r.del);
         r.name->signal_activate().connect([this] { on_apply(); });
     }
+    r.box->append(*r.del);
     m_field_box.append(*r.box);
     m_fields.push_back(r);
     rebuild_index_fields();
+}
+
+std::expected<db::ColumnDef, std::string> DesignTableWindow::field_of(const FieldRow& f) const {
+    const std::string n = f.name->get_text();
+    const db::ColumnDef* c = f.orig.empty() ? nullptr : m_live.column(f.orig);
+    db::ColumnDef x = c ? *c : db::ColumnDef{n, db::decl_for(m_dialect, db::FieldType::Text), true, std::nullopt, 0, false};
+    x.name = n;
+    if (!f.type) return x;   // the key, or a type Acorn doesn't map: as it is
+    const unsigned sel = f.type->get_selected();
+    const auto ft = static_cast<db::FieldType>(sel < kTypeCount ? sel : 0u);
+    // The same kind keeps the engine's own spelling ("VARCHAR(40)" stays).
+    if (!c || db::map_type(m_dialect, c->decl_type) != ft) x.decl_type = db::decl_for(m_dialect, ft);
+    x.nullable = !f.required->get_active();
+    const std::string typed = f.dflt->get_text();
+    if (c && typed == db::default_text(c->default_sql) && db::map_type(m_dialect, c->decl_type) == ft) {
+        x.default_sql = c->default_sql;   // untouched: the engine's own words
+    } else {
+        auto d = db::default_sql_for(m_dialect, ft, n.empty() ? f.orig : n, typed);
+        if (!d) return std::unexpected(d.error());
+        x.default_sql = *d;
+    }
+    return x;
 }
 
 void DesignTableWindow::add_index_row(const db::IndexDef& ix, bool made) {
@@ -357,20 +409,17 @@ db::TableDef DesignTableWindow::want() const {
     w.name = m_live.name;
     w.rows = m_live.rows;
     for (const auto& f : m_fields) {
-        if (f.orig.empty()) {
-            const std::string n = f.name->get_text();
-            if (n.empty()) continue;   // an unused new line
-            const unsigned sel = f.type->get_selected();
-            const auto ft = static_cast<db::FieldType>(sel < kTypeCount ? sel : 0u);
-            w.columns.push_back({n, db::decl_for(m_dialect, ft), true, std::nullopt, 0, false});
-            continue;
-        }
+        if (f.orig.empty() && f.name->get_text().empty()) continue;   // an unused new line
         if (f.deleted) continue;
-        const db::ColumnDef* c = m_live.column(f.orig);
-        if (!c) continue;
-        db::ColumnDef x = *c;
-        x.name = f.name->get_text();
-        w.columns.push_back(x);
+        if (!f.orig.empty() && !m_live.column(f.orig)) continue;
+        auto x = field_of(f);
+        if (x) { w.columns.push_back(*x); continue; }
+        // A default that won't do: why_not() says so and Apply stays grey.
+        db::ColumnDef keep = f.orig.empty() ? db::ColumnDef{f.name->get_text(), db::decl_for(m_dialect, db::FieldType::Text),
+                                                            true, std::nullopt, 0, false}
+                                            : *m_live.column(f.orig);
+        keep.name = f.name->get_text();
+        w.columns.push_back(keep);
     }
     for (const auto& r : m_indexes) {
         if (r.deleted) continue;
@@ -389,7 +438,7 @@ db::TableDef DesignTableWindow::want() const {
 
 std::string DesignTableWindow::why_not() const {
     std::vector<std::string> seen;
-    int renames = 0, deleted = 0, added = 0;
+    int renames = 0, deleted = 0, added = 0, changed = 0;
     const db::ColumnDef* gone = nullptr;
     const FieldRow* fresh = nullptr;
     for (const auto& f : m_fields) {
@@ -399,18 +448,28 @@ std::string DesignTableWindow::why_not() const {
         if (f.orig.empty()) { ++added; fresh = &f; }
         else if (n != f.orig) ++renames;
         if (auto why = db::check_name("The field", n); !why.empty()) return sentence(why);
+        auto x = field_of(f);
+        if (!x) return sentence(x.error());
+        if (!f.orig.empty()) {
+            if (const db::ColumnDef* c = m_live.column(f.orig)) {
+                db::ColumnDef same = *x;
+                same.name = c->name;
+                if (!(same == *c)) ++changed;
+            }
+        }
         for (const auto& s : seen)
             if (lower(s) == lower(n)) return "Two fields are named " + curly(n) + ".";
         seen.push_back(n);
     }
     if (renames > 1) return "Rename one field at a time -- Apply, then the next.";
-    if (renames == 1 && (deleted || added)) return "A rename is a step of its own -- Apply it, then the rest.";
+    if (renames == 1 && (deleted || added || changed))
+        return "A rename is a step of its own -- Apply it, then the rest.";
     // Pictures carry no field identity: one field gone + one of the same kind
     // come would read as a rename. Two steps.
     if (deleted == 1 && added == 1 && gone && fresh) {
-        const unsigned sel = fresh->type->get_selected();
-        const auto ft = static_cast<db::FieldType>(sel < kTypeCount ? sel : 0u);
-        if (db::map_type(m_dialect, gone->decl_type) == ft && gone->nullable)
+        auto fx = field_of(*fresh);
+        if (fx && db::map_type(m_dialect, gone->decl_type) == db::map_type(m_dialect, fx->decl_type) &&
+            gone->nullable == fx->nullable && gone->default_sql == fx->default_sql)
             return "Deleting " + curly(gone->name) + " and adding a field of the same kind in one step would read as a "
                    "rename -- Apply the delete first (or rename " + curly(gone->name) + " instead).";
     }
@@ -449,16 +508,20 @@ void DesignTableWindow::refresh() {
         if (!p) why = sentence(p.error().message);
         else plan = *p;
     }
-    if (why.empty())
-        m_sql.get_buffer()->set_text(plan.empty() ? "-- nothing to change yet" : join(plan, ";\n\n") + ";");
-    else
-        m_sql.get_buffer()->set_text("-- " + why);
-
+    // The words before the SQL box: a refusal about the DATA (required with
+    // empty records and no default ...) shows there like any other (s007c).
     std::vector<std::string> losses;
     if (why.empty() && !plan.empty() && m_losses_fn) {
         auto l = m_losses_fn(w);
         if (!l) why = sentence(l.error().message);
         else losses = *l;
+    }
+    if (why.empty()) {
+        std::vector<std::string> shown;   // a comment line (a write-back) takes no ';'
+        for (const auto& st : plan) shown.push_back(st.starts_with("--") ? st : st + ";");
+        m_sql.get_buffer()->set_text(plan.empty() ? "-- nothing to change yet" : join(shown, "\n\n"));
+    } else {
+        m_sql.get_buffer()->set_text("-- " + why);
     }
     const std::string loss_text = losses.empty() ? std::string{} : join(losses, ".\n") + ".";
     if (loss_text != std::string(m_losses.get_text())) {

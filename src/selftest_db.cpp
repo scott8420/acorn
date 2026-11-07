@@ -8,6 +8,7 @@
 #include "db/Engine.hpp"
 #include "db/Journal.hpp"
 #include "db/Browse.hpp"
+#include "db/Convert.hpp"
 #include "db/Loader.hpp"
 #include "db/NewFile.hpp"
 #include "db/Types.hpp"
@@ -479,8 +480,66 @@ void test_design_pure() {
     two.columns[1].name = "nm";
     two.columns.push_back({"more", "TEXT", true, std::nullopt, 0, false});
     auto p2 = plan_alter(Dialect::SQLite, '"', live, two);
-    check("design: refused in words -- a type change, the key",
-          !pt && pt.error().find("type") != std::string::npos && !pky && pky.error().find("key") != std::string::npos, "");
+    check("design: the key is refused in words (s007d); a type change is planned (s007c)",
+          pt && !pky && pky.error().find("key") != std::string::npos, pky ? "planned!" : pky.error());
+
+    // s007c -- field changes, per engine.
+    TableDef chg = live;   // name: Text -> Integer, required, default 0
+    chg.columns[1] = {"name", "INTEGER", false, std::string("0"), 0, false};
+    auto sq = plan_alter(Dialect::SQLite, '"', live, chg);
+    const std::vector<std::string> sq_want = {
+        "CREATE TABLE \"acorn_rebuild_people\" (\n  \"id\" INTEGER PRIMARY KEY AUTOINCREMENT,\n"
+        "  \"name\" INTEGER NOT NULL DEFAULT 0,\n  \"age\" INTEGER\n)",
+        "INSERT INTO \"acorn_rebuild_people\" (\"id\", \"name\", \"age\")\n  SELECT \"id\", COALESCE(\"name\", 0), \"age\" FROM \"people\"",
+        "DELETE FROM sqlite_sequence WHERE name = 'acorn_rebuild_people'",
+        "INSERT INTO sqlite_sequence (name, seq)\n  SELECT 'acorn_rebuild_people', seq FROM sqlite_sequence WHERE name = 'people'",
+        "DROP TABLE \"people\"",
+        "ALTER TABLE \"acorn_rebuild_people\" RENAME TO \"people\"",
+        "-- then each record's \"name\" is written back as a whole number (Acorn's rules; what won't fit takes the default)",
+        "CREATE INDEX \"people_age\" ON \"people\" (\"age\")"};
+    check("change: SQLite makes the table again -- copy (empties filled), count kept, swap, values written back, indexes",
+          sq && *sq == sq_want, sq ? (sq->size() > 1 ? (*sq)[1] : "") : sq.error());
+    TableDef pgl = live, pgw = live;
+    pgl.columns[1] = {"name", "text", true, std::string("'x'::text"), 0, false};
+    pgw.columns[1] = {"name", "bigint", false, std::string("0"), 0, false};
+    auto pg = plan_alter(Dialect::PostgreSQL, '"', pgl, pgw);
+    const std::string A = "ALTER TABLE \"people\" ALTER COLUMN \"name\" ";
+    const std::vector<std::string> pg_want = {
+        A + "DROP DEFAULT", A + "TYPE bigint USING NULL::bigint",
+        "-- then each record's \"name\" is written back as a whole number (Acorn's rules; what won't fit takes the default)",
+        A + "SET DEFAULT 0", "UPDATE \"people\" SET \"name\" = 0 WHERE \"name\" IS NULL", A + "SET NOT NULL"};
+    check("change: PostgreSQL -- empty it (USING NULL), write back, default, fill, then required",
+          pg && *pg == pg_want, pg ? (pg->size() > 1 ? (*pg)[1] : "") : pg.error());
+    TableDef pgd = pgl;
+    pgd.columns[1].nullable = false;
+    pgd.columns[1].default_sql = std::string("'none'");
+    auto pg2 = plan_alter(Dialect::PostgreSQL, '"', pgl, pgd);
+    check("change: PostgreSQL -- same type: just the default and required, empties filled first",
+          pg2 && pg2->size() == 3 && (*pg2)[0] == A + "SET DEFAULT 'none'" &&
+          (*pg2)[1] == "UPDATE \"people\" SET \"name\" = 'none' WHERE \"name\" IS NULL" && (*pg2)[2] == A + "SET NOT NULL",
+          pg2 && !pg2->empty() ? (*pg2)[0] : "");
+    TableDef myl = live, myw = live;
+    myl.columns[2].decl_type = "bigint";
+    myw.columns[2] = {"age", "varchar(255)", true, std::string("'?'"), 0, false};
+    auto my = plan_alter(Dialect::MariaDB, '`', myl, myw);
+    check("change: MariaDB -- ONE ALTER with MODIFY COLUMN, then Acorn's reading written where it differs",
+          my && my->size() == 2 && (*my)[0] == "ALTER TABLE `people`\n  MODIFY COLUMN `age` varchar(255) DEFAULT '?'" &&
+          (*my)[1].starts_with("-- then each record's `age` is written back as text"), my && !my->empty() ? (*my)[0] : "");
+    TableDef rk = live;
+    rk.columns[1].name = "nm";
+    rk.columns[2].decl_type = "TEXT";
+    auto prk = plan_alter(Dialect::SQLite, '"', live, rk);
+    TableDef auto_ix = live;
+    auto_ix.indexes.push_back({"sqlite_autoindex_people_1", {"name"}, true, false});
+    TableDef auto_w = auto_ix;
+    auto_w.columns[2].decl_type = "TEXT";
+    auto pai = plan_alter(Dialect::SQLite, '"', auto_ix, auto_w);
+    check("change: refused -- a rename with a change in one step; a SQLite table with a UNIQUE rule inside",
+          !prk && prk.error().find("rename") != std::string::npos && !pai &&
+          pai.error().find("UNIQUE") != std::string::npos, pai ? "planned!" : pai.error());
+    check("change: labels -- one field changed is Change Field; with more, Change Table",
+          verbs::design_label(live, chg) == "Change Field “name” in “people”" &&
+          verbs::design_label(live, rk) == "Change Table “people”", verbs::design_label(live, chg));
     check("design: a name changed AND a field added is not a rename -- drop + adds",
           p2 && p2->size() == 3 && (*p2)[0].find("DROP COLUMN \"name\"") != std::string::npos, p2 ? "" : p2.error());
 
@@ -704,6 +763,55 @@ void test_records(Journal& j, Gate& g, Engine* e, const ConnectParams& ro, const
 }
 
 // ── s006b: browse ────────────────────────────────────────────────────────────
+// s007c -- Acorn's own conversion rules (db/Convert): the designer's words and
+// what the step does are this one function.
+void test_convert_pure() {
+    using FT = FieldType;
+    auto to = [](const Value& v, FT from, FT t) { return convert_value(v, from, t); };
+    check("convert: to Integer -- ints, whole reals, text that reads as one (spaces round it); 12.5 / 4x / blob won't",
+          to(Value(7), FT::Integer, FT::Integer) == Value(7) && to(Value(12.0), FT::Number, FT::Integer) == Value(12) &&
+          to(Value(" 42 "), FT::Text, FT::Integer) == Value(42) && to(Value("+3"), FT::Text, FT::Integer) == Value(3) &&
+          !to(Value(12.5), FT::Number, FT::Integer) && !to(Value("4x"), FT::Text, FT::Integer) &&
+          !to(Value(""), FT::Text, FT::Integer) && !to(Value(Blob{1, 2}), FT::Container, FT::Integer), "");
+    check("convert: to Text -- numbers as written, Yes-No as Yes / No, text as is, NULL stays NULL",
+          to(Value(12), FT::Integer, FT::Text) == Value("12") && to(Value(12.5), FT::Number, FT::Text) == Value("12.5") &&
+          to(Value(3.0), FT::Number, FT::Text) == Value("3") && to(Value(1), FT::Boolean, FT::Text) == Value("Yes") &&
+          to(Value(0), FT::Boolean, FT::Text) == Value("No") && to(Value(1), FT::Integer, FT::Text) == Value("1") &&
+          to(Value(), FT::Integer, FT::Text) == Value() && !to(Value(Blob{1}), FT::Container, FT::Text), "");
+    check("convert: to Number / Yes-No -- numbers and their text; yes/no/true/false/1/0, nothing else",
+          to(Value(2), FT::Integer, FT::Number) == Value(2.0) && to(Value("0.25"), FT::Text, FT::Number) == Value(0.25) &&
+          !to(Value("nan"), FT::Text, FT::Number) && !to(Value("1e999"), FT::Text, FT::Number) &&
+          to(Value("Yes"), FT::Text, FT::Boolean) == Value(1) && to(Value(" FALSE "), FT::Text, FT::Boolean) == Value(0) &&
+          to(Value(1.0), FT::Number, FT::Boolean) == Value(1) && !to(Value(2), FT::Integer, FT::Boolean) &&
+          !to(Value("maybe"), FT::Text, FT::Boolean), "");
+    check("convert: dates, times, timestamps by shape; a date gains 00:00:00; never cut",
+          to(Value("2026-11-07"), FT::Text, FT::Date) == Value("2026-11-07") && !to(Value("2026-13-01"), FT::Text, FT::Date) &&
+          !to(Value("11/07/2026"), FT::Text, FT::Date) && to(Value("09:30"), FT::Text, FT::Time) == Value("09:30") &&
+          to(Value("23:59:59.5"), FT::Text, FT::Time) && !to(Value("24:00"), FT::Text, FT::Time) &&
+          to(Value("2026-11-07"), FT::Date, FT::Timestamp) == Value("2026-11-07 00:00:00") &&
+          to(Value("2026-11-07T09:30:00"), FT::Text, FT::Timestamp) &&
+          !to(Value("2026-11-07 09:30"), FT::Timestamp, FT::Date) && !to(Value(20261107), FT::Integer, FT::Date), "");
+    check("convert: native shapes are put back untouched",
+          native_to(Value(1), FT::Boolean) && native_to(Value("x"), FT::Date) && !native_to(Value("1"), FT::Integer) &&
+          native_to(Value(1), FT::Number) && !native_to(Value(1.5), FT::Integer), "");
+    auto ds = [](Dialect d, FT t, const std::string& typed) {
+        auto r = default_sql_for(d, t, "f", typed);
+        return r ? r->value_or("(none)") : "!" + r.error();
+    };
+    check("defaults: typed -> SQL (quoted text, bare numbers, Yes -> 1 / TRUE on PostgreSQL, '' -> none, refusals)",
+          ds(Dialect::SQLite, FT::Text, "it's") == "'it''s'" && ds(Dialect::SQLite, FT::Integer, " 5 ") == "5" &&
+          ds(Dialect::SQLite, FT::Number, "2.50") == "2.5" && ds(Dialect::SQLite, FT::Boolean, "yes") == "1" &&
+          ds(Dialect::PostgreSQL, FT::Boolean, "no") == "FALSE" && ds(Dialect::SQLite, FT::Text, "") == "(none)" &&
+          ds(Dialect::SQLite, FT::Date, "2026-01-02") == "'2026-01-02'" &&
+          ds(Dialect::SQLite, FT::Integer, "x").starts_with("!the default for") &&
+          ds(Dialect::SQLite, FT::Container, "x").starts_with("!"), ds(Dialect::SQLite, FT::Number, "2.50"));
+    check("defaults: SQL -> what the designer shows (quotes, '' and PostgreSQL casts undone)",
+          default_text(std::string("'it''s'")) == "it's" && default_text(std::string("'x'::text")) == "x" &&
+          default_text(std::string("'a b'::character varying")) == "a b" && default_text(std::string("0")) == "0" &&
+          default_text(std::string("CURRENT_TIMESTAMP")) == "CURRENT_TIMESTAMP" && default_text(std::nullopt).empty() &&
+          default_text(std::string("(7)::bigint")) == "7", default_text(std::string("'x'::text")));
+}
+
 void test_browse_pure() {
     check("browse: cell text -- NULL empty, int, real, text, yes/no, blob",
           cell_text(Value(), FieldType::Text).empty() && cell_text(Value(42), FieldType::Integer) == "42" &&
@@ -945,6 +1053,129 @@ void test_design(Journal& j, Gate& g, Engine* e, const std::string& P) {
           am ? "applied!" : am.error().message);
     auto none = verbs::design_table(j, TableDef::from(*info()));
     check(P + "design: nothing changed -- no step", none && j.can_redo(), none ? "" : none.error().message);
+
+    // ── s007c: change a field -- type, required, default ──────────────────
+    const bool maria = d == Dialect::MariaDB;
+    auto col = [&](const std::string& n) {
+        auto i = info();
+        const Column* c = i ? i->column(n) : nullptr;
+        return c ? std::optional<Column>(*c) : std::nullopt;
+    };
+    auto def_of = [&](const std::string& n, FieldType ft, bool nullable, std::optional<std::string> dflt = std::nullopt) {
+        TableDef w = TableDef::from(*info());
+        for (auto& c : w.columns)
+            if (c.name == n) { c.decl_type = ft == map_type(d, c.decl_type) ? c.decl_type : decl_for(d, ft);
+                               c.nullable = nullable; c.default_sql = dflt; }
+        return w;
+    };
+    const auto ixs = info()->indexes.size();
+    const std::vector<Value> paris(3, Value("Paris"));
+    // Integer -> Text: every value fits; undo puts the NUMBERS back, not "36".
+    TableDef at = def_of("age", FieldType::Text, true);
+    auto atw = verbs::design_losses(j, at);
+    auto atd = verbs::design_table(j, at);
+    check(P + "change: Integer -> Text -- no words, one step, the values as text, indexes kept",
+          atw && atw->empty() && atd && col("age") && col("age")->type == FieldType::Text &&
+          ages("age") == std::vector<Value>{Value("36"), Value("85"), Value()} && info()->indexes.size() == ixs &&
+          j.undo_label() == "Change Field “age” in “" + T + "”",
+          !atw ? atw.error().message : !atd ? atd.error().message : (ages("age").empty() ? "" : ages("age")[0].to_display()));
+    auto atu = j.undo();
+    check(P + "change: undo -- the field a whole number again, 36 / 85 exactly",
+          atu && col("age") && col("age")->type == FieldType::Integer && ages("age") == want_ages,
+          atu ? (ages("age").empty() ? "" : ages("age")[0].to_display()) : atu.error().message);
+    auto atr = j.redo();
+    check(P + "change: redo -- text again", atr && col("age") && col("age")->type == FieldType::Text &&
+          ages("age") == std::vector<Value>{Value("36"), Value("85"), Value()}, atr ? "" : atr.error().message);
+    (void)j.undo();
+
+    // Text -> Integer: "Paris" won't fit -- said in words; becomes empty; undo brings it back.
+    TableDef ci = def_of("city", FieldType::Integer, true);
+    auto ciw = verbs::design_losses(j, ci);
+    auto cid = verbs::design_table(j, ci);
+    if (maria) {
+        check(P + "change: MariaDB refuses emptying values that won't fit (it can't roll the ALTER back), untouched",
+              !ciw && !cid && ages("city") == paris && col("city")->type == FieldType::Text,
+              cid ? "changed!" : cid.error().message);
+    } else {
+        check(P + "change: Text -> Integer -- the misfits said in words, then emptied",
+              ciw && ciw->size() == 1 &&
+              (*ciw)[0] == "3 of “city”'s 3 values won't fit a whole number -- they become empty" &&
+              cid && col("city") && col("city")->type == FieldType::Integer &&
+              ages("city") == std::vector<Value>(3, Value()) && info()->indexes.size() == ixs,
+              !ciw ? ciw.error().message : ciw->empty() ? "no words" : (*ciw)[0]);
+        auto ciu = j.undo();
+        check(P + "change: undo -- “Paris” back in every record, Text again, indexes kept",
+              ciu && ages("city") == paris && col("city")->type == FieldType::Text && info()->indexes.size() == ixs,
+              ciu ? "" : ciu.error().message);
+        // The data rule in the store: a type change on a field holding values
+        // that the step doesn't keep is refused.
+        auto raw2 = j.run("Raw change", {Store::table_id(T)}, [&](Store& s) { s.put(Store::table_id(T), ci); });
+        check(P + "change: the store never converts values the step doesn't keep",
+              !raw2 && raw2.error().code == Error::Code::Constraint && ages("city") == paris,
+              raw2 ? "changed!" : raw2.error().message);
+    }
+
+    // Required: an empty record and no default -> refused in words; with one,
+    // the empties take it (said first), and undo empties them again.
+    TableDef rq = def_of("age", FieldType::Integer, false);
+    auto rqw = verbs::design_losses(j, rq);
+    auto rqd = verbs::design_table(j, rq);
+    check(P + "change: required with an empty record and no default -- refused in words, untouched",
+          !rqw && rqw.error().message.find("needs a default") != std::string::npos && !rqd && col("age")->nullable,
+          rqw ? "allowed!" : rqw.error().message);
+    TableDef rq2 = def_of("age", FieldType::Integer, false, std::string("18"));
+    auto rq2w = verbs::design_losses(j, rq2);
+    auto rq2d = verbs::design_table(j, rq2);
+    if (maria) {
+        check(P + "change: MariaDB refuses filling empty records too", !rq2w && !rq2d && col("age")->nullable,
+              rq2d ? "changed!" : rq2d.error().message);
+    } else {
+        check(P + "change: required + default -- the fill said in words, then made: 18 where it was empty",
+              rq2w && rq2w->size() == 1 && (*rq2w)[0] == "1 record has no “age” -- it takes the default “18”" &&
+              rq2d && !col("age")->nullable && default_text(col("age")->default_sql) == "18" &&
+              ages("age") == std::vector<Value>{Value(36), Value(85), Value(18)},
+              !rq2w ? rq2w.error().message : rq2w->empty() ? "no words" : (*rq2w)[0]);
+        auto rqu = j.undo();
+        check(P + "change: undo -- optional again, no default, the record empty again",
+              rqu && col("age")->nullable && !col("age")->default_sql && ages("age") == want_ages,
+              rqu ? "" : rqu.error().message);
+    }
+    // A default alone: nothing to say, nothing changes in the records.
+    TableDef dft = def_of("name", FieldType::Text, true, std::string("'nobody'"));
+    auto dfw = verbs::design_losses(j, dft);
+    auto dfd = verbs::design_table(j, dft);
+    check(P + "change: a default alone -- no words, one step, read back as the same words",
+          dfw && dfw->empty() && dfd && default_text(col("name")->default_sql) == "nobody",
+          dfd ? (col("name")->default_sql ? *col("name")->default_sql : "none") : dfd.error().message);
+    (void)j.undo();
+    check(P + "change: undo -- no default again", col("name") && !col("name")->default_sql, "");
+
+    if (d == Dialect::SQLite) {
+        // The rebuild keeps the count: ids are never reused, even past a
+        // deleted last record.
+        auto seq = [&] {
+            auto r = g.query("SELECT seq FROM sqlite_sequence WHERE name = '" + T + "'");
+            return r && !r->rows.empty() ? r->rows[0][0] : Value();
+        };
+        auto made = verbs::new_record(j, T, {"name"}, {Value("Temp")});
+        if (made) (void)verbs::delete_record(j, *made);
+        const Value s0 = seq();
+        auto rb = verbs::design_table(j, def_of("city", FieldType::Text, true, std::string("'here'")));
+        auto next = verbs::new_record(j, T, {"name"}, {Value("After")});
+        std::string tb;
+        std::vector<Value> key;
+        if (next) Store::parse_row_id(*next, tb, key);
+        check(P + "change: SQLite rebuild keeps the id count (a deleted last id is not handed out again)",
+              rb && seq().as_int() && s0.as_int() && !key.empty() && key[0].as_int() &&
+              *key[0].as_int() == *s0.as_int() + 1, rb ? s0.to_display() + " -> " + seq().to_display() : rb.error().message);
+        (void)j.undo();
+        (void)j.undo();
+        (void)g.inner().query("CREATE TRIGGER acorn_design_tr AFTER INSERT ON " + g.quote_ident(T) + " BEGIN SELECT 1; END");
+        auto tw = verbs::design_losses(j, def_of("city", FieldType::Text, true, std::string("'here'")));
+        check(P + "change: SQLite -- a trigger on the table stops the rebuild, in words",
+              !tw && tw.error().message.find("trigger") != std::string::npos, tw ? "allowed!" : tw.error().message);
+        (void)g.inner().query("DROP TRIGGER acorn_design_tr");
+    }
     check(P + "design: nothing wrote outside the door", j.strays() == 1, std::to_string(j.strays()));
     (void)g.inner().query("DROP TABLE " + g.quote_ident(T));
     j.clear();
@@ -1217,6 +1448,7 @@ void db_tests(CheckFn fn, int& skip_count) {
     test_types();
     test_journal_pure();
     test_design_pure();
+    test_convert_pure();
     test_row_ids();
     test_browse_pure();
     test_loader();
