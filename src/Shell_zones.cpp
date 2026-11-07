@@ -50,11 +50,12 @@ void Shell::build_shell() {  // zone: window + sidebar + stack
 void Shell::build_pages() {  // zone: Acorn's areas
     build_connect_page();
     build_tables_page();    // s004c
+    build_browse_page();    // s006b
 
     // Per-area tint hooks (REQUIREMENTS §2): the window carries .page-<area>
     // for whichever area is showing.
     m_stack.property_visible_child_name().signal_changed().connect([this] {
-        for (const char* a : {"page-connect", "page-tables"}) remove_css_class(a);
+        for (const char* a : {"page-connect", "page-tables", "page-browse"}) remove_css_class(a);
         add_css_class("page-" + std::string(m_stack.get_visible_child_name()));
     });
 }

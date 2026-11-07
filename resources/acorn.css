@@ -135,3 +135,29 @@ window.acorn button.acorn-link:not(.acorn-primary):not(.titlebutton) {
     background: transparent; border: none; color: @acorn_amber; padding: 0 4px; min-height: 0;
 }
 window.acorn button.acorn-link:not(.acorn-primary):not(.titlebutton):hover { text-decoration: underline; }
+
+/* s006b -- Browse: cards on calm panels, a dense grid. */
+.acorn-card {
+    background: @acorn_panel;
+    border-radius: 12px;
+    padding: 12px 14px;
+}
+.acorn-cards flowboxchild { padding: 0; border-radius: 12px; }
+.acorn-cards flowboxchild:selected .acorn-card { box-shadow: inset 0 0 0 2px @acorn_amber; }
+.acorn-card-title  { font-weight: 700; font-size: 12pt; color: @acorn_ink; }
+.acorn-field-name  { color: @acorn_ink_dim; font-size: 9pt; }
+.acorn-null        { color: @acorn_ink_dim; }
+.acorn-grid-head   { border-bottom: 1px solid alpha(@acorn_ink, 0.15); }
+/* Same weight as the skin's button rule (window.acorn button:not():not()). */
+window.acorn button.acorn-grid-heading:not(.acorn-primary):not(.titlebutton) {
+    padding: 4px 10px; font-weight: 700; color: @acorn_amber; border-radius: 6px;
+    background: transparent; border: none; box-shadow: none; min-height: 0; }
+window.acorn button.acorn-grid-heading:not(.acorn-primary):not(.titlebutton):hover { background: rgba(255, 255, 255, 0.06); }
+window.acorn .acorn-view-toggle button:not(.acorn-primary):not(.titlebutton):checked {
+    background: rgba(245, 185, 66, 0.28); color: @acorn_ink; }
+.acorn-grid-cell   { padding: 3px 10px; font-feature-settings: "tnum"; }
+.acorn-grid-rows, .acorn-grid-rows row { background: transparent; color: @acorn_ink; }
+.acorn-grid-rows row:nth-child(even) { background: alpha(@acorn_ink, 0.03); }
+.acorn-grid-rows row:selected { background: rgba(245, 185, 66, 0.20); }
+window.acorn button:not(.acorn-primary):not(.titlebutton):disabled { opacity: 0.45; }
+.acorn-field-entry { min-height: 30px; }

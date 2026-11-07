@@ -7,6 +7,7 @@
 // every engine; an engine that can't run is reported SKIPPED, never a pass.
 #include "db/Engine.hpp"
 #include "db/Journal.hpp"
+#include "db/Browse.hpp"
 #include "db/Loader.hpp"
 #include "db/NewFile.hpp"
 #include "db/Types.hpp"
@@ -465,12 +466,251 @@ void test_journal_pure() {
           !check_new_table(unnamed, s).empty() && !check_new_table(longname, s).empty(), "");
 }
 
+// ── s006: record ids ─────────────────────────────────────────────────────────
+void test_row_ids() {
+    auto round = [](const std::string& t, std::vector<Value> k) {
+        const auto id = Store::row_id(t, k);
+        std::string t2;
+        std::vector<Value> k2;
+        return !id.empty() && Store::parse_row_id(id, t2, k2) && t2 == t && k2 == k;
+    };
+    check("row id: integer key round-trips", round("customers", {Value(std::int64_t{7})}), Store::row_id("customers", {Value(7)}));
+    check("row id: text with : ; and quotes, a table with : in its name",
+          round("odd:table;x", {Value("a:b;c\"d"), Value(std::int64_t{-3})}), "");
+    check("row id: composite (text, real, int) round-trips",
+          round("t", {Value("k"), Value(2.5), Value(std::int64_t{9})}), "");
+    check("row id: empty text key round-trips", round("t", {Value("")}), "");
+    check("row id: NULL / blob / no key -> no id",
+          Store::row_id("t", {Value()}).empty() && Store::row_id("t", {Value(Blob{1})}).empty() &&
+          Store::row_id("t", {}).empty(), "");
+    std::string t; std::vector<Value> k;
+    check("row id: garbage is not a row id",
+          !Store::parse_row_id("table:x", t, k) && !Store::parse_row_id("row:99:x:i1;", t, k) &&
+          !Store::parse_row_id("row:1:x:q1;", t, k) && !Store::parse_row_id("row:1:x:", t, k) &&
+          !Store::parse_row_id("row:1:x:i1", t, k), "");
+    check("row id: describe() says table and key",
+          Store::describe(Store::row_id("customers", {Value(7)})) == "“customers” record 7",
+          Store::describe(Store::row_id("customers", {Value(7)})));
+}
+
+// s006: records through the door -- every engine.
+void test_records(Journal& j, Gate& g, Engine* e, const ConnectParams& ro, const std::string& P) {
+    const Dialect d = e->dialect();
+    TableDef t;
+    t.name = "acorn_people";
+    t.columns = {{"id", decl_for(d, FieldType::Integer), false, std::nullopt, 1, true},
+                 {"name", decl_for(d, FieldType::Text), false, std::nullopt, 0, false},
+                 {"age", decl_for(d, FieldType::Integer), true, std::nullopt, 0, false}};
+    auto mk = verbs::new_table(j, t);
+    check(P + "records: fixture table", mk.has_value(), mk ? "" : mk.error().message);
+    if (!mk) return;
+
+    auto a = verbs::new_record(j, "acorn_people", {"name", "age"}, {Value("Ada"), Value(36)});
+    auto b = verbs::new_record(j, "acorn_people", {"name"}, {Value("Grace")});
+    check(P + "records: New Record learns the engine's key (1, 2)",
+          a && b && *a == Store::row_id("acorn_people", {Value(1)}) && *b == Store::row_id("acorn_people", {Value(2)}),
+          a ? (b ? *b : b.error().message) : a.error().message);
+    if (!a || !b) return;
+    check(P + "records: the label names the table", j.undo_label() == "New Record in “acorn_people”", j.undo_label());
+
+    const auto steps = j.size();
+    auto same = verbs::set_field(j, *a, "name", Value("Ada"));
+    check(P + "records: a field set to what it holds is no step", same && j.size() == steps,
+          same ? "" : same.error().message);
+    auto ed = verbs::set_field(j, *a, "age", Value(37));
+    auto age = g.query("SELECT " + g.quote_ident("age") + " FROM " + g.quote_ident("acorn_people") + " WHERE " +
+                       g.quote_ident("id") + " = 1");
+    check(P + "records: Edit writes one field, one step, named",
+          ed && j.size() == steps + 1 && age && num(age->rows[0][0]) == 37.0 && j.undo_label() == "Edit “age”",
+          ed ? j.undo_label() : ed.error().message);
+
+    auto key = verbs::set_field(j, *a, "id", Value(99));
+    check(P + "records: a key field is refused, no step", !key && j.size() == steps + 1,
+          key ? "changed!" : key.error().message);
+    auto nul = verbs::set_field(j, *a, "name", Value());
+    auto name = g.query("SELECT " + g.quote_ident("name") + " FROM " + g.quote_ident("acorn_people") + " WHERE " +
+                        g.quote_ident("id") + " = 1");
+    check(P + "records: an engine refusal (NOT NULL) rolls back, no step, the reason returned",
+          !nul && j.size() == steps + 1 && name && name->rows[0][0] == Value("Ada") && !nul.error().message.empty(),
+          nul ? "written!" : nul.error().message);
+
+    // Another tool changes the record: undo refuses, touches nothing.
+    (void)g.inner().query("UPDATE " + g.quote_ident("acorn_people") + " SET " + g.quote_ident("age") +
+                          " = 50 WHERE " + g.quote_ident("id") + " = 1");
+    auto ur = j.undo();
+    auto age2 = g.query("SELECT " + g.quote_ident("age") + " FROM " + g.quote_ident("acorn_people") + " WHERE " +
+                        g.quote_ident("id") + " = 1");
+    check(P + "records: undo refused when the record changed since -- nothing touched",
+          !ur && ur.error().code == Error::Code::Changed && age2 && num(age2->rows[0][0]) == 50.0 && j.can_undo(),
+          ur ? "undone!" : ur.error().message);
+    (void)g.inner().query("UPDATE " + g.quote_ident("acorn_people") + " SET " + g.quote_ident("age") +
+                          " = 37 WHERE " + g.quote_ident("id") + " = 1");
+    auto ok = j.undo();
+    auto age3 = g.query("SELECT " + g.quote_ident("age") + " FROM " + g.quote_ident("acorn_people") + " WHERE " +
+                        g.quote_ident("id") + " = 1");
+    check(P + "records: put back as the step left it, undo runs", ok && age3 && num(age3->rows[0][0]) == 36.0,
+          ok ? "" : ok.error().message);
+
+    // Delete, then another tool takes the key: redo refuses... and undo of the
+    // delete refuses while the key is taken.
+    auto del = verbs::delete_record(j, *b);
+    check(P + "records: Delete Record removes it, named",
+          del && !j.store().get(*b) && j.undo_label() == "Delete Record from “acorn_people”",
+          del ? j.undo_label() : del.error().message);
+    (void)g.inner().query("INSERT INTO " + g.quote_ident("acorn_people") + " (" + g.quote_ident("id") + ", " +
+                          g.quote_ident("name") + ") VALUES (2, 'Impostor')");
+    auto ud = j.undo();
+    auto who = g.query("SELECT " + g.quote_ident("name") + " FROM " + g.quote_ident("acorn_people") + " WHERE " +
+                       g.quote_ident("id") + " = 2");
+    check(P + "records: undo of a delete refused when the key was taken since -- the other record kept",
+          !ud && ud.error().code == Error::Code::Changed && who && who->rows.size() == 1 &&
+          who->rows[0][0] == Value("Impostor"), ud ? "undone!" : ud.error().message);
+    (void)g.inner().query("DELETE FROM " + g.quote_ident("acorn_people") + " WHERE " + g.quote_ident("id") + " = 2");
+    auto ud2 = j.undo();
+    auto back = j.store().get(*b);
+    check(P + "records: the key free again, undo brings Grace back exactly",
+          ud2 && back && std::get<RowDef>(*back).field("name") && *std::get<RowDef>(*back).field("name") == Value("Grace"),
+          ud2 ? "" : ud2.error().message);
+
+    // A table with no primary key: read, never written.
+    (void)j.run("No key", {Store::table_id("acorn_nokey")}, [&](Store& s) {
+        s.put(Store::table_id("acorn_nokey"), TableDef{"acorn_nokey", {{"x", decl_for(d, FieldType::Integer), true, std::nullopt, 0, false}}, 0});
+    });
+    auto nk = verbs::new_record(j, "acorn_nokey", {"x"}, {Value(1)});
+    auto nkc = g.query("SELECT COUNT(*) FROM " + g.quote_ident("acorn_nokey"));
+    check(P + "records: a table with no key is refused in words, nothing written",
+          !nk && nk.error().code == Error::Code::Unsupported && nk.error().message.find("no primary key") != std::string::npos &&
+          nkc && num(nkc->rows[0][0]) == 0.0, nk ? "written!" : nk.error().message);
+
+    // A step that makes a record but never declared it.
+    auto sneak = j.run("Sneaky record", {Store::table_id("acorn_people")}, [&](Store& s) {
+        (void)s.insert("acorn_people", {"name"}, {Value("Sneak")});
+    });
+    auto sc = g.query("SELECT COUNT(*) FROM " + g.quote_ident("acorn_people") + " WHERE " + g.quote_ident("name") + " = 'Sneak'");
+    check(P + "records: a record made without declaring new_row_id is refused",
+          !sneak && sc && num(sc->rows[0][0]) == 0.0, sneak ? "made!" : sneak.error().message);
+
+    // Read-only: refused before anything runs.
+    if (auto r2 = e->open(ro)) {
+        Gate rg(std::move(*r2));
+        Journal rj(rg, d, e->caps());
+        auto w = verbs::new_record(rj, "acorn_people", {"name"}, {Value("Nope")});
+        check(P + "records: read-only connection refuses New Record", !w && w.error().code == Error::Code::ReadOnly, "");
+    }
+    // Leave nothing behind for the tests after.
+    (void)g.inner().query("DROP TABLE " + g.quote_ident("acorn_people"));
+    (void)g.inner().query("DROP TABLE " + g.quote_ident("acorn_nokey"));
+    j.clear();
+}
+
+// ── s006b: browse ────────────────────────────────────────────────────────────
+void test_browse_pure() {
+    check("browse: cell text -- NULL empty, int, real, text, yes/no, blob",
+          cell_text(Value(), FieldType::Text).empty() && cell_text(Value(42), FieldType::Integer) == "42" &&
+          cell_text(Value(12.5), FieldType::Number) == "12.5" && cell_text(Value(0.1), FieldType::Number) == "0.1" &&
+          cell_text(Value("hi"), FieldType::Text) == "hi" && cell_text(Value(1), FieldType::Boolean) == "Yes" &&
+          cell_text(Value(0), FieldType::Boolean) == "No" && cell_text(Value("t"), FieldType::Boolean) == "Yes" &&
+          cell_text(Value(Blob{1, 2, 3}), FieldType::Container) == "(3 bytes)" &&
+          cell_text(Value(Blob{9}), FieldType::Container) == "(1 byte)", cell_text(Value(0.1), FieldType::Number));
+    Table t;
+    t.name = "people";
+    t.columns = {{"id", "INTEGER", FieldType::Integer, false, std::nullopt, 1, true},
+                 {"age", "INTEGER", FieldType::Integer, true, std::nullopt, 0, false},
+                 {"name", "TEXT", FieldType::Text, true, std::nullopt, 0, false}};
+    check("browse: a card leads with the first non-key text, else #key",
+          card_title(t, {Value(3), Value(40), Value("Ada")}) == "Ada" &&
+          card_title(t, {Value(3), Value(40), Value()}) == "#3" && card_title(t, {Value(3), Value(40), Value("")}) == "#3",
+          card_title(t, {Value(3), Value(40), Value()}));
+    Page p; p.total = 312; p.offset = 50; p.rows.resize(50);
+    Page e;
+    Column age{"age", "INTEGER", FieldType::Integer, true, std::nullopt, 0, false};
+    Column need{"qty", "INTEGER", FieldType::Integer, false, std::nullopt, 0, false};
+    Column bal{"balance", "REAL", FieldType::Number, true, std::nullopt, 0, false};
+    Column yes{"active", "BOOLEAN", FieldType::Boolean, true, std::nullopt, 0, false};
+    Column nm{"name", "TEXT", FieldType::Text, false, std::nullopt, 0, false};
+    Column nt{"notes", "TEXT", FieldType::Text, true, std::nullopt, 0, false};
+    Column ph{"photo", "BLOB", FieldType::Container, true, std::nullopt, 0, false};
+    check("edit: typed -> value (int, number, yes/no, text keeps spaces, empty -> NULL / \"\")",
+          parse_field(" 42 ", age) == Value(42) && parse_field("12.5", bal) == Value(12.5) &&
+          parse_field("Yes", yes) == Value(1) && parse_field("false", yes) == Value(0) &&
+          parse_field(" Ada ", nm) == Value(" Ada ") && parse_field("", age) == Value() &&
+          parse_field("", nt) == Value() && parse_field("", nm) == Value(""), "");
+    check("edit: refused in words (not a number, 4x, maybe, empty NOT NULL number, a blob)",
+          !parse_field("abc", age) && parse_field("4x", age).error() == "\u201Cage\u201D needs a whole number" &&
+          !parse_field("1.2.3", bal) && !parse_field("maybe", yes) && !parse_field("", need) &&
+          !parse_field("x", ph), "");
+    check("browse: the range line", page_range(p) == "51–100 of 312" && page_range(e) == "No records", page_range(p));
+}
+
+void test_browse(Journal& j, Gate& g, Engine* e, const std::string& P) {
+    const Dialect d = e->dialect();
+    TableDef t;
+    t.name = "acorn_browse";
+    t.columns = {{"id", decl_for(d, FieldType::Integer), false, std::nullopt, 1, true},
+                 {"name", decl_for(d, FieldType::Text), true, std::nullopt, 0, false},
+                 {"rank", decl_for(d, FieldType::Integer), true, std::nullopt, 0, false}};
+    if (auto mk = verbs::new_table(j, t); !mk) { check(P + "browse: fixture", false, mk.error().message); return; }
+    const char* names[] = {"Grace", "Ada", "Linus", "Barbara", "Ken", "Edsger", "Frances"};
+    int rank = 0;
+    for (const char* n : names) (void)verbs::new_record(j, "acorn_browse", {"name", "rank"}, {Value(n), Value(rank++ % 3)});
+    auto s = g.introspect();
+    const Table* bt = s ? s->table("acorn_browse") : nullptr;
+    if (!bt) { check(P + "browse: fixture read back", false, ""); return; }
+
+    auto p1 = read_page(g, *bt, {0, 3});
+    auto p3 = read_page(g, *bt, {6, 3});
+    check(P + "browse: pages of 3 -- total 7, key order, last page short",
+          p1 && p3 && p1->total == 7 && p1->rows.size() == 3 && p3->rows.size() == 1 &&
+          p1->rows[0][1] == Value("Grace") && p3->rows[0][1] == Value("Frances") && page_range(*p1) == "1–3 of 7",
+          p1 ? page_range(*p1) : p1.error().message);
+    check(P + "browse: each record carries its journal id",
+          p1 && p1->ids.size() == 3 && p1->ids[1] == Store::row_id("acorn_browse", {Value(2)}), p1 && !p1->ids.empty() ? p1->ids[0] : "");
+    auto byname = read_page(g, *bt, {0, 7, "name"});
+    auto desc = read_page(g, *bt, {0, 2, "name", true});
+    check(P + "browse: sorted by a column, both ways",
+          byname && desc && byname->rows[0][1] == Value("Ada") && byname->rows[6][1] == Value("Linus") &&
+          desc->rows[0][1] == Value("Linus") && desc->rows[1][1] == Value("Ken"), "");
+    // Ties on the sort column fall back to the key: pages never shuffle.
+    auto r1 = read_page(g, *bt, {0, 4, "rank"});
+    auto r2 = read_page(g, *bt, {4, 4, "rank"});
+    bool stable = r1 && r2 && r1->rows.size() == 4 && r2->rows.size() == 3;
+    std::vector<std::int64_t> seen;
+    if (stable) {
+        for (auto& row : r1->rows) seen.push_back(*row[0].as_int());
+        for (auto& row : r2->rows) seen.push_back(*row[0].as_int());
+        std::vector<std::int64_t> want = {1, 4, 7, 2, 5, 3, 6};
+        stable = seen == want;
+    }
+    check(P + "browse: equal sort values keep key order across pages", stable, "");
+    auto past = read_page(g, *bt, {100, 10});
+    check(P + "browse: past the end is an empty page, not an error", past && past->rows.empty() && past->total == 7, "");
+    check(P + "browse: reading is not a write (no strays)", j.strays() == 1, std::to_string(j.strays()));
+    (void)g.inner().query("DROP TABLE " + g.quote_ident("acorn_browse"));
+    j.clear();
+}
+
 // ── s005b: the door, on a live fixture -- every engine ────────────────────────
 std::vector<TableDef> tables_of(Connection& c) {
     std::vector<TableDef> out;
     if (auto s = c.introspect())
         for (auto& t : s->tables) out.push_back(TableDef::from(t));
     return out;
+}
+// The whole database as data: every table's shape and every row (s006 -- the
+// record verbs change data, not shape).
+struct Snapshot {
+    std::vector<TableDef> tables;
+    std::vector<std::vector<Row>> rows;
+    bool operator==(const Snapshot&) const = default;
+};
+Snapshot snapshot(Connection& c) {
+    Snapshot s;
+    s.tables = tables_of(c);
+    for (const auto& t : s.tables) {
+        auto r = c.query("SELECT * FROM " + c.quote_ident(t.name) + " ORDER BY 1");
+        s.rows.push_back(r ? r->rows : std::vector<Row>{});
+    }
+    return s;
 }
 bool has_table(Connection& c, const std::string& n) {
     auto s = c.introspect();
@@ -496,19 +736,23 @@ void test_journal(Engine* e, const ConnectParams& rw, const ConnectParams& ro, c
     // Walk every verb the UI offers: a step, nothing strays, undo puts it back
     // exactly, redo reproduces it exactly.
     for (const auto& v : verbs::all()) {
-        const auto before = tables_of(g);
+        if (v.setup) {
+            auto su = v.setup(j);
+            check(P + "verb " + v.name + ": its fixture, through the door", su.has_value(), su ? "" : su.error().message);
+        }
+        const auto before = snapshot(g);
         const auto steps = j.size();
         auto r = v.run(j);
-        const auto after = tables_of(g);
-        check(P + "verb " + v.name + ": runs, is one step, changes the schema",
+        const auto after = snapshot(g);
+        check(P + "verb " + v.name + ": runs, is one step, changes the database",
               r.has_value() && j.size() == steps + 1 && j.can_undo() && after != before,
               r ? "" : r.error().message);
         auto u = j.undo();
         check(P + "verb " + v.name + ": undo puts the schema back exactly",
-              u.has_value() && tables_of(g) == before && j.can_redo(), u ? "" : u.error().message);
+              u.has_value() && snapshot(g) == before && j.can_redo(), u ? "" : u.error().message);
         auto re = j.redo();
         check(P + "verb " + v.name + ": redo reproduces it exactly",
-              re.has_value() && tables_of(g) == after, re ? "" : re.error().message);
+              re.has_value() && snapshot(g) == after, re ? "" : re.error().message);
         (void)j.undo();
     }
     check(P + "no verb wrote outside the door", j.strays() == 1, std::to_string(j.strays()) + " strays");
@@ -606,6 +850,8 @@ void test_journal(Engine* e, const ConnectParams& rw, const ConnectParams& ro, c
         check(P + "reopen read-only", false, r2.error().message);
     }
     (void)g.inner().query("DROP TABLE " + g.quote_ident("notes"));
+    test_records(j, g, e, ro, P);
+    test_browse(j, g, e, P);
 }
 
 // SQLite-only behaviour: files.
@@ -699,6 +945,8 @@ void db_tests(CheckFn fn, int& skip_count) {
 
     test_types();
     test_journal_pure();
+    test_row_ids();
+    test_browse_pure();
     test_loader();
 
     Loader L;

@@ -26,6 +26,8 @@ void Shell::bind_journal() {  // journal: win.undo / win.redo / win.new-table + 
     m_undo_action      = add_action("undo",      sigc::mem_fun(*this, &Shell::on_undo));
     m_redo_action      = add_action("redo",      sigc::mem_fun(*this, &Shell::on_redo));
     m_new_table_action = add_action("new-table", sigc::mem_fun(*this, &Shell::on_new_table));
+    m_new_record_action    = add_action("new-record",    sigc::mem_fun(*this, &Shell::on_new_record));     // s006c
+    m_delete_record_action = add_action("delete-record", sigc::mem_fun(*this, &Shell::on_delete_record));  // s006c
 
     auto keys = Gtk::EventControllerKey::create();
     keys->set_propagation_phase(Gtk::PropagationPhase::BUBBLE);
@@ -64,6 +66,11 @@ void Shell::sync_undo() {  // journal: re-label + grey Undo / Redo / New Table
     if (m_undo_action) m_undo_action->set_enabled(cu);
     if (m_redo_action) m_redo_action->set_enabled(cr);
     if (m_new_table_action) m_new_table_action->set_enabled(cw);
+    const bool rw = m_journal && browse_writable();   // s006c
+    if (m_new_record_action) m_new_record_action->set_enabled(rw);
+    if (m_delete_record_action) m_delete_record_action->set_enabled(rw && !m_browse_sel.empty() && !m_record_new);
+    m_browse_new.set_tooltip_text(rw ? "Add a record to this table -- fill it in beside, then Add"
+                                     : "This table can't take changes here (see the line under Browse)");
     m_new_table_btn.set_tooltip_text(
         cw ? "Make a new, empty table -- the SQL is shown before it runs"
            : "For now Acorn changes only database files it made itself (New Database File, Ctrl+N)");
@@ -72,6 +79,8 @@ void Shell::sync_undo() {  // journal: re-label + grey Undo / Redo / New Table
         m_edit_menu->append(cu ? "Undo " + m_journal->undo_label() : std::string("Undo"), "win.undo");
         m_edit_menu->append(cr ? "Redo " + m_journal->redo_label() : std::string("Redo"), "win.redo");
         m_edit_menu->append("New Table…", "win.new-table");
+        m_edit_menu->append("New Record", "win.new-record");
+        m_edit_menu->append("Delete Record", "win.delete-record");
     }
 }
 
@@ -82,6 +91,7 @@ void Shell::journal_note(const std::string& text, const char* kind) {  // journa
     m_journal_note.remove_css_class("error");
     if (kind && *kind) m_journal_note.add_css_class(kind);
     if (!text.empty()) set_status(text, kind);   // the Connect page says it too
+    browse_note(text, kind);                      // s006c: and Browse
 }
 
 void Shell::reload_schema(const std::string& show) {  // journal: re-read, repaint, select `show`
@@ -97,13 +107,31 @@ void Shell::reload_schema(const std::string& show) {  // journal: re-read, repai
     if (!show.empty()) m_table_sel = show;
     show_schema();
     rebuild_table_list();
-    // Give the keyboard back: the table that vanished may have had it.
-    if (auto* row = m_table_list.get_selected_row()) row->grab_focus();
-    else m_table_list.grab_focus();
+    rebuild_browse_pick();   // s006b: Browse follows (the shown table may have gone)
+    // Give the keyboard back: the table that vanished may have had it. (Only
+    // on Tables -- in Browse the focus stays where the user is.)
+    if (m_stack.get_visible_child_name() == "tables") {
+        if (auto* row = m_table_list.get_selected_row()) row->grab_focus();
+        else m_table_list.grab_focus();
+    }
 }
 
 bool Shell::focus_is_text() const {  // journal: a text box keeps its own Ctrl+Z
     auto* f = get_focus();
+    // s006c: a record field whose text is what was saved has nothing of its own
+    // to undo -- Ctrl+Z there undoes the last STEP. With typing pending, the
+    // box keeps Ctrl+Z (your typing first, then the step).
+    for (const Gtk::Widget* w = f; w; w = w->get_parent()) {
+        if (!w->has_css_class("acorn-field-entry")) continue;
+        const auto* e = dynamic_cast<const Gtk::Editable*>(w);
+        const std::string name = w->get_name();
+        const std::string col = name.rfind("record.field.", 0) == 0 ? name.substr(13) : std::string{};
+        const auto* t = browse_info();
+        const auto* c = t ? t->column(col) : nullptr;
+        const auto* v = browse_value(col);
+        if (e && c && v && std::string(e->get_text()) == db::cell_text(*v, c->type)) return false;
+        return true;
+    }
     return dynamic_cast<const Gtk::Text*>(f) || dynamic_cast<const Gtk::TextView*>(f) ||
            dynamic_cast<const Gtk::Editable*>(f);
 }
@@ -144,7 +172,8 @@ void Shell::on_redo() {  // journal: Ctrl+Shift+Z
         lg->info("journal: redo: {}", r ? *r : r.error().message);
     // Select what came back: the label is New Table “name”.
     std::string show;
-    if (auto a = name.find("“"), b = name.rfind("”"); r && a != std::string::npos && b > a)
+    if (auto a = name.find("“"), b = name.rfind("”");
+        r && name.rfind("New Table", 0) == 0 && a != std::string::npos && b > a)
         show = name.substr(a + 3, b - a - 3);
     reload_schema(show);
     if (r) journal_note("Redid " + *r + ".", "ok");

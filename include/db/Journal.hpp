@@ -5,13 +5,21 @@
 // It is core::Journal (docs/undo.md -- "a step is two pictures, not an
 // inverse") over a database-shaped store:
 //
-//     Id    "table:<name>"            (s006 adds "row:<table>:<key>")
-//     Value TableDef -- the table's shape as introspection reads it, plus its
-//           row count. Absent = no such table.
+//     Id    "table:<name>"                 a table
+//           "row:<n>:<table>:<key>"        a record (s006): n = the table
+//                                          name's byte length, key = the
+//                                          primary key's values, encoded
+//     Value Record = TableDef | RowDef. TableDef: the table's shape as
+//           introspection reads it, plus its row count. RowDef: every field of
+//           one record, by column. Absent = no such table / record.
 //
-// Store::put turns the pictures into DDL: absent -> present is CREATE TABLE,
-// present -> absent is DROP TABLE. So New Table is undoable the day it goes
-// through run(), with no hand-written inverse. Two safety rules sit in put()
+// Store::put turns the pictures into SQL: a table absent -> present is CREATE
+// TABLE, present -> absent DROP TABLE; a record absent -> present is INSERT
+// (every field, the key included), present -> absent DELETE, changed UPDATE
+// (only the fields that differ). So New Table, New Record, a field edit and
+// Delete Record are undoable the day they go through run(), with no
+// hand-written inverse. A record is found by its PRIMARY KEY: a table without
+// one is browsed, never written; a key field is never changed (s006). Two safety rules sit in put()
 // and in undo / redo, because a database can change behind Acorn's back:
 //
 //   * put() never drops a table that holds rows, and never ALTERs (that is the
@@ -25,10 +33,12 @@
 // "forgot to go through the journal" cannot quietly write.
 //
 // Transactions. Each step runs inside BEGIN .. COMMIT where the engine can roll
-// the statement back (SQLite, PostgreSQL: transactional DDL). MariaDB commits
-// DDL implicitly, so there a step may declare ONE table -- one statement,
-// atomic by itself -- and a step that declares more is refused before it runs.
-// On every engine a step writes only the records it declared.
+// the statement back (SQLite, PostgreSQL: transactional DDL; records on every
+// engine). MariaDB commits DDL implicitly, so a step that touches a TABLE there
+// may declare only that one table -- one statement, atomic by itself -- and a
+// step that declares more is refused before it runs. On every engine a step
+// writes only the records it declared; a step that makes a record declares
+// new_row_id(table) and the made record joins the step (Store::insert).
 #pragma once
 
 #include "core/Undo.hpp"
@@ -40,6 +50,8 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
+#include <variant>
 #include <vector>
 
 namespace acorn::db {
@@ -63,6 +75,18 @@ struct TableDef {
 
     static TableDef from(const Table& t);     // introspection -> picture (rows = 0)
 };
+
+// One record: every column of its table, in the table's order (s006).
+struct RowDef {
+    std::string              table;
+    std::vector<std::string> columns;
+    std::vector<Value>       values;          // values[i] is columns[i]
+    bool operator==(const RowDef&) const = default;
+
+    const Value* field(const std::string& column) const;   // nullptr: no such column
+};
+
+using Record = std::variant<TableDef, RowDef>;
 
 // ── the DDL writer: one place, per dialect, shared by preview and act ─────────
 // The New Table window shows exactly the string the store will run.
@@ -105,15 +129,40 @@ private:
 class Store {
 public:
     using Id    = std::string;
-    using Value = TableDef;
+    using Value = Record;
 
-    Store(Connection& c, Dialect d) : m_conn(c), m_dialect(d) {}
+    Store(Connection& c, Dialect d, const Capabilities& caps) : m_conn(c), m_dialect(d), m_caps(caps) {}
 
     static Id table_id(const std::string& name) { return "table:" + name; }
+    // A record by its key values, in key order. "" when a value can't be a key
+    // Acorn writes by (NULL, a blob).
+    static Id row_id(const std::string& table, const std::vector<db::Value>& key);
+    // Back again: false when `id` is not a well-formed row id.
+    static bool parse_row_id(const Id& id, std::string& table, std::vector<db::Value>& key);
+    // What a step that MAKES a record in `table` declares (the record's own id
+    // is not known until the engine assigns its key).
+    static Id new_row_id(const std::string& table) { return "new:" + table; }
+    // "“customers” record 7" -- for messages.
+    static std::string describe(const Id& id);
 
     // The journal's contract.
-    std::optional<TableDef> get(const Id& id) const;
-    void put(const Id& id, const std::optional<TableDef>& v);
+    std::optional<Record> get(const Id& id) const;
+    void put(const Id& id, const std::optional<Record>& v);
+
+    // Make a record in `table` from the given fields (the rest take their
+    // defaults; a counting key is assigned by the engine). The step must have
+    // declared new_row_id(table). Returns the made record's id ("" + failed()
+    // if it was refused); the record joins the step.
+    Id insert(const std::string& table, const std::vector<std::string>& columns,
+              const std::vector<db::Value>& values);
+    std::vector<Id> take_made() { return std::exchange(m_made, {}); }
+
+    // The table a row id names, as the live schema has it this step (nullptr:
+    // no such table). Why a table can't take record writes, in words ("" =
+    // it can): a view, no primary key, a key Acorn can't address.
+    const Table* table_info(const std::string& name) const;
+    static std::string why_not_writable(const Table& t);
+    void forget_schema() const { m_schema.reset(); }
 
     // Fallible: a put that did not happen says why. The journal keeps no step.
     bool         failed() const { return m_error.has_value(); }
@@ -128,15 +177,25 @@ public:
     void set_door(std::function<bool()> open) { m_door = std::move(open); }
     int  strays() const { return m_strays; }
     Dialect dialect() const { return m_dialect; }
+    Connection& connection() const { return m_conn; }
     // The records the running step declared; put() refuses any other.
     void set_allowed(std::vector<Id> ids) { m_allowed = std::move(ids); }
 
 private:
     void fail(Error::Code c, std::string msg) const { refuse(Error{c, std::move(msg)}); }
     bool exec(const std::string& sql);
+    bool door_and_declared(const Id& id);
+    std::optional<Record> get_table(const std::string& name) const;
+    std::optional<Record> get_row(const Id& id) const;
+    void put_table(const Id& id, const std::optional<TableDef>& v);
+    void put_row(const Id& id, const RowDef* v);
+    std::string where_key(const Table& t) const;
 
     Connection&           m_conn;
     Dialect               m_dialect;
+    Capabilities          m_caps;
+    mutable std::optional<Schema> m_schema;   // this step's view; forgotten at each step
+    std::vector<Id>       m_made;
     mutable std::optional<Error> m_error;
     std::function<bool()> m_door;
     std::function<bool()> m_settle;
@@ -179,7 +238,7 @@ public:
     int    strays() const { return m_gate.strays() + m_store.strays(); }
 
 private:
-    std::expected<void, Error> begin();
+    std::expected<void, Error> begin(const std::vector<Store::Id>& ids);
     bool commit();
     void rollback();
     std::expected<void, Error> verify(const Core::Step& st, bool undoing);
@@ -203,10 +262,25 @@ namespace verbs {
 // New Table: name + columns, created empty. Label: New Table “name”.
 std::expected<void, Error> new_table(Journal& j, const TableDef& t);
 
+// s006 -- records. New Record: the given fields (may be none: every column its
+// default). Returns the made record's id. Label: New Record in “table”.
+std::expected<Store::Id, Error> new_record(Journal& j, const std::string& table,
+                                           const std::vector<std::string>& columns = {},
+                                           const std::vector<Value>& values = {});
+// One field of one record. Setting it to what it already holds is no step.
+// A key field is refused. Label: Edit “column”.
+std::expected<void, Error> set_field(Journal& j, const Store::Id& row, const std::string& column,
+                                     const Value& v);
+// Label: Delete Record from “table”.
+std::expected<void, Error> delete_record(Journal& j, const Store::Id& row);
+
 struct Verb {
     std::string name;
     // Run the verb once on a fixture database (any engine).
     std::function<std::expected<void, Error>(Journal&)> run;
+    // What the fixture needs first (a table, a record) -- run through the door
+    // before the walk counts. Optional.
+    std::function<std::expected<void, Error>(Journal&)> setup = {};
 };
 const std::vector<Verb>& all();
 }  // namespace verbs

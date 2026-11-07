@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <utility>
 
 // db/Journal.cpp -- the door (s005b). Read include/db/Journal.hpp first.
@@ -18,7 +19,7 @@ std::string lower(std::string s) {
     for (auto& ch : s) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
     return s;
 }
-std::string quoted(const std::string& name) { return "“" + name + "”"; }
+std::string curly(const std::string& name) { return "“" + name + "”"; }
 template <class Step>
 std::vector<Store::Id> ids_of(const Step& st) {
     std::vector<Store::Id> v;
@@ -118,10 +119,10 @@ std::string check_name(const std::string& what, const std::string& name) {
     if (name.empty()) return what + " needs a name";
     if (std::isspace(static_cast<unsigned char>(name.front())) ||
         std::isspace(static_cast<unsigned char>(name.back())))
-        return what + " " + quoted(name) + " starts or ends with a space";
+        return what + " " + curly(name) + " starts or ends with a space";
     for (unsigned char ch : name)
-        if (ch < 0x20 || ch == 0x7f) return what + " " + quoted(name) + " has a control character in it";
-    if (name.size() > 64) return what + " " + quoted(name) + " is longer than 64 bytes";
+        if (ch < 0x20 || ch == 0x7f) return what + " " + curly(name) + " has a control character in it";
+    if (name.size() > 64) return what + " " + curly(name) + " is longer than 64 bytes";
     return {};
 }
 
@@ -131,14 +132,14 @@ std::string check_new_table(const TableDef& t, const Schema& existing) {
     for (const auto& x : existing.tables)
         if (lower(x.name) == lower(t.name))
             return std::string("There is already a ") + (x.kind == Table::Kind::View ? "view" : "table") +
-                   " named " + quoted(x.name);
+                   " named " + curly(x.name);
     if (t.columns.empty()) return "The table needs at least one column";
     for (std::size_t i = 0; i < t.columns.size(); ++i) {
         if (auto why = check_name("Column " + std::to_string(i + 1), t.columns[i].name); !why.empty())
             return why;
         for (std::size_t k = 0; k < i; ++k)
             if (lower(t.columns[k].name) == lower(t.columns[i].name))
-                return "Two columns are named " + quoted(t.columns[i].name);
+                return "Two columns are named " + curly(t.columns[i].name);
     }
     return {};
 }
@@ -176,19 +177,143 @@ std::expected<Result, Error> Gate::query(const std::string& sql, const std::vect
 }
 
 // ── the store ───────────────────────────────────────────────────────────────
-std::optional<TableDef> Store::get(const Id& id) const {
-    if (id.rfind("table:", 0) != 0) return std::nullopt;
-    const std::string name = name_of(id);
-    auto s = m_conn.introspect();
-    if (!s) { fail(s.error().code, s.error().message); return std::nullopt; }
-    const Table* t = s->table(name);
-    if (!t || t->kind != Table::Kind::Table) return std::nullopt;
+const Value* RowDef::field(const std::string& column) const {
+    for (std::size_t i = 0; i < columns.size() && i < values.size(); ++i)
+        if (columns[i] == column) return &values[i];
+    return nullptr;
+}
+
+// Key parts, each self-delimiting: i<int>;  r<real>;  s<bytes>:<text>
+Store::Id Store::row_id(const std::string& table, const std::vector<db::Value>& key) {
+    if (key.empty()) return {};
+    std::string k;
+    for (const auto& v : key) {
+        if (auto i = v.as_int(); i && v.kind() == db::Value::Kind::Integer) k += "i" + std::to_string(*i) + ";";
+        else if (v.kind() == db::Value::Kind::Real) {
+            char buf[40];
+            std::snprintf(buf, sizeof buf, "%.17g", *v.as_real());
+            k += std::string("r") + buf + ";";
+        } else if (const auto* t = v.as_text()) k += "s" + std::to_string(t->size()) + ":" + *t;
+        else return {};   // NULL or a blob: not a key Acorn writes by
+    }
+    return "row:" + std::to_string(table.size()) + ":" + table + ":" + k;
+}
+
+bool Store::parse_row_id(const Id& id, std::string& table, std::vector<db::Value>& key) {
+    if (id.rfind("row:", 0) != 0) return false;
+    std::size_t i = 4;
+    auto num = [&](char end, std::size_t& out) {
+        std::size_t j = id.find(end, i);
+        if (j == std::string::npos || j == i) return false;
+        for (std::size_t k = i; k < j; ++k) if (!std::isdigit(static_cast<unsigned char>(id[k]))) return false;
+        out = std::stoull(id.substr(i, j - i));
+        i = j + 1;
+        return true;
+    };
+    std::size_t n = 0;
+    if (!num(':', n) || i + n + 1 > id.size() || id[i + n] != ':') return false;
+    table = id.substr(i, n);
+    i += n + 1;
+    key.clear();
+    while (i < id.size()) {
+        const char tag = id[i++];
+        if (tag == 'i' || tag == 'r') {
+            std::size_t j = id.find(';', i);
+            if (j == std::string::npos) return false;
+            const std::string w = id.substr(i, j - i);
+            try {
+                if (tag == 'i') key.emplace_back(static_cast<std::int64_t>(std::stoll(w)));
+                else key.emplace_back(std::stod(w));
+            } catch (...) { return false; }
+            i = j + 1;
+        } else if (tag == 's') {
+            std::size_t len = 0;
+            if (!num(':', len) || i + len > id.size()) return false;
+            key.emplace_back(id.substr(i, len));
+            i += len;
+        } else {
+            return false;
+        }
+    }
+    return !key.empty();
+}
+
+std::string Store::describe(const Id& id) {
+    std::string table;
+    std::vector<db::Value> key;
+    if (parse_row_id(id, table, key)) {
+        std::string k;
+        for (std::size_t i = 0; i < key.size(); ++i) {
+            if (i) k += ", ";
+            const auto* t = key[i].as_text();
+            k += t ? *t : key[i].to_display();
+        }
+        return curly(table) + " record " + k;
+    }
+    if (id.rfind("new:", 0) == 0) return "a new record in " + curly(id.substr(4));
+    return curly(name_of(id));
+}
+
+const Table* Store::table_info(const std::string& name) const {
+    if (!m_schema) {
+        auto s = m_conn.introspect();
+        if (!s) { fail(s.error().code, s.error().message); return nullptr; }
+        m_schema = std::move(*s);
+    }
+    return m_schema->table(name);
+}
+
+std::string Store::why_not_writable(const Table& t) {
+    if (t.kind == Table::Kind::View) return curly(t.name) + " is a view -- its records are read here, not written";
+    if (t.primary_key().empty())
+        return curly(t.name) + " has no primary key -- Acorn finds a record by its key, so it only reads this table";
+    return {};
+}
+
+std::string Store::where_key(const Table& t) const {
+    std::string w;
+    for (const auto& k : t.primary_key()) w += (w.empty() ? " WHERE " : " AND ") + m_conn.quote_ident(k) + " = ?";
+    return w;
+}
+
+std::optional<Record> Store::get(const Id& id) const {
+    if (id.rfind("table:", 0) == 0) return get_table(name_of(id));
+    if (id.rfind("row:", 0) == 0) return get_row(id);
+    return std::nullopt;   // "new:..." -- a declaration, never a record
+}
+
+std::optional<Record> Store::get_table(const std::string& name) const {
+    m_schema.reset();   // a table's shape is always read fresh
+    const Table* t = table_info(name);
+    if (failed() || !t || t->kind != Table::Kind::Table) return std::nullopt;
     TableDef d = TableDef::from(*t);
     auto n = m_conn.query("SELECT COUNT(*) FROM " + m_conn.quote_ident(name));
-    if (!n || n->rows.empty()) { fail(Error::Code::Internal, "could not count the rows of " + quoted(name)); return d; }
+    if (!n || n->rows.empty()) { fail(Error::Code::Internal, "could not count the rows of " + curly(name)); return d; }
     const auto& v = n->rows[0][0];
     if (auto i = v.as_int()) d.rows = *i;
     else if (auto txt = v.as_text()) d.rows = std::stoll(*txt);
+    return d;
+}
+
+std::optional<Record> Store::get_row(const Id& id) const {
+    std::string table;
+    std::vector<db::Value> key;
+    if (!parse_row_id(id, table, key)) { fail(Error::Code::Internal, "not a record: " + id); return std::nullopt; }
+    const Table* t = table_info(table);
+    if (failed() || !t || t->kind != Table::Kind::Table) return std::nullopt;
+    if (t->primary_key().size() != key.size()) return std::nullopt;   // the key changed shape: not this record
+    std::string sql = "SELECT ";
+    for (std::size_t i = 0; i < t->columns.size(); ++i)
+        sql += (i ? ", " : "") + m_conn.quote_ident(t->columns[i].name);
+    sql += " FROM " + m_conn.quote_ident(table) + where_key(*t);
+    auto r = m_conn.query(sql, key);
+    if (!r) { fail(r.error().code, r.error().message); return std::nullopt; }
+    if (r->rows.empty()) return std::nullopt;
+    if (r->rows.size() > 1) { fail(Error::Code::Internal, describe(id) + " matches more than one row"); return std::nullopt; }
+    RowDef d;
+    d.table = table;
+    for (const auto& c : t->columns) d.columns.push_back(c.name);
+    d.values = r->rows[0];
     return d;
 }
 
@@ -198,27 +323,48 @@ bool Store::exec(const std::string& sql) {
     return r.has_value();
 }
 
-void Store::put(const Id& id, const std::optional<TableDef>& v) {
-    if (failed()) return;   // one refusal ends the step
+bool Store::door_and_declared(const Id& id) {
+    if (failed()) return false;   // one refusal ends the step
     if (!(m_door && m_door())) {
         ++m_strays;
         fail(Error::Code::ReadOnly, "refused: a write outside the change journal");
-        return;
+        return false;
     }
-    if (id.rfind("table:", 0) != 0) { fail(Error::Code::Internal, "unknown record " + id); return; }
     if (std::find(m_allowed.begin(), m_allowed.end(), id) == m_allowed.end()) {
         fail(Error::Code::Internal, "refused: the step did not declare " + id);
+        return false;
+    }
+    return true;
+}
+
+void Store::put(const Id& id, const std::optional<Record>& v) {
+    if (id.rfind("new:", 0) == 0) return;   // a declaration: nothing to put
+    if (!door_and_declared(id)) return;
+    if (id.rfind("table:", 0) == 0) {
+        if (v && !std::holds_alternative<TableDef>(*v)) { fail(Error::Code::Internal, id + " given a record"); return; }
+        put_table(id, v ? std::optional<TableDef>(std::get<TableDef>(*v)) : std::nullopt);
         return;
     }
+    if (id.rfind("row:", 0) == 0) {
+        if (v && !std::holds_alternative<RowDef>(*v)) { fail(Error::Code::Internal, id + " given a table"); return; }
+        put_row(id, v ? &std::get<RowDef>(*v) : nullptr);
+        return;
+    }
+    fail(Error::Code::Internal, "unknown record " + id);
+}
+
+void Store::put_table(const Id& id, const std::optional<TableDef>& v) {
     const std::string name = name_of(id);
-    const auto live = get(id);
+    const auto got = get_table(name);
     if (failed()) return;
+    const std::optional<TableDef> live = got ? std::optional<TableDef>(std::get<TableDef>(*got)) : std::nullopt;
     if (live == v) return;
     const char q = m_conn.quote_ident("x").front();
+    m_schema.reset();   // whatever happens next, the shape changes
 
     if (!v) {   // present -> absent
         if (live->rows > 0) {
-            fail(Error::Code::Constraint, quoted(name) + " holds " + std::to_string(live->rows) +
+            fail(Error::Code::Constraint, curly(name) + " holds " + std::to_string(live->rows) +
                  " row" + (live->rows == 1 ? "" : "s") + " -- Acorn will not drop a table with data in it");
             return;
         }
@@ -237,9 +383,119 @@ void Store::put(const Id& id, const std::optional<TableDef>& v) {
     exec(create_table_sql(m_dialect, q, *v));
 }
 
+void Store::put_row(const Id& id, const RowDef* v) {
+    std::string table;
+    std::vector<db::Value> key;
+    if (!parse_row_id(id, table, key)) { fail(Error::Code::Internal, "not a record: " + id); return; }
+    const Table* t = table_info(table);
+    if (failed()) return;
+    if (!t) { fail(Error::Code::Changed, curly(table) + " is not there any more"); return; }
+    if (auto why = why_not_writable(*t); !why.empty()) { fail(Error::Code::Unsupported, why); return; }
+    const auto got = get_row(id);
+    if (failed()) return;
+    const RowDef* live = got ? &std::get<RowDef>(*got) : nullptr;
+    if (!live && !v) return;
+    if (live && v && *live == *v) return;
+    const auto pk = t->primary_key();
+
+    if (!v) {   // present -> absent
+        auto r = m_conn.query("DELETE FROM " + m_conn.quote_ident(table) + where_key(*t), key);
+        if (!r) { fail(r.error().code, r.error().message); return; }
+        if (r->affected != 1) fail(Error::Code::Changed, describe(id) + ": the delete touched " +
+                                   std::to_string(r->affected) + " rows, not 1");
+        return;
+    }
+    if (v->table != table) { fail(Error::Code::Internal, id + " given a record of " + v->table); return; }
+    // The picture must be this record: its key fields hold this key.
+    for (std::size_t i = 0; i < pk.size(); ++i) {
+        const auto* f = v->field(pk[i]);
+        if (!f || !(*f == key[i])) { fail(Error::Code::Unsupported, "a record's key field is not changed here"); return; }
+    }
+    // ... and the table must still have exactly the columns it was taken with.
+    bool same = t->columns.size() == v->columns.size();
+    for (std::size_t i = 0; same && i < v->columns.size(); ++i) same = t->columns[i].name == v->columns[i];
+    if (!same) { fail(Error::Code::Changed, curly(table) + "'s columns changed since -- nothing was written"); return; }
+
+    if (!live) {   // absent -> present: every field, the key included
+        std::string cols, marks;
+        for (std::size_t i = 0; i < v->columns.size(); ++i) {
+            cols  += (i ? ", " : "") + m_conn.quote_ident(v->columns[i]);
+            marks += i ? ", ?" : "?";
+        }
+        auto r = m_conn.query("INSERT INTO " + m_conn.quote_ident(table) + " (" + cols + ") VALUES (" + marks + ")",
+                              v->values);
+        if (!r) fail(r.error().code, r.error().message);
+        return;
+    }
+    // changed: only the fields that differ
+    std::string set;
+    std::vector<db::Value> params;
+    for (std::size_t i = 0; i < v->columns.size(); ++i) {
+        if (live->values[i] == v->values[i]) continue;
+        set += (set.empty() ? "" : ", ") + m_conn.quote_ident(v->columns[i]) + " = ?";
+        params.push_back(v->values[i]);
+    }
+    for (const auto& k : key) params.push_back(k);
+    auto r = m_conn.query("UPDATE " + m_conn.quote_ident(table) + " SET " + set + where_key(*t), params);
+    if (!r) { fail(r.error().code, r.error().message); return; }
+    // MariaDB reports rows CHANGED, not matched; a value equal to itself was
+    // filtered above, so 1 is right on every engine.
+    if (r->affected != 1) fail(Error::Code::Changed, describe(id) + ": the change touched " +
+                               std::to_string(r->affected) + " rows, not 1");
+}
+
+Store::Id Store::insert(const std::string& table, const std::vector<std::string>& columns,
+                        const std::vector<db::Value>& values) {
+    if (!door_and_declared(new_row_id(table))) return {};
+    const Table* t = table_info(table);
+    if (failed()) return {};
+    if (!t) { fail(Error::Code::NotFound, "there is no table " + curly(table)); return {}; }
+    if (auto why = why_not_writable(*t); !why.empty()) { fail(Error::Code::Unsupported, why); return {}; }
+    if (columns.size() != values.size()) { fail(Error::Code::Internal, "columns and values don't pair up"); return {}; }
+    const auto pk = t->primary_key();
+
+    std::string sql = "INSERT INTO " + m_conn.quote_ident(table);
+    if (columns.empty()) {
+        sql += m_dialect == Dialect::MariaDB ? " () VALUES ()" : " DEFAULT VALUES";
+    } else {
+        std::string cols, marks;
+        for (std::size_t i = 0; i < columns.size(); ++i) {
+            if (!t->column(columns[i])) { fail(Error::Code::NotFound, curly(table) + " has no column " + curly(columns[i])); return {}; }
+            cols  += (i ? ", " : "") + m_conn.quote_ident(columns[i]);
+            marks += i ? ", ?" : "?";
+        }
+        sql += " (" + cols + ") VALUES (" + marks + ")";
+    }
+    if (m_caps.returning) {
+        sql += " RETURNING ";
+        for (std::size_t i = 0; i < pk.size(); ++i) sql += (i ? ", " : "") + m_conn.quote_ident(pk[i]);
+    }
+    auto r = m_conn.query(sql, values);
+    if (!r) { fail(r.error().code, r.error().message); return {}; }
+
+    // The made record's key: RETURNING; else the engine's last insert id for a
+    // one-column counting key; else the values given.
+    std::vector<db::Value> key;
+    if (m_caps.returning && r->rows.size() == 1 && r->rows[0].size() == pk.size()) {
+        key = r->rows[0];
+    } else {
+        for (const auto& k : pk) {
+            auto it = std::find(columns.begin(), columns.end(), k);
+            if (it != columns.end()) key.push_back(values[static_cast<std::size_t>(it - columns.begin())]);
+            else if (pk.size() == 1 && r->last_insert_id) key.emplace_back(*r->last_insert_id);
+            else { fail(Error::Code::Internal, "the new record's key could not be learned"); return {}; }
+        }
+    }
+    const Id id = row_id(table, key);
+    if (id.empty()) { fail(Error::Code::Unsupported, "the new record's key is NULL or binary"); return {}; }
+    m_allowed.push_back(id);
+    m_made.push_back(id);
+    return id;
+}
+
 // ── the journal ─────────────────────────────────────────────────────────────
 Journal::Journal(Gate& gate, Dialect d, const Capabilities& caps)
-    : m_gate(gate), m_dialect(d), m_caps(caps), m_store(gate, d), m_core(m_store) {
+    : m_gate(gate), m_dialect(d), m_caps(caps), m_store(gate, d, caps), m_core(m_store) {
     m_gate.set_door([this] { return open(); });
     m_store.set_door([this] { return open(); });
     m_store.set_settle([this] { return commit(); });
@@ -247,15 +503,24 @@ Journal::Journal(Gate& gate, Dialect d, const Capabilities& caps)
 
 Journal::~Journal() { m_gate.set_door({}); }
 
-std::expected<void, Error> Journal::begin() {
+namespace {
+bool touches_tables(const std::vector<Store::Id>& ids) {
+    for (const auto& id : ids) if (id.rfind("table:", 0) == 0) return true;
+    return false;
+}
+}  // namespace
+
+std::expected<void, Error> Journal::begin(const std::vector<Store::Id>& ids) {
     if (m_gate.read_only())
         return std::unexpected(Error{Error::Code::ReadOnly, "this database is open read-only"});
     m_store.clear_failed();
+    m_store.forget_schema();
     m_txn = true;
     // DDL rolls back with the transaction on SQLite and PostgreSQL. MariaDB
-    // would commit implicitly at the first DDL statement -- there each step is
-    // one statement, atomic on its own, and no BEGIN pretends otherwise.
-    if (m_caps.transactional_ddl) {
+    // would commit implicitly at the first DDL statement -- there a table step
+    // is one statement, atomic on its own, and no BEGIN pretends otherwise.
+    // Records roll back everywhere.
+    if (m_caps.transactional_ddl || !touches_tables(ids)) {
         auto r = m_gate.query(m_dialect == Dialect::MariaDB ? "START TRANSACTION" : "BEGIN");
         if (!r) { m_txn = false; return std::unexpected(r.error()); }
         m_in_txn = true;
@@ -279,12 +544,16 @@ void Journal::rollback() {
 std::expected<void, Error> Journal::run(const std::string& label, const std::vector<Store::Id>& ids,
                                         const std::function<void(Store&)>& op) {
     if (m_txn) return std::unexpected(Error{Error::Code::Internal, "a step is already running"});
-    if (!m_caps.transactional_ddl && ids.size() > 1)
+    if (!m_caps.transactional_ddl && ids.size() > 1 && touches_tables(ids))
         return std::unexpected(Error{Error::Code::Unsupported,
             "this engine can't roll back a table change, so Acorn changes one table per step"});
-    if (auto b = begin(); !b) return b;
+    if (auto b = begin(ids); !b) return b;
     m_store.set_allowed(ids);
-    m_core.run(label, ids, [&] { op(m_store); });
+    // A "new:" declaration is not a record: the journal records the made ones.
+    std::vector<Store::Id> recs;
+    for (const auto& id : ids) if (id.rfind("new:", 0) != 0) recs.push_back(id);
+    (void)m_store.take_made();
+    m_core.run(label, recs, [&] { op(m_store); return m_store.take_made(); });
     std::expected<void, Error> out;
     if (m_store.failed()) {
         out = std::unexpected(m_store.error());
@@ -297,6 +566,7 @@ std::expected<void, Error> Journal::run(const std::string& label, const std::vec
 }
 
 std::expected<void, Error> Journal::verify(const Core::Step& st, bool undoing) {
+    m_store.forget_schema();
     for (const auto& e : st.entries) {
         const auto live = m_store.get(e.id);
         if (m_store.failed()) {
@@ -306,7 +576,7 @@ std::expected<void, Error> Journal::verify(const Core::Step& st, bool undoing) {
         }
         if (live != (undoing ? e.after : e.before))
             return std::unexpected(Error{Error::Code::Changed,
-                quoted(name_of(e.id)) + " has changed since " + st.label + " -- not " +
+                Store::describe(e.id) + " has changed since " + st.label + " -- not " +
                 (undoing ? "undone" : "redone") + "; nothing was touched"});
     }
     return {};
@@ -318,7 +588,7 @@ std::expected<std::string, Error> Journal::undo() {
     if (m_txn) return std::unexpected(Error{Error::Code::Internal, "a step is already running"});
     const std::string label = st->label;
     if (auto v = verify(*st, true); !v) return std::unexpected(v.error());
-    if (auto b = begin(); !b) return std::unexpected(b.error());
+    if (auto b = begin(ids_of(*st)); !b) return std::unexpected(b.error());
     m_store.set_allowed(ids_of(*st));
     const auto r = m_core.undo();
     std::expected<std::string, Error> out = label;
@@ -339,7 +609,7 @@ std::expected<std::string, Error> Journal::redo() {
     if (m_txn) return std::unexpected(Error{Error::Code::Internal, "a step is already running"});
     const std::string label = st->label;
     if (auto v = verify(*st, false); !v) return std::unexpected(v.error());
-    if (auto b = begin(); !b) return std::unexpected(b.error());
+    if (auto b = begin(ids_of(*st)); !b) return std::unexpected(b.error());
     m_store.set_allowed(ids_of(*st));
     const auto r = m_core.redo();
     std::expected<std::string, Error> out = label;
@@ -359,12 +629,12 @@ namespace verbs {
 
 std::expected<void, Error> new_table(Journal& j, const TableDef& t) {
     const auto id = Store::table_id(t.name);
-    return j.run("New Table " + quoted(t.name), {id}, [&](Store& s) {
+    return j.run("New Table " + curly(t.name), {id}, [&](Store& s) {
         // NEW: anything already there is refused -- even an identical table,
         // which put() alone would treat as "nothing to do".
         if (s.get(id) || s.failed()) {
             if (!s.failed())
-                s.refuse(Error{Error::Code::Exists, "there is already a table named " + quoted(t.name)});
+                s.refuse(Error{Error::Code::Exists, "there is already a table named " + curly(t.name)});
             return;
         }
         TableDef d = t;
@@ -372,6 +642,87 @@ std::expected<void, Error> new_table(Journal& j, const TableDef& t) {
         s.put(id, d);
     });
 }
+
+std::expected<Store::Id, Error> new_record(Journal& j, const std::string& table,
+                                           const std::vector<std::string>& columns,
+                                           const std::vector<Value>& values) {
+    Store::Id made;
+    auto r = j.run("New Record in " + curly(table), {Store::new_row_id(table)}, [&](Store& s) {
+        made = s.insert(table, columns, values);
+    });
+    if (!r) return std::unexpected(r.error());
+    return made;
+}
+
+std::expected<void, Error> set_field(Journal& j, const Store::Id& row, const std::string& column,
+                                     const Value& v) {
+    return j.run("Edit " + curly(column), {row}, [&](Store& s) {
+        auto got = s.get(row);
+        if (s.failed()) return;
+        if (!got) { s.refuse(Error{Error::Code::Changed, Store::describe(row) + " is not there any more"}); return; }
+        RowDef d = std::get<RowDef>(*got);
+        if (const Table* t = s.table_info(d.table); t) {
+            const Column* c = t->column(column);
+            if (c && c->pk_position > 0) {
+                s.refuse(Error{Error::Code::Unsupported, curly(column) + " is the record's key -- Acorn finds the record by it, so it is not changed here"});
+                return;
+            }
+        }
+        bool found = false;
+        for (std::size_t i = 0; i < d.columns.size(); ++i)
+            if (d.columns[i] == column) { d.values[i] = v; found = true; }
+        if (!found) { s.refuse(Error{Error::Code::NotFound, curly(d.table) + " has no column " + curly(column)}); return; }
+        s.put(row, d);
+    });
+}
+
+std::expected<void, Error> delete_record(Journal& j, const Store::Id& row) {
+    std::string table;
+    std::vector<Value> key;
+    if (!Store::parse_row_id(row, table, key))
+        return std::unexpected(Error{Error::Code::Internal, "not a record: " + row});
+    return j.run("Delete Record from " + curly(table), {row}, [&](Store& s) {
+        if (!s.get(row) && !s.failed()) {
+            s.refuse(Error{Error::Code::Changed, Store::describe(row) + " is not there any more"});
+            return;
+        }
+        s.put(row, std::nullopt);
+    });
+}
+
+namespace {
+// The walk's fixture for the record verbs: a table with a counting key and one
+// record in it -- made through the door, like everything else.
+constexpr const char* kRows = "acorn_verb_rows";
+std::expected<void, Error> rows_fixture(Journal& j) {
+    const Dialect d = j.store().dialect();
+    j.store().forget_schema();
+    if (!j.store().table_info(kRows)) {
+        j.store().clear_failed();
+        TableDef t;
+        t.name = kRows;
+        t.columns = {
+            {"id", decl_for(d, FieldType::Integer), false, std::nullopt, 1, true},
+            {"title", decl_for(d, FieldType::Text), true, std::nullopt, 0, false},
+            {"n", decl_for(d, FieldType::Integer), true, std::nullopt, 0, false},
+        };
+        if (auto r = new_table(j, t); !r) return r;
+    }
+    auto r = new_record(j, kRows, {"title", "n"}, {Value("seed"), Value(1)});
+    if (!r) return std::unexpected(r.error());
+    return {};
+}
+// The newest record of the fixture (the one setup made).
+std::expected<Store::Id, Error> newest_row(Journal& j) {
+    auto r = j.store().connection().query("SELECT MAX(" + j.store().connection().quote_ident("id") + ") FROM " +
+                                          j.store().connection().quote_ident(kRows));
+    if (!r) return std::unexpected(r.error());
+    if (r->rows.empty() || r->rows[0][0].is_null()) return std::unexpected(Error{Error::Code::NotFound, "no record"});
+    auto id = r->rows[0][0].as_int();
+    if (!id) return std::unexpected(Error{Error::Code::Internal, "the key is not an integer"});
+    return Store::row_id(kRows, {Value(*id)});
+}
+}  // namespace
 
 const std::vector<Verb>& all() {
     static const std::vector<Verb> kVerbs = {
@@ -386,6 +737,21 @@ const std::vector<Verb>& all() {
              };
              return new_table(j, t);
          }},
+        {"New Record", [](Journal& j) -> std::expected<void, Error> {
+             auto r = new_record(j, kRows, {"title"}, {Value("made by the walk")});
+             if (!r) return std::unexpected(r.error());
+             return {};
+         }, rows_fixture},
+        {"Edit Field", [](Journal& j) -> std::expected<void, Error> {
+             auto row = newest_row(j);
+             if (!row) return std::unexpected(row.error());
+             return set_field(j, *row, "title", Value("edited by the walk"));
+         }, rows_fixture},
+        {"Delete Record", [](Journal& j) -> std::expected<void, Error> {
+             auto row = newest_row(j);
+             if (!row) return std::unexpected(row.error());
+             return delete_record(j, *row);
+         }, rows_fixture},
     };
     return kVerbs;
 }

@@ -198,6 +198,17 @@ void Shell::show_table(const std::string& name) {  // tables: paint one table's 
         b->set_valign(Gtk::Align::CENTER);
         top->append(*b);
     }
+    {   // s006b: straight to its records
+        auto spacer = Gtk::make_managed<Gtk::Box>();
+        spacer->set_hexpand(true);
+        top->append(*spacer);
+        auto br = Gtk::make_managed<Gtk::Button>("Browse Records");
+        br->set_valign(Gtk::Align::CENTER);
+        br->set_tooltip_text("Show this table's records in the Browse area");
+        const std::string n = t->name;
+        br->signal_clicked().connect([this, n] { open_browse(n); });
+        top->append(*br);
+    }
     m_table_detail.append(*top);
 
     // Columns.

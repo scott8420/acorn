@@ -36,7 +36,19 @@ Shell::Shell()
       m_table_detail("shell.tables.detail", Gtk::Orientation::VERTICAL, 10),
       m_tables_where("shell.tables.where"),
       m_new_table_btn("shell.tables.new_table"),
-      m_journal_note("shell.tables.journal_note") {
+      m_journal_note("shell.tables.journal_note"),
+      m_browse_page("shell.browse.page", Gtk::Orientation::VERTICAL, 12),
+      m_browse_where("shell.browse.where"),
+      m_browse_cards_btn("shell.browse.cards"),
+      m_browse_grid_btn("shell.browse.grid"),
+      m_browse_prev("shell.browse.prev"),
+      m_browse_next("shell.browse.next"),
+      m_browse_range("shell.browse.range"),
+      m_browse_scroll("shell.browse.scroll"),
+      m_browse_note("shell.browse.note"),
+      m_browse_new("shell.browse.new_record"),
+      m_browse_delete("shell.browse.delete_record"),
+      m_record_scroll("shell.browse.record") {
     set_name("shell.window");
 }
 

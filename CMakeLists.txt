@@ -106,6 +106,7 @@ add_library(acorn_core STATIC
     # s005a: the one place Acorn creates a database file (never overwrites).
     src/db/NewFile.cpp
     src/db/Journal.cpp
+    src/db/Browse.cpp     # s006b: a table's records, a page at a time
 )
 target_include_directories(acorn_core PUBLIC include)
 target_link_libraries(acorn_core PUBLIC acorn_db ${CMAKE_DL_LIBS})
@@ -179,6 +180,8 @@ add_executable(acorn
     src/Shell_connect.cpp
     # s004c: the Tables area -- the read-only schema browser.
     src/Shell_tables.cpp
+    src/Shell_browse.cpp
+    src/Shell_records.cpp
     src/AboutWindow.cpp
     src/NewTableWindow.cpp
     src/Shell_journal.cpp

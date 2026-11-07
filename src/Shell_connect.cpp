@@ -493,6 +493,9 @@ void Shell::on_connect_done() {  // connect: back on the UI thread
     set_title("Acorn — " + m_conn_label);
     show_schema();
     rebuild_table_list();   // s004c: the Tables area follows the connection
+    m_browse_table.clear(); // s006b: a new connection starts Browse fresh
+    m_browse_sel.clear();
+    rebuild_browse_pick();
 }
 
 void Shell::show_schema() {  // connect: paint the table list

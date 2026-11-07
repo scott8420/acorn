@@ -7,6 +7,8 @@
 #include "db/Loader.hpp"     // s004: engine plugins
 #include "db/Schema.hpp"
 #include "db/Journal.hpp"   // s005b: the door
+#include "db/Browse.hpp"    // s006b: a table's records, a page at a time
+#include <gtkmm/togglebutton.h>
 
 #include <glibmm/dispatcher.h>
 #include <gtkmm/dropdown.h>
@@ -56,6 +58,7 @@
 //   "Where does a password come from?"  -> Shell_connect.cpp  (on_connect -> keyring lookup)
 //   "Where is a table's detail drawn?"  -> Shell_tables.cpp   (show_table)
 //   "Where does a write go / undo run?" -> Shell_journal.cpp  (on_new_table / on_undo)
+//   "Where are records shown?"          -> Shell_browse.cpp   (paint_browse)
 // ─────────────────────────────────────────────────────────────────────────────
 namespace acorn {
 
@@ -118,6 +121,30 @@ private:
     void reload_schema(const std::string& show); // category: journal: re-read the schema after a step, repaint, select `show`
     bool focus_is_text() const;                  // category: journal: a text box keeps its own Ctrl+Z
     void journal_note(const std::string& text, const char* kind);  // category: journal: what a step did, under the Tables title
+
+    // ── browse (s006b) -- src/Shell_browse.cpp ──────────────────────────────
+    void build_browse_page();                    // category: browse: the Browse area (cards / grid, paged)
+    void rebuild_browse_pick();                  // category: browse: the table picker, after a connect / a step
+    void browse_table(const std::string& name);  // category: browse: show this table's first page
+    void open_browse(const std::string& name);   // category: browse: go to Browse, that table showing
+    void load_browse_page(bool keep_panel = false);  // category: browse: read the page m_browse_req names, repaint (keep_panel: a field just saved, its box keeps the focus)
+    void paint_browse();                         // category: browse: cards or grid from m_browse_data
+    void paint_cards();                          // category: browse: one calm card per record
+    void paint_grid();                           // category: browse: the dense grid, sortable headers
+    void browse_select(int index);               // category: browse: the picked record (kept across views / pages)
+    const db::Table* browse_info() const;        // category: browse: the shown table in m_schema (nullptr: none)
+
+    // ── records (s006c) -- src/Shell_records.cpp ────────────────────────────
+    // Edits in Browse: the record panel beside the cards / grid. Every write
+    // is a verb through m_journal (set_field / new_record / delete_record).
+    void paint_record();                         // category: records: the panel -- the picked record, or a new one
+    void commit_field(const std::string& row, const std::string& column, const std::string& typed);  // category: records: Enter / leave -> verbs::set_field
+    void on_new_record();                        // category: records: win.new-record -> the panel, blank
+    void on_add_record();                        // category: records: the panel's Add -> verbs::new_record
+    void on_delete_record();                     // category: records: win.delete-record -> verbs::delete_record
+    bool browse_writable() const;                // category: records: Acorn-made + a table with a key
+    void browse_note(const std::string& text, const char* kind);  // category: records: what a step did, under the Browse title
+    const db::Value* browse_value(const std::string& column) const;  // category: records: the picked record's field as last read
 
     // ── ground (s005c) -- src/Shell_ground.cpp ──────────────────────────────
     void bind_ground();                          // category: ground: win.ground (radio) + the saved choice + the provider
@@ -207,6 +234,36 @@ private:
     widgets::Label                  m_tables_where;  // "PostgreSQL -- shop on db.lan · 2 tables, 1 view"
     widgets::Button                 m_new_table_btn; // s005b: "New Table…" (win.new-table)
     widgets::Label                  m_journal_note;  // s005b: "Undid New Table “notes”." / a refusal
+
+    // s006b -- the Browse area: one table's records, a page at a time, as
+    // cards or a grid. Read through the Gate (SELECTs pass with the door shut).
+    widgets::Box                    m_browse_page;
+    widgets::Label                  m_browse_where;   // "Connect to a database first" / "“people” -- 312 records"
+    Glib::RefPtr<Gtk::StringList>   m_browse_names;
+    Gtk::DropDown                   m_browse_pick;
+    widgets::Named<Gtk::ToggleButton> m_browse_cards_btn, m_browse_grid_btn;
+    widgets::Button                 m_browse_prev, m_browse_next;
+    widgets::Label                  m_browse_range;   // "51–100 of 312"
+    widgets::ScrolledWindow         m_browse_scroll;
+    std::string                     m_browse_table;   // "" = none showing
+    db::PageRequest                 m_browse_req;
+    db::Page                        m_browse_data;
+    std::string                     m_browse_sel;     // the picked record's journal id ("" = none)
+    int                             m_browse_sel_index = -1;
+    bool                            m_browse_as_cards = true;
+    bool                            m_browse_painting = false;
+    // s006c -- the record panel and its verbs.
+    widgets::Label                  m_browse_note;    // "Changed “age”. Ctrl+Z undoes it." / a refusal
+    widgets::Button                 m_browse_new, m_browse_delete;
+    widgets::ScrolledWindow         m_record_scroll;
+    bool                            m_record_new = false;   // the panel is a blank new record
+    // Bumped by every paint_record: a box from an older paint never saves (a
+    // box torn down by a repaint loses focus, and its leave would otherwise
+    // save its stale text as a new step -- s006c drive: an undo re-done).
+    unsigned                        m_record_gen = 0;
+    unsigned                        m_view_gen = 0;   // the same, for the cards / grid (a torn-down list says "nothing selected")
+    std::vector<std::pair<std::string, Gtk::Widget*>> m_record_inputs;  // new mode: column -> Entry / CheckButton
+    Glib::RefPtr<Gio::SimpleAction> m_new_record_action, m_delete_record_action;
 
     // s005b -- the Edit section of the menu (re-labelled per step) and the
     // actions held so they can be greyed.
