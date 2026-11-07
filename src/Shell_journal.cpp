@@ -99,6 +99,7 @@ void Shell::journal_note(const std::string& text, const char* kind) {  // journa
     if (!text.empty()) set_status(text, kind);   // the Connect page says it too
     browse_note(text, kind);                      // s006c: and Browse
     graph_note(text, kind);                       // s008b: and the Graph
+    layouts_note(text, kind);                     // s010b: and Layouts
 }
 
 void Shell::reload_schema(const std::string& show) {  // journal: re-read, repaint, select `show`
@@ -116,6 +117,7 @@ void Shell::reload_schema(const std::string& show) {  // journal: re-read, repai
     show_schema();
     rebuild_table_list();
     rebuild_browse_pick();   // s006b: Browse follows (the shown table may have gone)
+    paint_layouts();         // s010b: and Layouts (an undone layout step, a gone field)
     // Give the keyboard back: the table that vanished may have had it. (Only
     // on Tables -- in Browse the focus stays where the user is.)
     if (m_stack.get_visible_child_name() == "tables") {

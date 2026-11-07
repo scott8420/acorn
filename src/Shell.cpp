@@ -54,12 +54,23 @@ Shell::Shell()
       m_graph_page("shell.graph.page", Gtk::Orientation::VERTICAL, 12),
       m_graph_where("shell.graph.where"),
       m_graph_note("shell.graph.note"),
-      m_graph_scroll("shell.graph.scroll") {
+      m_graph_scroll("shell.graph.scroll"),
+      m_layouts_page("shell.layouts.page", Gtk::Orientation::VERTICAL, 12),
+      m_layouts_where("shell.layouts.where"),
+      m_layouts_note("shell.layouts.note"),
+      m_layouts_caption("shell.layouts.caption"),
+      m_lay_new("shell.layouts.new"),
+      m_lay_dup("shell.layouts.duplicate"),
+      m_lay_rename("shell.layouts.rename"),
+      m_lay_delete("shell.layouts.delete"),
+      m_lay_scroll("shell.layouts.scroll"),
+      m_lay_inspector("shell.layouts.inspector", Gtk::Orientation::VERTICAL, 8) {
     set_name("shell.window");
 }
 
 Shell::~Shell() {
     m_graph_pop.unparent();   // s008b: parented by hand, so let go by hand
+    m_lay_pop.unparent();     // s010b: the same
     *m_alive = false;   // keyring callbacks still in flight become no-ops
     // A connect in flight finishes on its own (it has a timeout); wait for it
     // so no thread outlives the loader whose plugin code it is running.

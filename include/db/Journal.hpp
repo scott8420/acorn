@@ -511,6 +511,11 @@ std::expected<void, Error> move_box(Journal& j, const std::string& table, double
 std::expected<void, Error> save_layout(Journal& j, const core::Layout& l);
 // Delete Layout “n”. Refused in words when there's none by that name.
 std::expected<void, Error> delete_layout(Journal& j, const std::string& table, const std::string& name);
+// s010b -- Rename Layout “a” to “b”: one step (the old name gone, the new one
+// kept). Refused in words: no layout “a”, a layout “b” already there, a bad
+// name. The same name: no step.
+std::expected<void, Error> rename_layout(Journal& j, const std::string& table, const std::string& from,
+                                         const std::string& to);
 
 // What a design step would do to the live table, as the SQL put() will run
 // (the designer's preview): `want` is the table as the designer has it.

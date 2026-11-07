@@ -56,21 +56,12 @@ std::optional<Glib::DateTime> day_of(const std::string& s) {
 
 }  // namespace
 
-core::Layout Shell::form_layout(bool* kept) const {  // form: kept in the solution, else the default
+core::Layout Shell::form_layout(bool* kept) const {  // form: the picked layout -- kept, else the default
     if (kept) *kept = false;
     const db::Table* t = browse_info();
     if (!t) return {};
-    if (const auto* l = m_solution.layout(t->name, core::default_layout_name(t->name))) {
-        if (kept) *kept = true;
-        return *l;
-    }
-    if (auto it = m_solution.layouts.find(t->name); it != m_solution.layouts.end() && !it->second.empty()) {
-        if (kept) *kept = true;
-        return it->second.begin()->second;
-    }
-    std::vector<std::string> fields;
-    for (const auto& c : t->columns) fields.push_back(c.name);
-    return core::default_layout(t->name, fields);
+    // s010b: the layout last picked (here or in Layouts), else the default.
+    return layout_of(t->name, picked_layout(t->name), kept);
 }
 
 void Shell::paint_form() {  // form: the picked record through its layout
@@ -100,8 +91,32 @@ void Shell::paint_form() {  // form: the picked record through its layout
     auto cap = form_label(L.name + (kept ? "  ·  kept in the solution"
                                          : "  ·  the default layout -- the table's fields, in order"), "acorn-status");
     cap->set_tooltip_text(kept ? "This layout is kept in the solution (the .acorn file), not the database"
-                               : "Made from the table as it is now; the layout editor (next) keeps your own");
-    outer->append(*cap);
+                               : "Made from the table as it is now; change it in Layouts and it is kept");
+    // s010b: more than one layout -- a picker (shared with the Layouts area).
+    if (const auto names = layout_names(t->name); names.size() > 1) {
+        auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        std::vector<Glib::ustring> shown(names.begin(), names.end());
+        auto dd = Gtk::make_managed<Gtk::DropDown>(Gtk::StringList::create(shown));
+        dd->set_name("shell.browse.form_layout");
+        dd->set_tooltip_text("Which layout the record is shown through");
+        for (std::size_t i = 0; i < names.size(); ++i) if (names[i] == L.name) dd->set_selected(static_cast<guint>(i));
+        const std::string tn = t->name;
+        dd->property_selected().signal_changed().connect([this, dd, names, tn, gen] {
+            if (gen != m_view_gen) return;
+            const auto i = dd->get_selected();
+            if (i == GTK_INVALID_LIST_POSITION || i >= names.size()) return;
+            m_layout_pick[tn] = names[i];
+            m_form_focus.clear();
+            Glib::signal_idle().connect_once([this] { paint_browse(); });
+        });
+        row->append(*dd);
+        cap->set_text(kept ? "kept in the solution" : "the default -- the table's fields, in order");   // the picker names it
+        cap->set_valign(Gtk::Align::CENTER);
+        row->append(*cap);
+        outer->append(*row);
+    } else {
+        outer->append(*cap);
+    }
     if (const std::string mark = mark_of(t->name, row_id); !mark.empty()) {   // s008b's marks, here too
         auto m = form_label("⚠ " + mark, "acorn-mark");
         m->set_ellipsize(Pango::EllipsizeMode::NONE);

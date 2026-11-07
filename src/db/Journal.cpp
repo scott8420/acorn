@@ -2520,6 +2520,24 @@ std::expected<void, Error> delete_layout(Journal& j, const std::string& table, c
     return j.run("Delete Layout " + curly(name), {id}, [&](Store& s) { s.put(id, std::nullopt); });
 }
 
+std::expected<void, Error> rename_layout(Journal& j, const std::string& table, const std::string& from,
+                                         const std::string& to) {
+    const auto a = Store::layout_id(table, from);
+    const auto now = j.store().get(a);
+    if (!now) return std::unexpected(Error{Error::Code::NotFound, curly(table) + " has no layout " + curly(from)});
+    if (from == to) return {};   // no change: no step
+    core::Layout l = std::get<core::Layout>(*now);
+    l.name = to;
+    if (auto why = core::check_layout(l); !why.empty()) return std::unexpected(Error{Error::Code::Unsupported, why});
+    const auto b = Store::layout_id(table, to);
+    if (j.store().get(b))
+        return std::unexpected(Error{Error::Code::Exists, curly(table) + " already has a layout " + curly(to)});
+    return j.run("Rename Layout " + curly(from) + " to " + curly(to), {a, b}, [&](Store& s) {
+        s.put(a, std::nullopt);
+        s.put(b, l);
+    });
+}
+
 std::expected<std::vector<std::string>, Error> preview(Journal& j, const TableDef& want) {
     Store& st = j.store();
     st.forget_schema();
@@ -2761,6 +2779,12 @@ const std::vector<Verb>& all() {
          [](Journal& j) -> std::expected<void, Error> {
              auto l = core::default_layout(kDesign, {"title"});
              l.name = "walk";
+             return save_layout(j, l);
+         }, true},
+        {"Rename Layout", [](Journal& j) { return rename_layout(j, kDesign, "walk to rename", "walk renamed"); },
+         [](Journal& j) -> std::expected<void, Error> {
+             auto l = core::default_layout(kDesign, {"title"});
+             l.name = "walk to rename";
              return save_layout(j, l);
          }, true},
         {"Delete Record (Set Empty)", [](Journal& j) -> std::expected<void, Error> {

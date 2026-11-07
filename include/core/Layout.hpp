@@ -59,4 +59,28 @@ bool missing_field(const LayoutObject& o, const std::vector<std::string>& fields
 // (negative, or zero / negative size), a field object with no field.
 std::string check_layout(const Layout& l);
 
+// ── s010b: the editor's geometry (GTK-free, so the selftest walks it) ───────
+// What a press on an object grabbed: its middle (Move) or one of its eight
+// handles -- the corners and the sides.
+enum class Grab { None, Move, N, S, E, W, NE, NW, SE, SW };
+
+// `v` to the nearest multiple of `grid` (grid <= 1: unchanged); never below 0.
+int snap(int v, int grid = kLayoutGrid);
+
+// `from` dragged by (dx, dy) through `g`, its moving edges snapped to `grid`
+// (Shift: grid 1). It never leaves the top / left (x, y >= 0) and never gets
+// smaller than one grid step (8 px; 1 with Shift) -- a side pushed past the
+// other stops there.
+LayoutObject dragged(const LayoutObject& from, Grab g, int dx, int dy = 0, int grid = kLayoutGrid);
+
+// The body's size follows its objects: the right-most and lowest edges plus
+// the margin, up to the grid (an empty layout: two margins square).
+void fit(Layout& l);
+
+// `base`, or "base 2", "base 3" ... -- the first not in `taken`.
+std::string unique_layout_name(const std::string& base, const std::vector<std::string>& taken);
+
+// "first_name" / "the words “Who”" -- what the editor's notes call an object.
+std::string object_label(const LayoutObject& o);
+
 }  // namespace acorn::core

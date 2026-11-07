@@ -81,17 +81,31 @@ window.acorn stacksidebar row:selected {
 .acorn-panel list,
 .acorn-panel row { background: transparent; color: @acorn_ink; }
 .acorn-panel row:hover { background: rgba(255, 255, 255, 0.04); }
+/* s010b: a drop-down's list inside a panel (the Layouts inspector) -- the rows
+   above take the panel's ink, so its popover takes the panel's ground too
+   (Adwaita's white under ink-coloured words was unreadable). */
+.acorn-panel popover > contents,
+.acorn-panel popover > arrow { background: @acorn_panel; color: @acorn_ink; border: 1px solid @acorn_panel_edge; }
+.acorn-panel popover listview,
+.acorn-panel popover scrolledwindow { background: transparent; color: @acorn_ink; }
+.acorn-panel popover listview > row:hover,
+.acorn-panel popover listview > row:selected { background: rgba(255, 255, 255, 0.08); }
 
 .acorn-field-label { color: @acorn_ink_dim; }
 
 window.acorn entry,
+window.acorn spinbutton,
 window.acorn dropdown > button {
     background: rgba(0, 0, 0, 0.25);
     color: @acorn_ink;
     border: 1px solid rgba(255, 255, 255, 0.10);
     border-radius: 8px;
 }
-window.acorn entry:focus-within { border-color: @acorn_amber_dim; }
+window.acorn entry:focus-within,
+window.acorn spinbutton:focus-within { border-color: @acorn_amber_dim; }
+/* s010b: the inspector's place / size boxes -- the skin's, not Adwaita's white */
+window.acorn spinbutton > text { color: @acorn_ink; }
+window.acorn spinbutton > button { color: @acorn_ink_dim; background: none; border: none; }
 
 window.acorn button.acorn-primary {
     background: @acorn_amber;

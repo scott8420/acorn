@@ -43,4 +43,63 @@ std::string check_layout(const Layout& l) {
     return {};
 }
 
+// ── s010b: the editor's geometry ────────────────────────────────────────────
+
+int snap(int v, int grid) {
+    if (v < 0) v = 0;
+    if (grid <= 1) return v;
+    return ((v + grid / 2) / grid) * grid;
+}
+
+LayoutObject dragged(const LayoutObject& from, Grab g, int dx, int dy, int grid) {
+    LayoutObject o = from;
+    const int minsz = std::max(1, grid);
+    if (g == Grab::Move) {
+        o.x = snap(from.x + dx, grid);
+        o.y = snap(from.y + dy, grid);
+        return o;
+    }
+    const bool left   = g == Grab::W || g == Grab::NW || g == Grab::SW;
+    const bool right  = g == Grab::E || g == Grab::NE || g == Grab::SE;
+    const bool top    = g == Grab::N || g == Grab::NW || g == Grab::NE;
+    const bool bottom = g == Grab::S || g == Grab::SW || g == Grab::SE;
+    const int r = from.x + from.w, b = from.y + from.h;
+    if (left) {
+        const int nx = std::min(snap(from.x + dx, grid), r - minsz);
+        o.x = std::max(0, nx);
+        o.w = r - o.x;
+    }
+    if (right) o.w = std::max(minsz, snap(r + dx, grid) - from.x);
+    if (top) {
+        const int ny = std::min(snap(from.y + dy, grid), b - minsz);
+        o.y = std::max(0, ny);
+        o.h = b - o.y;
+    }
+    if (bottom) o.h = std::max(minsz, snap(b + dy, grid) - from.y);
+    return o;
+}
+
+void fit(Layout& l) {
+    int r = 0, b = 0;
+    for (const auto& o : l.objects) {
+        r = std::max(r, o.x + o.w);
+        b = std::max(b, o.y + o.h);
+    }
+    auto up = [](int v) { return ((v + kLayoutGrid - 1) / kLayoutGrid) * kLayoutGrid; };
+    l.width  = l.objects.empty() ? 2 * kFormMargin : up(r + kFormMargin);
+    l.height = l.objects.empty() ? 2 * kFormMargin : up(b + kFormMargin);
+}
+
+std::string unique_layout_name(const std::string& base, const std::vector<std::string>& taken) {
+    auto free = [&](const std::string& n) { return std::find(taken.begin(), taken.end(), n) == taken.end(); };
+    if (free(base)) return base;
+    for (int i = 2;; ++i)
+        if (auto n = base + " " + std::to_string(i); free(n)) return n;
+}
+
+std::string object_label(const LayoutObject& o) {
+    if (o.kind == ObjectKind::Field) return "“" + o.field + "”";
+    return "the words “" + o.text + "”";
+}
+
 }  // namespace acorn::core

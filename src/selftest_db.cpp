@@ -1917,6 +1917,45 @@ void test_layouts_pure(const fs::path& dir) {
           half->layout("a", "good")->objects.size() == 1, "");
     { std::ofstream g(dir / "s009.acorn"); g << R"({"acorn": 1, "boxes": {"a": {"x": 1, "y": 2}}})"; }
     auto old = core::load_solution((dir / "s009.acorn").string());
+    // s010b: the editor's geometry.
+    using core::Grab;
+    const core::LayoutObject o{ObjectKind::Field, "f", "", 160, 40, 80, 24};
+    check("layouts: snap -- to the nearest 8, never below 0; grid 1 leaves it",
+          core::snap(13) == 16 && core::snap(11) == 8 && core::snap(-5) == 0 && core::snap(13, 1) == 13, "");
+    const auto mv = core::dragged(o, Grab::Move, 13, -3);
+    const auto mv1 = core::dragged(o, Grab::Move, 3, 1, 1);
+    const auto far = core::dragged(o, Grab::Move, -999, -999);
+    check("layouts: a move snaps to the grid (Shift: by the pixel) and stops at the top-left, its size kept",
+          mv.x == 176 && mv.y == 40 && mv.w == 80 && mv1.x == 163 && mv1.y == 41 && far.x == 0 && far.y == 0 && far.w == 80,
+          std::to_string(mv.x) + "," + std::to_string(mv.y));
+    const auto e1 = core::dragged(o, Grab::E, 21);
+    const auto w1 = core::dragged(o, Grab::W, -19);
+    const auto se = core::dragged(o, Grab::SE, 5, 13);
+    const auto nw = core::dragged(o, Grab::NW, 8, 8);
+    check("layouts: a side or corner moves only its own edges, snapped -- the other edges stay",
+          e1.x == 160 && e1.w == 104 && w1.x == 144 && w1.w == 96 && se.w == 88 && se.h == 40 && se.x == 160 &&
+          nw.x == 168 && nw.y == 48 && nw.w == 72 && nw.h == 16,
+          std::to_string(e1.w) + " " + std::to_string(w1.x) + "/" + std::to_string(w1.w));
+    const auto squash = core::dragged(o, Grab::E, -500);
+    const auto squashw = core::dragged(o, Grab::W, 500);
+    const auto squash1 = core::dragged(o, Grab::S, -500, -500, 1);
+    const auto off = core::dragged(o, Grab::W, -500);
+    check("layouts: never smaller than one grid step (1 px with Shift); a left side stops at 0",
+          squash.w == 8 && squash.x == 160 && squashw.w == 8 && squashw.x == 232 && squash1.h == 1 &&
+          off.x == 0 && off.w == 240, std::to_string(squashw.x) + "/" + std::to_string(squashw.w));
+    auto fl = d;
+    core::fit(fl);
+    auto fl2 = d;
+    fl2.objects[1].w = 401;
+    core::fit(fl2);
+    core::Layout empty{"t", "e", 999, 999, {}};
+    core::fit(empty);
+    check("layouts: the body fits its objects plus the margin, up to the grid (the default already does)",
+          fl.width == d.width && fl.height == d.height && fl2.width == 168 + 401 + 16 + 7 && empty.width == 32,
+          std::to_string(fl2.width));
+    check("layouts: a free name -- contacts Form 2, 3 ...",
+          core::unique_layout_name("contacts Form", {"x"}) == "contacts Form" &&
+          core::unique_layout_name("contacts Form", {"contacts Form", "contacts Form 2"}) == "contacts Form 3", "");
     check("layouts: an s009 file (no layouts) reads -- no layouts", old && old->layouts.empty() && old->boxes.size() == 1, "");
 }
 
@@ -1977,6 +2016,26 @@ void test_layouts(Engine* e, const ConnectParams& ro, const std::string& P) {
     auto ub = j.undo();
     check(P + "layouts: a box's undo leaves the layouts alone", both && ub && sol.boxes["customers"] == core::BoxPlace{1, 2} &&
           *sol.layout("customers", "customers Form") == l, "");
+    // s010b: Rename Layout -- one step; Ctrl+Z puts the old name back.
+    auto rn = verbs::rename_layout(j, "customers", "customers Form", "Front Desk");
+    check(P + "layouts: Rename Layout -- one step, the old name gone, the new one kept as it was",
+          rn && !sol.layout("customers", "customers Form") && sol.layout("customers", "Front Desk") &&
+          sol.layout("customers", "Front Desk")->objects == l.objects &&
+          j.undo_label() == "Rename Layout “customers Form” to “Front Desk”", rn ? j.undo_label() : rn.error().message);
+    auto urn = j.undo();
+    check(P + "layouts: ... Ctrl+Z puts the old name back", urn && sol.layout("customers", "customers Form") &&
+          !sol.layout("customers", "Front Desk") && *sol.layout("customers", "customers Form") == l, "");
+    auto dup = l;
+    dup.name = "Front Desk";
+    (void)verbs::save_layout(j, dup);
+    const auto n3 = j.size();
+    auto clash = verbs::rename_layout(j, "customers", "customers Form", "Front Desk");
+    auto gone = verbs::rename_layout(j, "customers", "nope", "x");
+    auto blank = verbs::rename_layout(j, "customers", "customers Form", " ");
+    auto same2 = verbs::rename_layout(j, "customers", "customers Form", "customers Form");
+    check(P + "layouts: Rename refused in words -- the name taken, no such layout, a blank name; the same name is no step",
+          !clash && clash.error().code == Error::Code::Exists && !gone && gone.error().code == Error::Code::NotFound &&
+          !blank && same2 && j.size() == n3, clash ? "renamed!" : clash.error().message);
     Journal nosol(g, e->dialect(), e->caps());
     auto ns = verbs::save_layout(nosol, l);
     check(P + "layouts: no solution -- refused in words", !ns && ns.error().code == Error::Code::Unsupported, ns ? "saved!" : "");
@@ -2054,7 +2113,9 @@ void test_journal(Engine* e, const ConnectParams& rw, const ConnectParams& ro, c
         if (v.local) {   // s009: the solution changes, the database never does
             check(P + "verb " + v.name + ": runs, is one step, changes the solution -- not the database",
                   r.has_value() && j.size() == steps + 1 && j.can_undo() && after == before && sol_after != sol_before,
-                  r ? "" : r.error().message);
+                  r ? std::to_string(steps) + " -> " + std::to_string(j.size()) + (after == before ? "" : ", db changed") +
+                          (sol_after != sol_before ? "" : ", solution unchanged")
+                    : r.error().message);
         } else {
             check(P + "verb " + v.name + ": runs, is one step, changes the database",
                   r.has_value() && j.size() == steps + 1 && j.can_undo() && after != before,

@@ -16,6 +16,9 @@
 
 #include <glibmm/dispatcher.h>
 #include <gtkmm/dropdown.h>
+#include <gtkmm/drawingarea.h>   // s010b
+#include <gtkmm/fixed.h>
+#include <gtkmm/overlay.h>
 #include <gtkmm/stringlist.h>
 
 #include <gtkmm/applicationwindow.h>
@@ -65,6 +68,7 @@
 //   "Where does a write go / undo run?" -> Shell_journal.cpp  (on_new_table / on_undo)
 //   "Where are records shown?"          -> Shell_browse.cpp   (paint_browse)
 //   "Where are links drawn / made?"     -> Shell_graph.cpp    (paint_graph / on_graph_drop)
+//   "Where are layouts edited?"         -> Shell_layouts.cpp  (paint_layouts / keep_layout)
 // ─────────────────────────────────────────────────────────────────────────────
 namespace acorn {
 
@@ -184,6 +188,27 @@ private:
     void open_solution(const core::SavedConnection& c);  // category: graph: s009 -- the connection's .acorn, read (or a fresh one)
     void on_open_solution();                     // category: graph: s009c -- pick an .acorn, connect to what it points at
     void on_repoint_solution();                  // category: graph: s009c -- the next connection takes this solution along
+
+    // ── layouts (s010b) -- src/Shell_layouts.cpp ────────────────────────────
+    // The layout editor: a table's layouts, a canvas, an inspector. Every edit
+    // is verbs::save_layout (one step on the same Ctrl+Z list); kept in the
+    // solution, never the database -- so it works on a read-only connection.
+    void build_layouts_page();                   // category: layouts: the Layouts area
+    void paint_layouts();                        // category: layouts: pickers, canvas and inspector from the solution
+    void paint_inspector();                      // category: layouts: the picked object's field / words / place
+    void layouts_note(const std::string& text, const char* kind);  // category: layouts: under the Layouts title
+    void draw_layout(const Cairo::RefPtr<Cairo::Context>& cr, int w, int h);  // category: layouts: the canvas
+    void keep_layout(core::Layout l, const std::string& did);  // category: layouts: verbs::save_layout, the note, a repaint
+    void layout_nudge(int dx, int dy);           // category: layouts: the arrows -- the picked object by 8 (Shift: 1)
+    void layout_remove_object();                 // category: layouts: Delete -- the picked object off the layout
+    void on_layout_new();                        // category: layouts: the default, under a new name
+    void on_layout_duplicate();                  // category: layouts: the shown layout, under a new name
+    void on_layout_rename();                     // category: layouts: a popover -> verbs::rename_layout
+    void on_layout_delete();                     // category: layouts: verbs::delete_layout
+    std::vector<std::string> layout_names(const std::string& table) const;  // category: layouts: the default first, then the kept ones
+    std::string picked_layout(const std::string& table) const;  // category: layouts: the name last picked for the table (else the default)
+    core::Layout layout_of(const std::string& table, const std::string& name, bool* kept = nullptr) const;  // category: layouts: kept, else the computed default
+    std::vector<std::string> fields_of(const std::string& table) const;  // category: layouts: the live table's fields, in order
 
     // ── ground (s005c) -- src/Shell_ground.cpp ──────────────────────────────
     void bind_ground();                          // category: ground: win.ground (radio) + the saved choice + the provider
@@ -334,6 +359,30 @@ private:
     std::optional<core::Solution>   m_repoint;           // s009c: carried to the next connection
     unsigned                        m_graph_gen = 0;
     Gtk::Widget*                    m_graph_canvas = nullptr;   // the Fixed of boxes (handles are hit on it)
+
+    // s010b -- the Layouts area.
+    widgets::Box                    m_layouts_page;
+    widgets::Label                  m_layouts_where, m_layouts_note, m_layouts_caption;
+    Glib::RefPtr<Gtk::StringList>   m_lay_tables, m_lay_names;
+    Gtk::DropDown                   m_lay_table_pick, m_lay_name_pick;
+    widgets::Button                 m_lay_new, m_lay_dup, m_lay_rename, m_lay_delete;
+    widgets::ScrolledWindow         m_lay_scroll;
+    Gtk::Overlay                    m_lay_overlay;
+    Gtk::Fixed                      m_lay_fixed;     // sizes the canvas (room to drag past the body)
+    Gtk::Box                        m_lay_paper;     // the body, styled as the Form's
+    Gtk::DrawingArea                m_lay_canvas;    // the objects, drawn; every press lands here
+    widgets::Box                    m_lay_inspector;
+    Gtk::Popover                    m_lay_pop;       // Rename
+    std::string                     m_lay_table;     // the table whose layouts are shown
+    std::map<std::string, std::string> m_layout_pick;   // table -> the layout last picked (Layouts and Form share it)
+    core::Layout                    m_lay;           // the shown layout (a drag changes it live, then keeps it)
+    bool                            m_lay_kept = false;
+    int                             m_lay_sel = -1;  // the picked object
+    core::Grab                      m_lay_grab = core::Grab::None;
+    core::LayoutObject              m_lay_from;      // the picked object as the drag began
+    bool                            m_lay_painting = false;
+    unsigned                        m_lay_gen = 0;   // an inspector box from an older paint never saves
+    std::string                     m_lay_focus;     // the inspector box last focused (kept across a repaint)
 
     // s005b -- the Edit section of the menu (re-labelled per step) and the
     // actions held so they can be greyed.
