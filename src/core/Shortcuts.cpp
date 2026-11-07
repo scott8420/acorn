@@ -111,6 +111,13 @@ const std::vector<ShortcutSpec>& shortcut_registry() {
         {"Diagnostics", "win.dump-registry", {"<Ctrl>d"}, "",
          "Dump the widget registry to the log"},
 
+        // ── Edit ──────────────────────────────────────────────────────────────
+        // Doc-only on purpose (docs/undo.md): an accelerator would fire before
+        // the focused widget and take undo away from every text box. The
+        // window hears these in the bubble phase instead (Shell_journal.cpp).
+        {"Edit", "", {}, "Ctrl+Z", "Undo the last change to the database"},
+        {"Edit", "", {}, "Ctrl+Shift+Z", "Redo it"},
+
         // ── General ───────────────────────────────────────────────────────────
         {"General", "win.new-file",      {"<Ctrl>n"}, "", "New database file (empty SQLite)"},
         {"General", "win.open-file",     {"<Ctrl>o"}, "", "Open a database file"},

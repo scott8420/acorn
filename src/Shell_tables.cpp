@@ -71,7 +71,22 @@ void Shell::build_tables_page() {  // tables: the read-only schema browser
     m_tables_where.add_css_class("acorn-hero-sub");
     hero->append(*title);
     hero->append(m_tables_where);
-    m_tables_page.append(*hero);
+    m_journal_note.set_xalign(0.0f);
+    m_journal_note.set_wrap(true);
+    m_journal_note.add_css_class("acorn-status");
+    hero->append(m_journal_note);
+    // s005b: the first write Acorn offers. Enabled only on a writable
+    // connection (sync_undo greys the action).
+    auto top = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 10);
+    hero->set_hexpand(true);
+    m_new_table_btn.set_label("New Table\u2026");
+    m_new_table_btn.add_css_class("acorn-primary");
+    m_new_table_btn.set_valign(Gtk::Align::CENTER);
+    m_new_table_btn.set_action_name("win.new-table");
+    m_new_table_btn.set_tooltip_text("Make a new, empty table -- the SQL is shown before it runs");
+    top->append(*hero);
+    top->append(m_new_table_btn);
+    m_tables_page.append(*top);
 
     auto body = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 14);
     body->set_vexpand(true);
@@ -131,7 +146,9 @@ void Shell::rebuild_table_list() {  // tables: the left list, after a connect
     } else {
         m_tables_where.set_text(m_conn_label + " · " + std::to_string(tables) + " table" +
                                 (tables == 1 ? "" : "s") + ", " + std::to_string(views) + " view" +
-                                (views == 1 ? "" : "s") + " · read-only");
+                                (views == 1 ? "" : "s") +
+                                (m_writable ? " · made by Acorn: changes go through the journal"
+                                            : " · read-only"));
     }
     // Keep the shown table if it survived the reconnect, else the first one.
     std::string pick = m_schema.table(m_table_sel) ? m_table_sel : std::string{};

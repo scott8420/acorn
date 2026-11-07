@@ -81,6 +81,7 @@ struct Error {
         Unsupported,     // the engine lacks the capability
         Internal,
         Exists,          // s005a: refused -- the file is already there (appended: no renumbering)
+        Changed,         // s005b: refused -- the database no longer looks the way the step left it
     };
     Code code = Code::Internal;
     std::string message;     // the engine's own words where it gave any

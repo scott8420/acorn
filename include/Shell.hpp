@@ -4,6 +4,7 @@
 #include "Keyring.hpp"             // s004b: passwords in the GNOME keyring
 #include "db/Loader.hpp"     // s004: engine plugins
 #include "db/Schema.hpp"
+#include "db/Journal.hpp"   // s005b: the door
 
 #include <glibmm/dispatcher.h>
 #include <gtkmm/dropdown.h>
@@ -52,11 +53,13 @@
 //   "Where does the recents list sync?" -> Shell_helpers.cpp  (remember_connection / rebuild_*)
 //   "Where does a password come from?"  -> Shell_connect.cpp  (on_connect -> keyring lookup)
 //   "Where is a table's detail drawn?"  -> Shell_tables.cpp   (show_table)
+//   "Where does a write go / undo run?" -> Shell_journal.cpp  (on_new_table / on_undo)
 // ─────────────────────────────────────────────────────────────────────────────
 namespace acorn {
 
 class AboutWindow;
 class ShortcutsDialog;
+class NewTableWindow;
 
 class Shell : public Gtk::ApplicationWindow {
 public:
@@ -102,6 +105,18 @@ private:
     void show_table(const std::string& name);    // category: tables: paint one table's detail
     void open_table(const std::string& name);    // category: tables: go to the Tables area, that table selected
 
+    // ── journal (s005b) -- src/Shell_journal.cpp ────────────────────────────
+    // Every write goes through m_journal (the door); the UI only asks.
+    void bind_journal();                         // category: journal: win.undo / win.redo / win.new-table + the window's Ctrl+Z
+    void attach_journal(db::Engine* e);          // category: journal: a new connection -> a fresh journal (no step carries over)
+    void sync_undo();                            // category: journal: re-label + grey Undo / Redo / New Table
+    void on_undo();                              // category: journal: Ctrl+Z
+    void on_redo();                              // category: journal: Ctrl+Shift+Z
+    void on_new_table();                         // category: journal: the New Table window -> Journal::run
+    void reload_schema(const std::string& show); // category: journal: re-read the schema after a step, repaint, select `show`
+    bool focus_is_text() const;                  // category: journal: a text box keeps its own Ctrl+Z
+    void journal_note(const std::string& text, const char* kind);  // category: journal: what a step did, under the Tables title
+
     // ── helpers ────────────────────────────────────────────────────────────
     std::string connections_file() const;        // category: helper: the XDG path (UI-side resolution)
     void remember_connection(const core::SavedConnection& c);  // category: helper: push + persist + repaint
@@ -135,7 +150,13 @@ private:
     // s004 -- the Connect area. DECLARATION ORDER MATTERS: the loader owns the
     // plugin code, so it is declared before (destroyed after) the connection.
     db::Loader                      m_loader;
-    std::unique_ptr<db::Connection> m_conn;          // read-only until s005's door
+    // s005b: the connection is a Gate -- reads pass, a write with the door
+    // shut is refused. The journal holds a reference to it, so it is declared
+    // AFTER (destroyed BEFORE) the gate.
+    std::unique_ptr<db::Gate>       m_conn;
+    std::unique_ptr<db::Journal>    m_journal;
+    db::Engine*                     m_conn_engine = nullptr;
+    bool                            m_writable = false;   // s005b: only files Acorn made
     db::Schema                      m_schema;
     std::string                     m_conn_label;    // "SQLite -- shop.sqlite"
     std::vector<db::Engine*>        m_engines;       // dropdown order
@@ -160,6 +181,8 @@ private:
     std::unique_ptr<db::Connection> m_result_conn;
     db::Schema                      m_result_schema;
     std::string                     m_result_error;
+    bool                            m_result_writable = false;
+    db::Engine*                     m_pending_engine = nullptr;
     // What the connect in flight was asked for: on success it becomes a
     // recent, and (server, Remember ticked, password typed) the typed password
     // goes to the keyring. The password is dropped as soon as it is handed on.
@@ -174,6 +197,14 @@ private:
     widgets::ListBox                m_table_list;
     widgets::Box                    m_table_detail;
     widgets::Label                  m_tables_where;  // "PostgreSQL -- shop on db.lan · 2 tables, 1 view"
+    widgets::Button                 m_new_table_btn; // s005b: "New Table…" (win.new-table)
+    widgets::Label                  m_journal_note;  // s005b: "Undid New Table “notes”." / a refusal
+
+    // s005b -- the Edit section of the menu (re-labelled per step) and the
+    // actions held so they can be greyed.
+    Glib::RefPtr<Gio::Menu>         m_edit_menu;
+    Glib::RefPtr<Gio::SimpleAction> m_undo_action, m_redo_action, m_new_table_action;
+    std::unique_ptr<NewTableWindow> m_new_table_win;
     std::string                     m_table_sel;     // the shown table ("" = none)
     bool                            m_table_painting = false;
 

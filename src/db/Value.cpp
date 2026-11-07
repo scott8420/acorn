@@ -57,6 +57,7 @@ const char* to_string(Error::Code c) {
     case Error::Code::Unsupported: return "unsupported";
     case Error::Code::Internal:    return "internal";
     case Error::Code::Exists:      return "exists";
+    case Error::Code::Changed:     return "changed";
     }
     return "?";
 }

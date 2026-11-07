@@ -1,6 +1,7 @@
 #include "Shell.hpp"
 #include "AboutWindow.hpp"      // complete type for ~unique_ptr<AboutWindow> in ~Shell()
 #include "ShortcutsDialog.hpp"  // ditto -- same singleton shape, same dtor requirement
+#include "NewTableWindow.hpp"   // ditto (s005b)
 #include "Log.hpp"
 
 // Shell.cpp -- GLUE. The ctor and the ordered build_ui() pass live here; every
@@ -33,7 +34,9 @@ Shell::Shell()
       m_tables_page("shell.tables.page", Gtk::Orientation::VERTICAL, 12),
       m_table_list("shell.tables.list"),
       m_table_detail("shell.tables.detail", Gtk::Orientation::VERTICAL, 10),
-      m_tables_where("shell.tables.where") {
+      m_tables_where("shell.tables.where"),
+      m_new_table_btn("shell.tables.new_table"),
+      m_journal_note("shell.tables.journal_note") {
     set_name("shell.window");
 }
 
@@ -51,6 +54,7 @@ void Shell::build_ui() {
     build_shell();     // zone
     build_pages();     // zone
     bind_actions();    // bindings
+    bind_journal();    // s005b: undo / redo / new table + the window's Ctrl+Z
 
     // The recents list was loaded in bind_actions (after its action group
     // exists, so a click can route); paint both surfaces.

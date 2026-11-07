@@ -43,11 +43,14 @@
 //   * a no-op is not a step (a refused delete, a value set to itself).
 //   * SELECTION travels with the step: undo hands back what was selected
 //     before, redo what was selected after (Curvz: preserves_selection()).
+//   * a FALLIBLE store (a database: failed()) -- a write that did not happen
+//     keeps no step, and an undo / redo that failed moves nothing (s005b).
 //   * open(): true inside run / a gesture / undo / redo. A store that wants the
 //     ONE-DOOR guarantee checks it in put() and counts a write made outside --
 //     the selftest walks every verb and fails on a stray (the gate).
 // ─────────────────────────────────────────────────────────────────────────────
 #include <chrono>
+#include <concepts>
 #include <cstddef>
 #include <functional>
 #include <optional>
@@ -117,6 +120,7 @@ public:
         ++m_depth;
         const std::vector<Id> made = call(op, ids);
         --m_depth;
+        if (store_failed() || !settle()) return false;   // a fallible store said no: no step
 
         for (const auto& id : made)
             if (!has(st, id)) st.entries.push_back({id, std::nullopt, std::nullopt});
@@ -184,9 +188,13 @@ public:
         if (!can_undo()) return r;
         const Step& st = m_steps[--m_at];
         ++m_depth;
-        for (auto it = st.entries.rbegin(); it != st.entries.rend(); ++it)
+        for (auto it = st.entries.rbegin(); it != st.entries.rend(); ++it) {
             m_store.put(it->id, it->before);
+            if (store_failed()) break;
+        }
+        if (!store_failed()) settle();
         --m_depth;
+        if (store_failed()) { ++m_at; return r; }   // still done; the caller rolls back
         r = {true, st.label, pick(st.sel_before, st, true)};
         notify();
         return r;
@@ -196,8 +204,13 @@ public:
         if (m_gesture || !can_redo()) return r;
         const Step& st = m_steps[m_at++];
         ++m_depth;
-        for (const auto& e : st.entries) m_store.put(e.id, e.after);
+        for (const auto& e : st.entries) {
+            m_store.put(e.id, e.after);
+            if (store_failed()) break;
+        }
+        if (!store_failed()) settle();
         --m_depth;
+        if (store_failed()) { --m_at; return r; }   // still undone; the caller rolls back
         r = {true, st.label, pick(st.sel_after, st, false)};
         notify();
         return r;
@@ -208,6 +221,12 @@ public:
     void reselect(const std::vector<Id>& sel) {
         if (can_undo() && m_at == m_steps.size()) m_steps.back().sel_after = sel;
     }
+
+    // The step an undo / redo would apply (nullptr: none). A store that can be
+    // changed behind Acorn's back (a database) checks the live records against
+    // the step's pictures before letting it run.
+    const Step* next_undo() const { return can_undo() ? &m_steps[m_at - 1] : nullptr; }
+    const Step* next_redo() const { return can_redo() ? &m_steps[m_at] : nullptr; }
 
     bool        can_undo()   const { return m_at > 0; }
     bool        can_redo()   const { return m_at < m_steps.size(); }
@@ -231,6 +250,25 @@ private:
     Step                              m_open;        // the gesture being recorded
     std::function<std::vector<Id>()>  m_sel;
     std::function<void()>             m_changed;
+
+    // A FALLIBLE store (s005b: a database) has `bool failed() const`. When a
+    // write it was asked for did not happen, run() keeps no step and undo /
+    // redo leave the position where it was -- the store's owner rolls back.
+    bool store_failed() const {
+        if constexpr (requires(const Store& s) { { s.failed() } -> std::convertible_to<bool>; })
+            return m_store.failed();
+        else
+            return false;
+    }
+
+    // ...and may have `bool settle()`: make this step's writes final (a
+    // database commits). false = they did not stick; the step does not count.
+    bool settle() {
+        if constexpr (requires(Store& s) { { s.settle() } -> std::convertible_to<bool>; })
+            return m_store.settle();
+        else
+            return true;
+    }
 
     template <class Op>
     std::vector<Id> call(Op& op, const std::vector<Id>&) {

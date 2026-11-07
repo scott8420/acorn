@@ -69,6 +69,11 @@ Glib::RefPtr<Gio::Menu> Shell::build_menu() {  // zone: hamburger model
     file->append_submenu("Open Recent", m_recents_menu);
     menu->append_section(file);
 
+    // s005b: Undo / Redo name the step ("Undo New Table “notes”"); the
+    // section is refilled by sync_undo whenever the journal changes.
+    m_edit_menu = Gio::Menu::create();
+    menu->append_section(m_edit_menu);
+
     auto diag = Gio::Menu::create();
     diag->append("Dump registry", "win.dump-registry");
     menu->append_section(diag);

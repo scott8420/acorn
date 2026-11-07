@@ -14,9 +14,13 @@
 #include <gtkmm/scrolledwindow.h>
 
 // Shell_connect.cpp -- the CONNECT area (s004). Pick an engine, point it at a
-// file or a server, connect READ-ONLY (RULES: the data is sacred -- nothing
-// writes until s005's door), and read the schema on a worker so the window
-// never waits on a slow server.
+// file or a server, connect READ-ONLY (RULES: the data is sacred), and read
+// the schema on a worker so the window never waits on a slow server.
+//
+// s005b: the one exception -- an SQLite file Acorn made itself (New Database
+// File stamps PRAGMA application_id 'Acor') opens read-write, behind the gate,
+// with the change journal as its only door. Every other database stays
+// read-only until the journal is crc'd on Scott's machine.
 //
 // Threading: the worker opens the connection and introspects, parks the
 // results under m_result_mx and emits m_connect_done; on_connect_done runs on
@@ -68,7 +72,8 @@ void Shell::build_connect_page() {  // connect: the Connect area
     title->set_xalign(0.0f);
     title->add_css_class("acorn-hero-title");
     auto sub = Gtk::make_managed<Gtk::Label>(
-        "Open a database to look around. Acorn reads only, for now -- nothing is changed.");
+        "Open a database to look around. Acorn only reads it -- except a file Acorn made itself, "
+        "where every change goes through the journal and can be undone.");
     sub->set_xalign(0.0f);
     sub->set_wrap(true);
     sub->add_css_class("acorn-hero-sub");
@@ -273,7 +278,7 @@ void Shell::on_new_file() {  // connect: Ctrl+N -- make an empty SQLite file, op
             return;
         }
         m_path.set_text(path.string());
-        on_connect();   // the normal read-only open; it becomes a recent
+        on_connect();   // the normal open (stamped -> read-write behind the gate); it becomes a recent
     });
 }
 
@@ -385,15 +390,28 @@ void Shell::on_connect() {  // connect: read the form -> keyring -> start
 
 void Shell::start_connect(db::Engine* e, db::ConnectParams p) {  // connect: open + introspect on a worker
     set_status("Connecting to " + m_conn_label + "…", "");
+    m_pending_engine = e;
     if (auto lg = log::get(log::Area::App))
-        lg->info("connect (read-only): {}{}", m_conn_label,
+        lg->info("connect: {}{}", m_conn_label,
                  m_pending_from_keyring ? " [password from keyring]" : "");
 
     m_worker = std::thread([this, e, p = std::move(p)]() mutable {
         std::unique_ptr<db::Connection> conn;
         db::Schema schema;
         std::string error;
+        bool writable = false;
         auto c = e->open(p);
+        // s005b: a file Acorn made (stamped 'Acor') reopens read-write. The
+        // stamp is read on the read-only connection first, so nothing else
+        // is ever opened writable.
+        if (c && !e->caps().needs_server && e->dialect() == db::Dialect::SQLite) {
+            auto id = (*c)->query("PRAGMA application_id");
+            if (id && !id->rows.empty() && id->rows[0][0].as_int() == std::int64_t{db::kAcornApplicationId}) {
+                db::ConnectParams w = p;
+                w.read_only = false;
+                if (auto rw = e->open(w)) { c = std::move(rw); writable = true; }
+            }
+        }
         std::fill(p.password.begin(), p.password.end(), '\0');
         p.password.clear();
         if (c) {
@@ -411,6 +429,7 @@ void Shell::start_connect(db::Engine* e, db::ConnectParams p) {  // connect: ope
             m_result_conn = std::move(conn);
             m_result_schema = std::move(schema);
             m_result_error = std::move(error);
+            m_result_writable = writable;
         }
         m_connect_done.emit();
     });
@@ -421,10 +440,12 @@ void Shell::on_connect_done() {  // connect: back on the UI thread
     m_connect.set_sensitive(true);
     std::unique_ptr<db::Connection> conn;
     std::string error;
+    bool writable = false;
     {
         std::lock_guard lk(m_result_mx);
         conn = std::move(m_result_conn);
         error = std::move(m_result_error);
+        writable = m_result_writable;
         if (conn) m_schema = std::move(m_result_schema);
     }
     const std::string typed = std::exchange(m_pending_password, std::string{});
@@ -435,7 +456,12 @@ void Shell::on_connect_done() {  // connect: back on the UI thread
         if (auto lg = log::get(log::Area::App)) lg->warn("connect failed: {}", error);
         return;
     }
-    m_conn = std::move(conn);
+    // s005b: the old journal goes first (it holds the old gate); the new
+    // connection is a gate with a fresh journal -- no step carries over.
+    m_journal.reset();
+    m_conn = std::make_unique<db::Gate>(std::move(conn));
+    m_writable = writable && !m_conn->read_only();
+    attach_journal(m_pending_engine);
 
     // It worked: remember the connection (never the password), and settle the
     // keyring the way the checkbox says.
@@ -459,7 +485,9 @@ void Shell::on_connect_done() {  // connect: back on the UI thread
     }
     std::size_t tables = 0, views = 0;
     for (auto& t : m_schema.tables) (t.kind == db::Table::Kind::View ? views : tables)++;
-    set_status("Connected to " + m_conn_label + " (read-only): " + std::to_string(tables) +
+    set_status("Connected to " + m_conn_label +
+               (m_writable ? " (made by Acorn -- changes allowed, each one can be undone): "
+                           : " (read-only): ") + std::to_string(tables) +
                " table" + (tables == 1 ? "" : "s") + ", " + std::to_string(views) + " view" +
                (views == 1 ? "" : "s") + ".", "ok");
     set_title("Acorn — " + m_conn_label);
