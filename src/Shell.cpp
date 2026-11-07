@@ -86,6 +86,7 @@ void Shell::build_ui() {
     bind_actions();    // bindings
     bind_journal();    // s005b: undo / redo / new table + the window's Ctrl+Z
     bind_ground();     // s005c: the skin's base colour, as saved
+    bind_startup();    // s010f: the sample Address Book (opened once the window is up, when on)
 
     // The recents list was loaded in bind_actions (after its action group
     // exists, so a click can route); paint both surfaces.

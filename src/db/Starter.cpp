@@ -1,5 +1,7 @@
 #include "db/Starter.hpp"
 
+#include <iterator>
+
 // db/Starter.cpp -- the starter databases (s009b). Every table, link and
 // record goes through the verbs, so a starter is exactly what a person could
 // have built by hand -- on any engine.
@@ -9,6 +11,67 @@ namespace acorn::db {
 namespace {
 ColumnDef field(Dialect d, const char* name, FieldType t) { return {name, decl_for(d, t), true, std::nullopt, 0, false}; }
 ColumnDef counting_key(Dialect d) { return {"id", decl_for(d, FieldType::Integer), false, std::nullopt, 1, true}; }
+
+// The made-up people [from, to): the starter takes the first three, the
+// sample (s010f) all twelve.
+std::expected<void, Error> add_people(Journal& j, std::size_t from, std::size_t to) {
+    struct Person {
+        const char* first; const char* last; const char* company; const char* email; const char* birthday; const char* notes;
+        const char* kind; const char* street; const char* city; const char* region; const char* postal; const char* country;
+        std::vector<std::pair<const char*, const char*>> phones;
+    };
+    static const Person people[] = {
+        {"Mabel", "Thorne", "Thorne & Daughters Bindery", "mabel@thorne-bindery.example", "1961-04-12",
+         "Rebinds old ledgers. Prefers a phone call to email.",
+         "work", "14 Quill Lane", "Harrowgate", "TN", "38401", "USA", {{"work", "555-0142"}, {"mobile", "555-0177"}}},
+        {"Rufus", "Kettle", "", "rufus.kettle@example.com", "1978-09-30", "Neighbour. Borrowed the ladder.",
+         "home", "7 Orchard Row", "Millbrook", "TN", "38463", "USA", {{"home", "555-0109"}}},
+        {"Imogen", "Vale", "Vale Survey Co.", "imogen@valesurvey.example", "", "Met at the county fair.",
+         "work", "220 Ridge Road, Suite 4", "Port Ellis", "OR", "97031", "USA", {{"mobile", "555-0188"}}},
+        // s010f: the sample's other nine.
+        {"Bartholomew", "Quist", "Quist Clockworks", "bart@quistclocks.example", "1949-01-22",
+         "Fixed the hall clock twice. Talks about escapements.",
+         "work", "3 Gearwheel Court", "Harrowgate", "TN", "38401", "USA", {{"work", "555-0121"}}},
+        {"Odette", "Marchbanks", "", "odette.m@example.com", "1985-06-03", "Book club, second Tuesdays.",
+         "home", "88 Larkspur Way", "Millbrook", "TN", "38463", "USA", {{"mobile", "555-0156"}, {"home", "555-0133"}}},
+        {"Cyrus", "Feld", "Feld Brothers Feed & Seed", "cyrus@feldfeed.example", "1970-11-17",
+         "Orders the winter wheat in August.",
+         "work", "Route 9, Box 41", "Linden Hollow", "TN", "37096", "USA", {{"work", "555-0165"}}},
+        {"Henrietta", "Pike", "County Library", "hpike@countylib.example", "1958-02-28", "Holds the interlibrary loans.",
+         "work", "1 Courthouse Square", "Harrowgate", "TN", "38401", "USA", {{"work", "555-0100"}, {"mobile", "555-0190"}}},
+        {"Ansel", "Graves", "", "ansel.graves@example.com", "", "Fishing partner. Owes a lure.",
+         "home", "12 Mill Pond Road", "Linden Hollow", "TN", "37096", "USA", {{"mobile", "555-0114"}}},
+        {"Theodora", "Wren", "Wren Glassworks", "theo@wrenglass.example", "1990-07-19", "Made the lamp for the porch.",
+         "work", "560 Furnace Street", "Port Ellis", "OR", "97031", "USA", {{"work", "555-0147"}}},
+        {"Lucius", "Mott", "Mott & Lyle, Attorneys", "lmott@mottlyle.example", "1966-12-01", "",
+         "work", "40 Bank Street, Floor 2", "Kingsferry", "KY", "42001", "USA", {{"work", "555-0172"}, {"fax", "555-0173"}}},
+        {"Pearl", "Ashdown", "", "pearl.ashdown@example.com", "1952-03-14", "Grows the good tomatoes.",
+         "home", "5 Sorrel Lane", "Millbrook", "TN", "38463", "USA", {{"home", "555-0128"}}},
+        {"Jasper", "Nyland", "Nyland Marine", "jasper@nylandmarine.example", "1981-10-08",
+         "Sails out of Port Ellis in the summer.",
+         "work", "Pier 3", "Port Ellis", "OR", "97031", "USA", {{"mobile", "555-0183"}}},
+    };
+    auto text = [](const char* s) { return *s ? Value(std::string(s)) : Value(); };
+    for (std::size_t i = from; i < to && i < std::size(people); ++i) {
+        const Person& p = people[i];
+        auto c = verbs::new_record(j, "contacts", {"first_name", "last_name", "company", "email", "birthday", "notes"},
+                                   {text(p.first), text(p.last), text(p.company), text(p.email), text(p.birthday), text(p.notes)});
+        if (!c) return std::unexpected(c.error());
+        std::string t;
+        std::vector<Value> key;
+        if (!Store::parse_row_id(*c, t, key) || key.size() != 1)
+            return std::unexpected(Error{Error::Code::Internal, "the new contact's key could not be read"});
+        if (auto a = verbs::new_record(j, "addresses", {"contact_id", "kind", "street", "city", "region", "postal_code", "country"},
+                                       {key[0], text(p.kind), text(p.street), text(p.city), text(p.region), text(p.postal),
+                                        text(p.country)});
+            !a)
+            return std::unexpected(a.error());
+        for (const auto& [kind, number] : p.phones)
+            if (auto ph = verbs::new_record(j, "phones", {"contact_id", "kind", "number"}, {key[0], text(kind), text(number)}); !ph)
+                return std::unexpected(ph.error());
+    }
+    return {};
+}
 }  // namespace
 
 std::expected<void, Error> make_address_book(Journal& j) {
@@ -40,40 +103,42 @@ std::expected<void, Error> make_address_book(Journal& j) {
     for (const char* t : {"addresses", "phones"})
         if (auto r = verbs::new_link(j, t, {"contact_id"}, "contacts", OnDelete::Cascade); !r) return r;
 
-    // Three made-up people.
-    struct Person {
-        const char* first; const char* last; const char* company; const char* email; const char* birthday; const char* notes;
-        const char* kind; const char* street; const char* city; const char* region; const char* postal; const char* country;
-        std::vector<std::pair<const char*, const char*>> phones;
-    };
-    const Person people[] = {
-        {"Mabel", "Thorne", "Thorne & Daughters Bindery", "mabel@thorne-bindery.example", "1961-04-12",
-         "Rebinds old ledgers. Prefers a phone call to email.",
-         "work", "14 Quill Lane", "Harrowgate", "TN", "38401", "USA", {{"work", "555-0142"}, {"mobile", "555-0177"}}},
-        {"Rufus", "Kettle", "", "rufus.kettle@example.com", "1978-09-30", "Neighbour. Borrowed the ladder.",
-         "home", "7 Orchard Row", "Millbrook", "TN", "38463", "USA", {{"home", "555-0109"}}},
-        {"Imogen", "Vale", "Vale Survey Co.", "imogen@valesurvey.example", "", "Met at the county fair.",
-         "work", "220 Ridge Road, Suite 4", "Port Ellis", "OR", "97031", "USA", {{"mobile", "555-0188"}}},
-    };
-    auto text = [](const char* s) { return *s ? Value(std::string(s)) : Value(); };
-    for (const auto& p : people) {
-        auto c = verbs::new_record(j, "contacts", {"first_name", "last_name", "company", "email", "birthday", "notes"},
-                                   {text(p.first), text(p.last), text(p.company), text(p.email), text(p.birthday), text(p.notes)});
-        if (!c) return std::unexpected(c.error());
-        std::string t;
-        std::vector<Value> key;
-        if (!Store::parse_row_id(*c, t, key) || key.size() != 1)
-            return std::unexpected(Error{Error::Code::Internal, "the new contact's key could not be read"});
-        if (auto a = verbs::new_record(j, "addresses", {"contact_id", "kind", "street", "city", "region", "postal_code", "country"},
-                                       {key[0], text(p.kind), text(p.street), text(p.city), text(p.region), text(p.postal),
-                                        text(p.country)});
-            !a)
-            return std::unexpected(a.error());
-        for (const auto& [kind, number] : p.phones)
-            if (auto ph = verbs::new_record(j, "phones", {"contact_id", "kind", "number"}, {key[0], text(kind), text(number)}); !ph)
-                return std::unexpected(ph.error());
-    }
-    return {};
+    return add_people(j, 0, 3);
+}
+
+std::expected<void, Error> make_sample(Journal& j) {  // s010f
+    if (auto r = make_address_book(j); !r) return r;
+    if (auto r = add_people(j, 3, 12); !r) return r;
+    return verbs::save_layout(j, sample_layout());
+}
+
+core::Layout sample_layout() {  // s010f: "Contact Card" -- on the 8 px grid
+    using K = core::ObjectKind;
+    core::Layout l;
+    l.table = "contacts";
+    l.name = kSampleLayoutName;
+    l.width = 504;
+    l.header = 48;
+    auto words = [&](const char* s, int y, int w = 144) { l.objects.push_back({K::Text, "", s, 16, y, w, 24}); };
+    auto box = [&](const char* f, int x, int y, int w) { l.objects.push_back({K::Field, f, "", x, y, w, 24}); };
+    words("Contact Card", 12, 200);                          // the header
+    l.objects.push_back({K::Box, "", "", 8, 56, 488, 80});   // a frame behind the name rows
+    words("Name", 64);
+    box("first_name", 168, 64, 152);
+    box("last_name", 328, 64, 160);
+    words("Company", 96);
+    box("company", 168, 96, 320);
+    l.objects.push_back({K::Line, "", "", 16, 144, 472, 8});   // a rule
+    words("Email", 160);
+    box("email", 168, 160, 320);
+    words("Birthday", 192);
+    box("birthday", 168, 192, 152);
+    words("Notes", 224);
+    box("notes", 168, 224, 320);
+    l.footer = 40;                                           // the footer, with words of its own
+    l.height = 264 + l.footer;
+    words("Acorn's sample", 272, 200);
+    return l;
 }
 
 }  // namespace acorn::db

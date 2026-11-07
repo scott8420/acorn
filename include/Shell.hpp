@@ -3,6 +3,7 @@
 #include "core/Connections.hpp"  // s004b: recent connections
 #include "Keyring.hpp"             // s004b: passwords in the GNOME keyring
 #include "core/Ground.hpp"         // s005c: the skin's base colour
+#include "core/Startup.hpp"        // s010f: the sample Address Book at startup
 #include "core/Solution.hpp"       // s009: the .acorn solution document
 #include <gtkmm/cssprovider.h>
 #include "db/Loader.hpp"     // s004: engine plugins
@@ -218,6 +219,14 @@ private:
     void on_ground(const std::string& id);       // category: ground: a preset, or "custom" -> the colour picker
     std::string ground_file() const;             // category: ground: ~/.config/acorn/ground.json
 
+    // ── sample (s010f) -- src/Shell_sample.cpp ──────────────────────────────
+    // The sample Address Book: made in Acorn's own folder the first time,
+    // opened at startup (a menu check box turns that off) and from the menu.
+    void bind_startup();                         // category: sample: win.sample-at-startup + the saved choice; opens the sample when on
+    void on_open_sample();                       // category: sample: make it if missing, then connect to it (writable: Acorn made it)
+    std::string sample_file() const;             // category: sample: ~/.local/share/acorn/sample/Sample Address Book.sqlite
+    std::string startup_file() const;            // category: sample: ~/.config/acorn/startup.json
+
     // ── helpers ────────────────────────────────────────────────────────────
     std::string connections_file() const;        // category: helper: the XDG path (UI-side resolution)
     void remember_connection(const core::SavedConnection& c);  // category: helper: push + persist + repaint
@@ -292,6 +301,9 @@ private:
     bool                            m_pending_remember = false;
     bool                            m_pending_from_keyring = false;
     bool                            m_pending_starter = false;   // s009b: fill the new file with the Address Book
+    bool                            m_pending_sample = false;    // s010f: the sample -- fill it (when new) with make_sample, land on Browse
+    core::StartupChoice             m_startup;                   // s010f: open the sample at startup?
+    Glib::RefPtr<Gio::SimpleAction> m_startup_action;            // s010f: win.sample-at-startup (a check box)
 
     // s004c -- the Tables area: pick a table on the left, its columns,
     // indexes and links on the right. Read-only; painted from m_schema.

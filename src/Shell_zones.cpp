@@ -74,6 +74,7 @@ Glib::RefPtr<Gio::Menu> Shell::build_menu() {  // zone: hamburger model
     auto file = Gio::Menu::create();
     file->append("New Database File\u2026", "win.new-file");
     file->append("New Address Book\u2026", "win.new-address-book");   // s009b: a starter
+    file->append("Open the Sample Address Book", "win.open-sample");   // s010f
     file->append("Open a Database File\u2026", "win.open-file");
     file->append("Open Solution\u2026", "win.open-solution");               // s009c
     file->append("Point This Solution At\u2026", "win.repoint-solution");   // s009c
@@ -106,6 +107,7 @@ Glib::RefPtr<Gio::Menu> Shell::build_menu() {  // zone: hamburger model
 
     auto app = Gio::Menu::create();
     app->append_submenu("Base Color", ground);
+    app->append("Open the Sample at Startup", "win.sample-at-startup");   // s010f: a check box
     app->append("About Acorn", "win.about");
     app->append("Quit", "win.quit");
     menu->append_section(app);

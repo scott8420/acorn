@@ -455,6 +455,7 @@ void Shell::on_connect_done() {  // connect: back on the UI thread
     }
     const std::string typed = std::exchange(m_pending_password, std::string{});
     const bool starter = std::exchange(m_pending_starter, false);   // s009b
+    const bool sample = std::exchange(m_pending_sample, false);     // s010f
     if (!conn) {
         set_status("Could not connect: " + error +
                    (m_pending_from_keyring ? " (The stored password may be out of date -- type it again.)" : ""),
@@ -472,15 +473,26 @@ void Shell::on_connect_done() {  // connect: back on the UI thread
     // s009b: a new Address Book -- made through the door, then the journal
     // cleared: the starter is not the user's step to undo.
     std::string starter_note;
+    bool starter_ok = true;
     if (starter && m_writable && m_journal) {
-        auto r = db::make_address_book(*m_journal);
+        auto r = sample ? db::make_sample(*m_journal) : db::make_address_book(*m_journal);
         m_journal->clear();
         if (auto again = m_conn->introspect()) m_schema = std::move(*again);
-        starter_note = r ? "A new Address Book: contacts, their addresses and phones, and three made-up people to "
-                           "delete when you like."
-                         : "The Address Book wasn't filled in: " + r.error().message + ".";
-        if (auto lg = log::get(log::Area::App)) lg->info("starter: address book: {}", r ? "made" : r.error().message);
+        starter_ok = r.has_value();
+        starter_note = !r ? std::string(sample ? "The sample" : "The Address Book") + " wasn't filled in: " + r.error().message + "."
+                       : sample ? "Acorn's sample Address Book -- twelve made-up people, their addresses and phones. "
+                                  "Try anything: every change can be undone (Ctrl+Z). Connect opens your own databases."
+                                : "A new Address Book: contacts, their addresses and phones, and three made-up people to "
+                                  "delete when you like.";
+        if (auto lg = log::get(log::Area::App))
+            lg->info("starter: {}: {}", sample ? "sample" : "address book", r ? "made" : r.error().message);
+    } else if (sample) {   // s010f: the sample again -- as it was left
+        starter_note = "Acorn's sample Address Book, as you left it. Connect opens your own databases; "
+                       "Menu -> Open the Sample at Startup turns this off.";
     }
+    // s010f: the sample's Form opens on its Contact Card (until another is picked).
+    if (sample && !m_layout_pick.count("contacts") && m_solution.layout("contacts", db::kSampleLayoutName))
+        m_layout_pick["contacts"] = db::kSampleLayoutName;
 
     // It worked: remember the connection (never the password), and settle the
     // keyring the way the checkbox says.
@@ -517,7 +529,10 @@ void Shell::on_connect_done() {  // connect: back on the UI thread
     rebuild_browse_pick();
     if (!starter_note.empty()) {   // s009b: land on the people
         open_browse("contacts");
-        journal_note(starter_note, starter_note.rfind("A new", 0) == 0 ? "ok" : "error");
+        m_lay_table = "contacts";   // s010f: Layouts shows the people too (its Contact Card, for the sample)
+        m_lay_picks.clear();
+        paint_layouts();
+        journal_note(starter_note, starter_ok ? "ok" : "error");
     }
 }
 

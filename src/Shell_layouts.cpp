@@ -91,6 +91,7 @@ Gtk::Label* side_label(const std::string& s, const char* css = nullptr) {
     auto l = Gtk::make_managed<Gtk::Label>(s);
     l->set_xalign(0.0f);
     l->set_wrap(true);
+    l->set_max_width_chars(24);   // s010f: wrap inside the inspector's 264 px -- a long hint never widens it
     if (css) l->add_css_class(css);
     return l;
 }
@@ -381,13 +382,23 @@ void Shell::build_layouts_page() {  // layouts: the Layouts area
         false);
     m_lay_canvas.add_controller(keys);
 
-    m_lay_inspector.set_size_request(240, -1);
+    m_lay_inspector.set_size_request(264, -1);   // s010f: one width in every state (was 240 + whatever the hints asked)
     m_lay_inspector.set_hexpand(false);
     m_lay_inspector.add_css_class("acorn-panel");
     auto body = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 14);
     body->set_vexpand(true);
     body->append(m_lay_scroll);
-    body->append(m_lay_inspector);
+    // s010f: the inspector scrolls up and down. Without that, a window too
+    // short for it squeezed its wrapping hints, which then asked for MORE
+    // width -- the inspector widened (and the canvas narrowed) whenever it
+    // grew a row. Its width now comes from its contents alone.
+    auto insp = Gtk::make_managed<Gtk::ScrolledWindow>();
+    insp->set_policy(Gtk::PolicyType::NEVER, Gtk::PolicyType::AUTOMATIC);
+    insp->set_propagate_natural_width(true);
+    insp->set_has_frame(false);
+    insp->set_hexpand(false);
+    insp->set_child(m_lay_inspector);
+    body->append(*insp);
     m_layouts_page.append(*body);
 
     m_lay_pop.set_parent(m_layouts_page);

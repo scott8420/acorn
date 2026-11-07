@@ -2032,6 +2032,16 @@ void test_layouts_pure(const fs::path& dir) {
         check("layouts: header + footer leaving no body -- refused in words", !core::check_layout(bad).empty(), "");
         (void)big;
     }
+    // s010f: the sample's Contact Card.
+    {
+        const auto card = sample_layout();
+        const std::vector<std::string> cf{"id", "first_name", "last_name", "company", "email", "birthday", "notes"};
+        bool fields_ok = true;
+        for (const auto& o : card.objects) fields_ok = fields_ok && !core::missing_field(o, cf);
+        check("sample: the Contact Card passes check_layout, every field on it is a contacts field, on the grid",
+              core::check_layout(card).empty() && fields_ok && card.header == 48 && card.footer == 40 &&
+              core::body_objects(card).size() == card.objects.size() - 2, core::check_layout(card));
+    }
     // s010e: several picked.
     {
         std::vector<int> pk;
@@ -2196,6 +2206,31 @@ void test_starter(Journal& j, Gate& g, const std::string& P) {
     j.clear();
 }
 
+// ── s010f: the sample Address Book ───────────────────────────────────────────
+void test_sample(Journal& j, Gate& g, const std::string& P) {
+    for (const char* t : {"phones", "addresses", "contacts"})   // test_starter's tables
+        (void)g.inner().query("DROP TABLE IF EXISTS " + g.quote_ident(t));
+    auto count = [&](const std::string& t) {
+        auto r = g.query("SELECT COUNT(*) FROM " + g.quote_ident(t));
+        return r && !r->rows.empty() ? num(r->rows[0][0]).value_or(-1) : -1.0;
+    };
+    core::Solution sol;
+    int saves = 0;
+    j.store().set_solution(&sol, [&] { ++saves; return true; });
+    auto made = make_sample(j);
+    check(P + "sample: twelve people, their addresses and phones, through the door",
+          made && count("contacts") == 12.0 && count("addresses") == 12.0 && count("phones") == 16.0,
+          made ? std::to_string(count("contacts")) + " / " + std::to_string(count("phones")) : made.error().message);
+    const auto* card = sol.layout("contacts", kSampleLayoutName);
+    check(P + "sample: the Contact Card kept in the solution (saved once)", card && *card == sample_layout() && saves >= 1, "");
+    j.clear();
+    check(P + "sample: arrives with nothing to undo (the caller clears the journal)", !j.can_undo() && !j.can_redo(), "");
+    j.store().set_solution(nullptr, {});
+    for (const char* t : {"phones", "addresses", "contacts"})
+        (void)g.inner().query("DROP TABLE IF EXISTS " + g.quote_ident(t));
+    j.store().forget_schema();
+}
+
 void test_journal(Engine* e, const ConnectParams& rw, const ConnectParams& ro, const std::string& P0) {
     const std::string P = P0 + ": journal: ";
     auto opened = e->open(rw);
@@ -2350,6 +2385,7 @@ void test_journal(Engine* e, const ConnectParams& rw, const ConnectParams& ro, c
     test_key(j, g, e, P);
     test_links(j, g, e, P);
     test_starter(j, g, P);
+    test_sample(j, g, P);
 }
 
 // SQLite-only behaviour: files.

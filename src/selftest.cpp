@@ -14,6 +14,7 @@
 
 #include "core/Connections.hpp"
 #include "core/Ground.hpp"
+#include "core/Startup.hpp"
 #include "Keyring.hpp"
 
 #include <glib.h>
@@ -471,6 +472,14 @@ int main() {
         check("ground: an unknown preset -> slate", c::load_ground(file).id == "slate");
         { std::ofstream(file) << "not json {"; }
         check("ground: garbage -> slate", c::load_ground(file) == c::GroundChoice{});
+        // s010f: the startup choice -- the sample is on unless turned off.
+        const auto sfile = (dir / "sub" / "startup.json").string();
+        check("startup: missing file -> open the sample", c::load_startup(sfile).open_sample);
+        check("startup: off saves and loads back", c::save_startup(sfile, {false}) && !c::load_startup(sfile).open_sample);
+        { std::ofstream(sfile) << "{\"open_sample\": \"no\"}"; }
+        check("startup: a wrong kind -> the default (on)", c::load_startup(sfile).open_sample);
+        { std::ofstream(sfile) << "garbage"; }
+        check("startup: garbage -> the default (on)", c::load_startup(sfile).open_sample);
         std::error_code ec;
         std::filesystem::remove_all(dir, ec);
     }
