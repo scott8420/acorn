@@ -1,5 +1,6 @@
 #include "Shell.hpp"
 #include "Log.hpp"
+#include "db/NewFile.hpp"
 
 #include <giomm/liststore.h>
 #include <algorithm>
@@ -119,6 +120,10 @@ void Shell::build_connect_page() {  // connect: the Connect area
     file_row->append(*fl);
     file_row->append(m_path);
     file_row->append(m_browse);
+    m_new_file.set_label("New…");
+    m_new_file.set_tooltip_text("Make a new, empty SQLite database file (Ctrl+N)");
+    m_new_file.set_action_name("win.new-file");
+    file_row->append(m_new_file);
     m_file_rows.append(*file_row);
     panel->append(m_file_rows);
 
@@ -232,6 +237,44 @@ void Shell::on_engine_changed() {  // connect: file vs server rows
     m_server_rows.set_visible(server);
     if (e && server)
         m_port.set_placeholder_text(e->dialect() == db::Dialect::MariaDB ? "3306" : "5432");
+}
+
+void Shell::on_new_file() {  // connect: Ctrl+N -- make an empty SQLite file, open it
+    // s005a. db::new_file is the one place Acorn creates a database, and it
+    // refuses ANY existing path -- even if the save dialog's own "Replace?"
+    // was answered yes. Nothing existing is ever overwritten.
+    db::Engine* e = nullptr;
+    for (std::size_t i = 0; i < m_engines.size(); ++i)
+        if (!m_engines[i]->caps().needs_server) { e = m_engines[i]; m_engine_pick.set_selected(i); break; }
+    m_stack.set_visible_child("connect");
+    if (!e) { set_status("No file engine (SQLite) is installed.", "error"); return; }
+
+    auto dialog = Gtk::FileDialog::create();
+    dialog->set_title("New database file");
+    dialog->set_initial_name("untitled.sqlite");
+    dialog->set_accept_label("Create");
+    dialog->save(*this, [this, dialog, e](const Glib::RefPtr<Gio::AsyncResult>& res) {
+        std::filesystem::path path;
+        try {
+            auto f = dialog->save_finish(res);
+            if (!f) return;
+            path = f->get_path();
+        } catch (const Glib::Error&) {
+            return;   // cancelled
+        }
+        if (path.extension().empty()) path += ".sqlite";
+        auto made = db::new_file(*e, path);
+        if (auto lg = log::get(log::Area::App))
+            lg->info("new file {}: {}", path.string(), made ? "created" : made.error().message);
+        if (!made) {
+            set_status("Not created: " + made.error().message +
+                       (made.error().code == db::Error::Code::Exists ? ". Use Open… to look at it." : ""),
+                       "error");
+            return;
+        }
+        m_path.set_text(path.string());
+        on_connect();   // the normal read-only open; it becomes a recent
+    });
 }
 
 void Shell::on_browse_file() {  // connect: pick an SQLite file

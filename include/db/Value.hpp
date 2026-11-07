@@ -80,6 +80,7 @@ struct Error {
         Abi,             // a plugin built against another ABI
         Unsupported,     // the engine lacks the capability
         Internal,
+        Exists,          // s005a: refused -- the file is already there (appended: no renumbering)
     };
     Code code = Code::Internal;
     std::string message;     // the engine's own words where it gave any

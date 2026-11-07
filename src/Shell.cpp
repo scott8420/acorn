@@ -26,6 +26,7 @@ Shell::Shell()
       m_password("shell.connect.password"),
       m_remember("shell.connect.remember"),
       m_browse("shell.connect.browse"),
+      m_new_file("shell.connect.new_file"),
       m_connect("shell.connect.connect"),
       m_status("shell.connect.status"),
       m_tables("shell.connect.tables"),

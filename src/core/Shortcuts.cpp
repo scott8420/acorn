@@ -112,6 +112,7 @@ const std::vector<ShortcutSpec>& shortcut_registry() {
          "Dump the widget registry to the log"},
 
         // ── General ───────────────────────────────────────────────────────────
+        {"General", "win.new-file",      {"<Ctrl>n"}, "", "New database file (empty SQLite)"},
         {"General", "win.open-file",     {"<Ctrl>o"}, "", "Open a database file"},
         {"General", "win.shortcuts",     {"<Ctrl>question", "<Ctrl>slash"}, "",
          "Keyboard shortcuts (this window)"},

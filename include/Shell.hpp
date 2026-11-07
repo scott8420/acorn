@@ -87,6 +87,7 @@ private:
     void on_engine_changed();                    // category: connect: file vs server rows
     void on_open_file();                         // category: connect: Ctrl+O -- SQLite + the file dialog
     void on_browse_file();                       // category: connect: pick an SQLite file
+    void on_new_file();                          // category: connect: Ctrl+N -- make an empty SQLite file, open it
     void on_connect();                           // category: connect: read the form -> keyring -> start
     void start_connect(db::Engine* e, db::ConnectParams p);  // category: connect: open + introspect on a worker
     void on_connect_done();                      // category: connect: back on the UI thread
@@ -147,6 +148,7 @@ private:
     widgets::Entry                  m_host, m_port, m_database, m_user, m_password;
     widgets::CheckButton            m_remember;      // "Remember the password in the keyring"
     widgets::Button                 m_browse;
+    widgets::Button                 m_new_file;      // s005a
     widgets::Button                 m_connect;
     widgets::Label                  m_status;
     widgets::ListBox                m_tables;

@@ -13,7 +13,9 @@ point at any engine.
 Acorns grow into trees. So do schemas.
 
 > **Status:** s004 -- connect to SQLite, MariaDB or PostgreSQL **read-only**
-> and browse the schema: every table's columns, types, keys, indexes and links. Recent connections are remembered; server passwords go
+> and browse the schema: every table's columns, types, keys, indexes and links.
+> File -> New Database File (Ctrl+N) makes an empty SQLite file -- it never
+> overwrites anything. Recent connections are remembered; server passwords go
 > to the GNOME keyring (libsecret), never to a file. Nothing writes yet.
 
 ## Engines

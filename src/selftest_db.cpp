@@ -7,6 +7,7 @@
 // every engine; an engine that can't run is reported SKIPPED, never a pass.
 #include "db/Engine.hpp"
 #include "db/Loader.hpp"
+#include "db/NewFile.hpp"
 #include "db/Types.hpp"
 
 #include <cstdlib>
@@ -521,6 +522,41 @@ void db_tests(CheckFn fn, int& skip_count) {
         const std::string before = slurp(T.rw.path);
         { auto ro = e->open(T.ro); if (ro) (void)(*ro)->introspect(); }
         check("sqlite: the file is byte-identical after a read-only session", slurp(T.rw.path) == before, "");
+
+        // s005a -- New Database File: makes a real, empty database; NEVER
+        // touches anything already at the path.
+        {
+            const fs::path made = tmp.p / "new.sqlite";
+            auto r = new_file(*e, made);
+            check("new file: created", r.has_value() && fs::exists(made), r ? "" : r.error().message);
+            const std::string bytes = slurp(made);
+            check("new file: a real SQLite file, not zero bytes",
+                  bytes.size() >= 100 && bytes.rfind("SQLite format 3", 0) == 0, std::to_string(bytes.size()) + " bytes");
+            bool stamped = false, empty = false;
+            if (auto ro = e->open(ConnectParams{.path = made.string()})) {
+                if (auto q = (*ro)->query("PRAGMA application_id"); q && !q->rows.empty())
+                    stamped = q->rows[0][0].kind() == Value::Kind::Integer &&
+                              q->rows[0][0].as_int() == std::int64_t{kAcornApplicationId};
+                if (auto s = (*ro)->introspect()) empty = s->tables.empty();
+            }
+            check("new file: stamped with Acorn's application id", stamped, "");
+            check("new file: opens read-only and has no tables", empty, "");
+
+            const std::string fixture_before = slurp(T.rw.path);
+            auto again = new_file(*e, T.rw.path);
+            check("new file: refuses an existing database, bytes untouched",
+                  !again && again.error().code == Error::Code::Exists && slurp(T.rw.path) == fixture_before,
+                  again ? "created!" : again.error().message);
+            const fs::path blank = tmp.p / "blank.sqlite";
+            { std::ofstream(blank) << ""; }
+            auto b = new_file(*e, blank);
+            check("new file: refuses even an empty file", !b && fs::file_size(blank) == 0, "");
+            auto d = new_file(*e, tmp.p);
+            check("new file: refuses a directory", !d && d.error().code == Error::Code::Exists, "");
+            auto nf = new_file(*e, tmp.p / "no" / "such" / "dir.sqlite");
+            check("new file: a missing folder is refused, nothing made",
+                  !nf && nf.error().code == Error::Code::NotFound && !fs::exists(tmp.p / "no"), "");
+        }
     } else {
         skip("sqlite engine", "acorn-engine-sqlite.so not built or not loadable");
     }

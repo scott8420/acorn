@@ -101,6 +101,8 @@ add_library(acorn_core STATIC
     src/core/Stones.cpp
     # The engine plugin loader (dlopen). The app's side of the plugin seam.
     src/db/Loader.cpp
+    # s005a: the one place Acorn creates a database file (never overwrites).
+    src/db/NewFile.cpp
 )
 target_include_directories(acorn_core PUBLIC include)
 target_link_libraries(acorn_core PUBLIC acorn_db ${CMAKE_DL_LIBS})
