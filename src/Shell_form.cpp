@@ -172,6 +172,8 @@ void Shell::paint_form() {  // form: the picked record through its layout
             w = da;
         } else if (o.kind == core::ObjectKind::Portal) {   // s011a
             w = form_portal(o, *t, focus_back);
+        } else if (o.kind == core::ObjectKind::Related) {  // s011d
+            w = form_related(o, *t);
         } else if (o.kind == core::ObjectKind::Text) {
             auto l = form_label(o.text, "acorn-field-name");
             l->set_xalign(1.0f);   // toward its box
@@ -474,6 +476,54 @@ Gtk::Widget* Shell::form_portal(const core::LayoutObject& o, const db::Table& pa
                                           : std::string("this connection is read-only")));
     }
     return box;
+}
+
+// s011d: a RELATED field -- a field of the record this one points at (an
+// address's contact's last_name), read by the link's value: a SELECT through
+// the Gate. Shown, not edited (edit it on the parent's own Form). An empty
+// link, or one pointing at no record, shows empty and says why in its
+// tooltip; a link that's gone is a dashed "missing link", never dropped.
+Gtk::Widget* Shell::form_related(const core::LayoutObject& o, const db::Table& child) {  // form: a parent's field
+    const db::Table* pt = m_schema.table(o.from);
+    const db::ForeignKey* fk = nullptr;
+    for (const auto& k : child.foreign_keys)
+        if (k.ref_table == o.from && k.columns.size() == 1 && k.columns.front() == o.field) fk = &k;
+    const auto ref = fk && pt ? m_schema.ref_columns(*fk) : std::vector<std::string>{};
+    if (!fk || !pt || ref.size() != 1) {
+        auto l = form_label("missing link “" + child.name + "." + o.field + "”", "acorn-missing");
+        l->set_tooltip_text("This shows “" + o.from + "”.“" + o.shows + "” through “" + o.field + "”, which no longer points at “" +
+                            o.from + "”. Nothing is lost -- link them again in the Graph, or remove it in Layouts.");
+        return l;
+    }
+    const db::Column* col = pt->column(o.shows);
+    if (!col) {
+        auto l = form_label("missing field “" + o.from + "." + o.shows + "”", "acorn-missing");
+        l->set_tooltip_text("“" + o.from + "” no longer has “" + o.shows + "”. Nothing is lost -- the layout editor can "
+                            "point it at another field or remove it.");
+        return l;
+    }
+    const std::string about = "From the “" + o.from + "” record that “" + o.field + "” points at -- edit it on the “" + o.from + "” Form";
+    std::string shown, why;
+    const db::Value* link = browse_value(o.field);
+    if (!link || link->is_null()) {
+        why = "“" + o.field + "” is empty -- it points at no “" + o.from + "” record";
+    } else if (auto page = db::read_related(*m_conn, *pt, {ref.front()}, {*link}, {0, 1}); !page) {
+        why = "Could not read “" + o.from + "”: " + page.error().message;
+        if (auto lg = log::get(log::Area::Shell)) lg->warn("form: related '{}.{}': {}", o.from, o.shows, page.error().message);
+    } else if (page->rows.empty()) {
+        why = "No “" + o.from + "” record has “" + ref.front() + "” " + db::cell_text(*link, child.column(o.field)->type) +
+              " -- “" + o.field + "” points at nothing";
+    } else {
+        for (std::size_t i = 0; i < page->columns.size(); ++i)
+            if (page->columns[i] == o.shows && i < page->rows.front().size()) shown = db::cell_text(page->rows.front()[i], col->type);
+    }
+    auto l = form_label(shown, shown.empty() ? "acorn-null" : nullptr);
+    l->add_css_class("acorn-form-static");
+    l->add_css_class("acorn-related");
+    l->set_selectable(true);
+    l->set_name("form.related." + o.from + "." + o.shows);
+    l->set_tooltip_text(why.empty() ? (shown.empty() ? about : shown + "\n" + about) : why);
+    return l;
 }
 
 bool Shell::commit_related(const std::string& table, const std::string& row, const std::string& column,

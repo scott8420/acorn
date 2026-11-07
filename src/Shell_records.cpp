@@ -259,7 +259,12 @@ void Shell::commit_field(const std::string& row, const std::string& column, cons
     // Re-read after this handler returns (the box that called may be the one
     // a repaint would destroy). The panel stays: its box holds the focus.
     // A refusal repaints the panel too, so the box shows what is really there.
-    const bool keep = r.has_value();
+    bool keep = r.has_value();
+    // s011d: the Form shows a related field through this one (an address's
+    // contact_id changed -> its contact's name changes): repaint it whole.
+    if (keep && m_browse_view == BrowseView::Form)
+        for (const auto& o : form_layout().objects)
+            if (o.kind == core::ObjectKind::Related && o.field == column) keep = false;
     Glib::signal_idle().connect_once([this, keep] { load_browse_page(keep); });
 }
 

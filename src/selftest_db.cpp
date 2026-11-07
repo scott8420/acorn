@@ -2107,6 +2107,54 @@ void test_layouts_pure(const fs::path& dir) {
         check("portals: round-trip in the .acorn -- {\"kind\": \"portal\", \"from\", \"field\", \"columns\"}",
               pb && *pb == ps && text.find("\"portal\"") != std::string::npos && text.find("\"columns\"") != std::string::npos, "");
     }
+    // s011d: related fields -- a parent's field on the child's layout.
+    {
+        const std::vector<core::RelatedLink> outs{{"contact_id", "contacts"}};
+        auto l = core::default_layout("addresses", {"id", "contact_id", "kind", "street"});
+        const int below = core::next_row_y(l);
+        const int n = core::add_related(l, outs[0], "last_name");
+        const auto& r = l.objects.back();
+        const auto& w = l.objects[l.objects.size() - 2];
+        check("related: Add Related Field -- a row under everything: its name as words left, the value right, fitted",
+              n == 2 && r.kind == core::ObjectKind::Related && r.field == "contact_id" && r.from == "contacts" && r.shows == "last_name" &&
+              r.y == below && r.x == 168 && r.w == 320 && r.h == 24 && w.kind == core::ObjectKind::Text && w.text == "last_name" &&
+              w.y == below && l.height >= r.y + r.h + 16 && core::check_layout(l).empty(), std::to_string(r.y));
+        auto gone = r;
+        gone.field = "owner_id";
+        check("related: its link there -> not missing; the link gone -> missing; fields, words and portals never are",
+              !core::missing_related_link(r, outs) && core::missing_related_link(gone, outs) &&
+              !core::missing_related_link(l.objects[0], {}) && !core::missing_related_link(r, {{"contact_id", "contacts"}, {"x", "y"}}), "");
+        const std::vector<std::string> cf{"id", "first_name", "last_name", "email"};
+        check("related: what Add offers -- the parent's fields not shown yet through that link, never its key",
+              core::related_not_on(l, outs[0], cf, "id") == std::vector<std::string>{"first_name", "email"} &&
+              core::related_not_on(l, {"other_id", "contacts"}, cf, "id") == std::vector<std::string>{"first_name", "last_name", "email"} &&
+              core::related_label("contact_id", "last_name") == "contact_id → last_name", "");
+        check("related: its name in the notes; Add Field still offers the table's own fields; a bare Add makes none",
+              core::object_label(r) == "“contacts.last_name”" &&
+              core::fields_not_on(l, {"id", "contact_id", "kind", "street", "last_name"}) == std::vector<std::string>{"last_name"} &&
+              core::add_object(l, core::ObjectKind::Related) == 0, core::object_label(r));
+        auto noshow = l;
+        noshow.objects.back().shows.clear();
+        auto noto = l;
+        noto.objects.back().from.clear();
+        check("related: one with no link field, table or shown field -- refused in words",
+              !core::check_layout(noshow).empty() && !core::check_layout(noto).empty(), "");
+        auto full = sample_layout();
+        const int ft0 = core::footer_top(full);
+        core::add_related(full, {"contact_id", "contacts"}, "email");
+        check("related: Add with a footer in the way -- the footer moves down, the row stays in the body",
+              core::part_of(full, full.objects.back()) == core::Part::Body && core::footer_top(full) > ft0 && core::check_layout(full).empty(), "");
+        core::Solution rs;
+        rs.points_at.engine = "sqlite";
+        rs.points_at.path = (dir / "related.sqlite").string();
+        rs.layouts["addresses"][l.name] = l;
+        const auto rf = (dir / "related.acorn").string();
+        auto rb = core::save_solution(rf, rs) ? core::load_solution(rf) : std::nullopt;
+        std::ifstream in(rf);
+        const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        check("related: round-trip in the .acorn -- {\"kind\": \"related\", \"field\", \"from\", \"shows\"}",
+              rb && *rb == rs && text.find("\"related\"") != std::string::npos && text.find("\"shows\"") != std::string::npos, "");
+    }
     // s010e: several picked.
     {
         std::vector<int> pk;
@@ -2316,6 +2364,32 @@ void test_sample(Journal& j, Gate& g, const std::string& P) {
         check(P + "portals: an empty key -> none; a key nothing points at -> none; a field it hasn't / a mismatch -> refused in words",
               none && none->rows.empty() && none->total == 0 && nobody && nobody->rows.empty() && nobody->total == 0 &&
               !bad && bad.error().message.find("no_such") != std::string::npos && !odd, bad ? "read!" : bad.error().message);
+        // s011d: a related field's read -- each address's contact by its contact_id (the Form's own call: the
+        // parent's key bound, one record), the same last_name as the contact read directly.
+        if (all && sc->table("addresses")) {
+            auto ad = read_page(g, *sc->table("addresses"), {0, 50});
+            const Table& ct = *sc->table("contacts");
+            std::string key;
+            for (const auto& c : ct.columns) if (c.pk_position > 0) key = c.name;
+            auto at = [](const Page& p, const std::string& c) {
+                return static_cast<std::size_t>(std::find(p.columns.begin(), p.columns.end(), c) - p.columns.begin());
+            };
+            int matched = 0;
+            bool same = ad.has_value() && !key.empty();
+            if (same)
+                for (const auto& row : ad->rows) {
+                    const auto& link = row[at(*ad, "contact_id")];
+                    auto parent = read_related(g, ct, {key}, {link}, {0, 1});
+                    if (!parent || parent->rows.size() != 1) { same = false; break; }
+                    for (const auto& c : all->rows)
+                        if (num(c[at(*all, key)]) == num(link) &&
+                            cell_text(c[at(*all, "last_name")], FieldType::Text) ==
+                                cell_text(parent->rows[0][at(*parent, "last_name")], FieldType::Text)) ++matched;
+                }
+            auto nowhere = read_related(g, ct, {key}, {Value(std::int64_t{999999})}, {0, 1});
+            check(P + "related: each address's contact by its link -- one record, the same last_name; a link to nothing -> none",
+                  same && matched == 12 && nowhere && nowhere->rows.empty(), std::to_string(matched));
+        }
         // s011b: what a portal does -- New with the link filled in, an edit, Delete; each one step, each undone.
         if (all && !all->rows.empty()) {
             const Value who = all->rows[0][0];

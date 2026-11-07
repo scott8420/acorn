@@ -120,6 +120,16 @@ std::vector<core::PortalLink> Shell::portal_links(const std::string& table) cons
     return out;
 }
 
+std::vector<core::RelatedLink> Shell::related_links(const std::string& table) const {  // layouts: s011d -- links a related field can follow
+    std::vector<core::RelatedLink> out;
+    const db::Table* t = m_schema.table(table);
+    if (!t) return out;
+    for (const auto& k : t->foreign_keys)
+        if (k.columns.size() == 1 && m_schema.table(k.ref_table) && m_schema.ref_columns(k).size() == 1)
+            out.push_back({k.columns.front(), k.ref_table});
+    return out;
+}
+
 std::vector<std::string> Shell::layout_names(const std::string& table) const {  // layouts: the default first, then the kept ones
     std::vector<std::string> out{core::default_layout_name(table)};
     if (auto it = m_solution.layouts.find(table); it != m_solution.layouts.end())
@@ -508,6 +518,7 @@ void Shell::draw_layout(const Cairo::RefPtr<Cairo::Context>& cr, int w, int h) {
     auto set = [&](double a) { cr->set_source_rgba(ink.red, ink.green, ink.blue, a); };
     const auto fields = fields_of(m_lay_table);
     const auto links = portal_links(m_lay_table);
+    const auto outs = related_links(m_lay_table);   // s011d
     const db::Table* t = m_schema.table(m_lay_table);
 
     // The grid: a dot every 8 px over the body.
@@ -615,6 +626,30 @@ void Shell::draw_layout(const Cairo::RefPtr<Cairo::Context>& cr, int w, int h) {
                 cap.h = std::min(rh, o.h - rh);
                 text_in(o.from + " that point here (by " + o.field + ")", cap, false, 0.45);
             }
+        } else if (o.kind == core::ObjectKind::Related) {   // s011d: a parent's field -- shaded lighter, dotted, "via"
+            const db::Table* pt = m_schema.table(o.from);
+            const bool gone = core::missing_related_link(o, outs);
+            const bool fgone = !gone && (!pt || !pt->column(o.shows));
+            cr->set_line_width(1);
+            if (gone || fgone) {
+                set(0.50);
+                cr->set_dash(std::vector<double>{5, 4}, 0);
+                cr->rectangle(x, y, ow, oh);
+                cr->stroke();
+                cr->unset_dash();
+                text_in(gone ? "missing link " + curly(m_lay_table + "." + o.field)
+                             : "missing field " + curly(o.from + "." + o.shows), o, false, 0.55);
+                continue;
+            }
+            set(0.03);
+            cr->rectangle(x, y, ow, oh);
+            cr->fill();
+            set(0.38);
+            cr->set_dash(std::vector<double>{1, 2}, 0);
+            cr->rectangle(x, y, ow, oh);
+            cr->stroke();
+            cr->unset_dash();
+            text_in(o.from + "." + o.shows + "  ·  via " + o.field, o, false, 0.80);
         } else if (o.kind == core::ObjectKind::Text) {
             cr->set_line_width(1);
             set(0.18);
@@ -671,7 +706,7 @@ void Shell::paint_inspector() {  // layouts: the picked object's field / words /
 
     if (m_lay_picks.size() > 1) {   // s010e: several -- how many, what, and Remove
         m_lay_inspector.append(*side_label(std::to_string(m_lay_picks.size()) + " objects", "acorn-field-name"));
-        int f = 0, w = 0, ln = 0, bx = 0, pt = 0;
+        int f = 0, w = 0, ln = 0, bx = 0, pt = 0, rl = 0;
         for (int i : m_lay_picks) {
             if (i < 0 || static_cast<std::size_t>(i) >= m_lay.objects.size()) continue;
             switch (m_lay.objects[static_cast<std::size_t>(i)].kind) {
@@ -680,6 +715,7 @@ void Shell::paint_inspector() {  // layouts: the picked object's field / words /
                 case core::ObjectKind::Line:  ++ln; break;
                 case core::ObjectKind::Box:   ++bx; break;
                 case core::ObjectKind::Portal: ++pt; break;
+                case core::ObjectKind::Related: ++rl; break;
             }
         }
         std::string kinds;
@@ -693,6 +729,7 @@ void Shell::paint_inspector() {  // layouts: the picked object's field / words /
         add(ln, "line", "lines");
         add(bx, "box", "boxes");
         add(pt, "portal", "portals");
+        add(rl, "related field", "related fields");
         m_lay_inspector.append(*side_label(kinds, "acorn-status"));
         m_lay_inspector.append(*side_label(
             "Drag any of them to move them all; the arrows nudge them all; Delete removes them all -- one step each. "
@@ -803,6 +840,45 @@ void Shell::paint_inspector() {  // layouts: the picked object's field / words /
             m_lay_inspector.append(*pdd);
             m_lay_inspector.append(*addp);
         }
+        // s011d: a related field -- offered only when this table links OUT:
+        // "contact_id → last_name", each field of the table it points at (not
+        // its key: that's the link's own value) not on the layout yet.
+        if (const auto outs = related_links(m_lay_table); !outs.empty()) {
+            auto picks = std::make_shared<std::vector<std::pair<core::RelatedLink, std::string>>>();
+            std::vector<Glib::ustring> rshown;
+            for (const auto& k : outs) {
+                std::string key;
+                if (const db::Table* pt = m_schema.table(k.to))
+                    for (const auto& c : pt->columns) if (c.pk_position > 0) key = c.name;
+                for (const auto& f : core::related_not_on(m_lay, k, fields_of(k.to), key)) {
+                    picks->push_back({k, f});
+                    rshown.push_back(core::related_label(k.field, f));
+                }
+            }
+            auto rdd = Gtk::make_managed<Gtk::DropDown>(Gtk::StringList::create(rshown));
+            rdd->set_name("layouts.add_related_pick");
+            rdd->set_tooltip_text("A field of the record “" + m_lay_table + "” points at -- shown, not edited here");
+            rdd->set_sensitive(can && !picks->empty());
+            rdd->set_margin_top(6);
+            auto addr = Gtk::make_managed<Gtk::Button>(picks->empty() ? "Every related field is on it" : "Add Related Field");
+            addr->set_name("layouts.add_related");
+            addr->set_sensitive(can && !picks->empty());
+            addr->set_tooltip_text("Its name on the left and the related record's value on the right, under everything");
+            addr->signal_clicked().connect([this, rdd, picks, gen] {
+                if (gen != m_lay_gen) return;
+                const auto i = rdd->get_selected();
+                if (i == GTK_INVALID_LIST_POSITION || i >= picks->size()) return;
+                const auto& [k, f] = (*picks)[i];
+                auto l = m_lay;
+                const int n = core::add_related(l, k, f);
+                m_lay_picks.clear();   // the row picked, to move together (as Add Field)
+                for (int j = static_cast<int>(l.objects.size()) - n; j < static_cast<int>(l.objects.size()); ++j) m_lay_picks.push_back(j);
+                const std::string what = "Added " + core::object_label(l.objects.back());
+                Glib::signal_idle().connect_once([this, l, what] { m_lay_focus.clear(); keep_layout(l, what); m_lay_canvas.grab_focus(); });
+            });
+            if (!picks->empty()) m_lay_inspector.append(*rdd);
+            m_lay_inspector.append(*addr);
+        }
         return;
     }
     const auto idx = static_cast<std::size_t>(lay_one());
@@ -818,7 +894,8 @@ void Shell::paint_inspector() {  // layouts: the picked object's field / words /
     m_lay_inspector.append(*side_label(o.kind == core::ObjectKind::Field ? "Field box"
                                        : o.kind == core::ObjectKind::Text ? "Words"
                                        : o.kind == core::ObjectKind::Line ? "Line"
-                                       : o.kind == core::ObjectKind::Portal ? "Portal" : "Box", "acorn-field-name"));
+                                       : o.kind == core::ObjectKind::Portal ? "Portal"
+                                       : o.kind == core::ObjectKind::Related ? "Related field" : "Box", "acorn-field-name"));
 
     if (o.kind == core::ObjectKind::Field) {
         // The field it shows -- a missing one listed first, so it can be
@@ -932,6 +1009,43 @@ void Shell::paint_inspector() {  // layouts: the picked object's field / words /
             m_lay_inspector.append(*cdd);
             m_lay_inspector.append(*addc);
         }
+    } else if (o.kind == core::ObjectKind::Related) {   // s011d: what it shows, through which link
+        const db::Table* pt = m_schema.table(o.from);
+        if (core::missing_related_link(o, related_links(m_lay_table)))
+            m_lay_inspector.append(*side_label("Its link is gone: " + curly(m_lay_table + "." + o.field) + " no longer points at " +
+                                               curly(o.from) + ". Nothing is lost -- link them again in the Graph, "
+                                               "or remove it.", "acorn-mark"));
+        else
+            m_lay_inspector.append(*side_label("Shows " + curly(o.shows) + " of the " + curly(o.from) + " record that " +
+                                               curly(o.field) + " points at. Shown, not edited -- edit it on the " +
+                                               curly(o.from) + " Form.", "acorn-status"));
+        // Shows: another field of the same record -- one step.
+        std::string key;
+        if (pt) for (const auto& c : pt->columns) if (c.pk_position > 0) key = c.name;
+        auto names = std::make_shared<std::vector<std::string>>();
+        std::vector<Glib::ustring> shown;
+        if (!pt || !pt->column(o.shows)) { names->push_back(o.shows); shown.push_back(o.shows + " (missing)"); }
+        for (const auto& f : fields_of(o.from))
+            if (f != key) { names->push_back(f); shown.push_back(f); }
+        auto dd = Gtk::make_managed<Gtk::DropDown>(Gtk::StringList::create(shown));
+        guint at = 0;
+        for (std::size_t i = 0; i < names->size(); ++i) if ((*names)[i] == o.shows) at = static_cast<guint>(i);
+        dd->set_selected(at);
+        dd->set_sensitive(can && !names->empty());
+        dd->set_tooltip_text("The field of " + curly(o.from) + " it shows");
+        remember(*dd, "layouts.related");
+        dd->property_selected().signal_changed().connect([this, dd, names, idx, gen] {
+            if (gen != m_lay_gen || idx >= m_lay.objects.size()) return;
+            const auto i = dd->get_selected();
+            if (i == GTK_INVALID_LIST_POSITION || i >= names->size() || (*names)[i] == m_lay.objects[idx].shows) return;
+            auto l = m_lay;
+            l.objects[idx].shows = (*names)[i];
+            const std::string what = "Pointed the related field at " + curly(l.objects[idx].from + "." + (*names)[i]);
+            Glib::signal_idle().connect_once([this, l, what] { keep_layout(l, what); });
+        });
+        m_lay_inspector.append(*side_label("Shows", "acorn-status"));
+        m_lay_inspector.append(*dd);
+        if (m_lay_focus == "layouts.related") focus_back = dd;
     } else if (o.kind == core::ObjectKind::Text) {
         auto e = Gtk::make_managed<Gtk::Entry>();
         e->set_text(o.text);

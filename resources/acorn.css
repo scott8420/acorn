@@ -188,6 +188,11 @@ window.acorn button:not(.acorn-primary):not(.titlebutton):disabled { opacity: 0.
     padding: 0 8px;
     border-bottom: 1px solid alpha(@acorn_ink, 0.12);
 }
+/* s011d: a related field -- a parent's value, shown not edited: a dotted rule, a touch dimmer */
+.acorn-form-static.acorn-related {
+    border-bottom: 1px dotted alpha(@acorn_ink, 0.30);
+    color: alpha(@acorn_ink, 0.85);
+}
 /* s011a: a portal -- the related records, listed */
 .acorn-portal {
     border: 1px solid alpha(@acorn_ink, 0.22);

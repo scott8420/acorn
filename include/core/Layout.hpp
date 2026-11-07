@@ -32,7 +32,11 @@ inline constexpr int kLayoutGrid = 8;
 // (a contact's phones on the contact's Form): `from` is that table, `field`
 // its link field (phones.contact_id -> contacts), `columns` the fields of
 // `from` it lists. A portal whose link is gone is drawn dashed, never dropped.
-enum class ObjectKind { Field, Text, Line, Box, Portal };
+// s011d: + Related -- the other direction: a field of the record this one
+// points at (an address showing its contact's last_name): `field` is this
+// table's link field (addresses.contact_id), `from` the table it points at
+// (contacts), `shows` that table's field (last_name). Shown, not edited.
+enum class ObjectKind { Field, Text, Line, Box, Portal, Related };
 
 struct LayoutObject {
     ObjectKind  kind = ObjectKind::Field;
@@ -41,6 +45,7 @@ struct LayoutObject {
     int x = 0, y = 0, w = 0, h = 0;
     std::string from;                  // Portal: the table whose records it lists
     std::vector<std::string> columns;  // Portal: the fields of `from` it shows, in order
+    std::string shows;                 // Related: the field of `from` it shows
     bool operator==(const LayoutObject&) const = default;
 };
 
@@ -173,5 +178,26 @@ std::vector<std::string> columns_not_on(const LayoutObject& o, const std::vector
 bool move_column(LayoutObject& o, int i, int delta);
 // "phones · contact_id" -- how the editor names a link.
 std::string link_label(const PortalLink& k);
+
+// ── s011d: related fields ───────────────────────────────────────────────────
+// A link OUT of the layout's table: its `field` points at `to`'s key
+// (addresses.contact_id -> contacts). One-field links, as the Graph makes.
+struct RelatedLink {
+    std::string field, to;
+    bool operator==(const RelatedLink&) const = default;
+};
+// A related object whose link isn't among `links` (the field, the table or
+// the link went).
+bool missing_related_link(const LayoutObject& o, const std::vector<RelatedLink>& links);
+// "contact_id → last_name" -- how the editor offers one.
+std::string related_label(const std::string& link_field, const std::string& shows);
+// `to`'s fields a related object on `l` doesn't show yet through `link`, in
+// `to`'s order -- never `to`'s key (it is the link's own value).
+std::vector<std::string> related_not_on(const Layout& l, const RelatedLink& link,
+                                        const std::vector<std::string>& to_fields, const std::string& to_key = {});
+// `l` with a row added under everything: the shown field's name as words on
+// the left, the related value on the right (as Add Field lays a row). The
+// body is fitted. Returns 2 (the words and the value).
+int add_related(Layout& l, const RelatedLink& link, const std::string& shows);
 
 }  // namespace acorn::core

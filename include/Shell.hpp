@@ -213,6 +213,8 @@ private:
     core::Layout layout_of(const std::string& table, const std::string& name, bool* kept = nullptr) const;  // category: layouts: kept, else the computed default
     std::vector<std::string> fields_of(const std::string& table) const;  // category: layouts: the live table's fields, in order
     std::vector<core::PortalLink> portal_links(const std::string& table) const;  // category: layouts: s011a -- one-field links INTO the table
+    std::vector<core::RelatedLink> related_links(const std::string& table) const;  // category: layouts: s011d -- one-field links OUT of the table
+    Gtk::Widget* form_related(const core::LayoutObject& o, const db::Table& child);  // category: form: s011d -- a parent's field, shown
     Gtk::Widget* form_portal(const core::LayoutObject& o, const db::Table& parent, Gtk::Widget*& focus_back);  // category: form: s011a -- the related records, listed (s011b: edited)
     bool commit_related(const std::string& table, const std::string& row, const std::string& column,
                         const std::string& typed, const std::string& saved);  // category: form: s011b -- a portal cell -> verbs::set_field

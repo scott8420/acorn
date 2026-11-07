@@ -43,6 +43,8 @@ std::string check_layout(const Layout& l) {
         if (o.kind == ObjectKind::Field && o.field.empty()) return "a field object needs a field";
         if (o.kind == ObjectKind::Portal && (o.from.empty() || o.field.empty()))
             return "a portal needs the table it lists and its link field";
+        if (o.kind == ObjectKind::Related && (o.from.empty() || o.field.empty() || o.shows.empty()))
+            return "a related field needs its link field, the table it points at and the field it shows";
     }
     return {};
 }
@@ -193,6 +195,7 @@ std::string object_label(const LayoutObject& o) {
         case ObjectKind::Line:  return "a line";
         case ObjectKind::Box:   return "a box";
         case ObjectKind::Portal: return "the portal to “" + o.from + "”";
+        case ObjectKind::Related: return "“" + o.from + "." + o.shows + "”";
         default:                return "the words “" + o.text + "”";
     }
 }
@@ -228,7 +231,8 @@ int add_object(Layout& l, ObjectKind kind, const std::string& what) {
         case ObjectKind::Box:
             l.objects.push_back({ObjectKind::Box, "", "", kFormMargin, y, 20 * kLayoutGrid, 8 * kLayoutGrid});
             break;
-        case ObjectKind::Portal:   // add_portal knows its link; here, a bare one would be invalid
+        case ObjectKind::Portal:    // add_portal / add_related know their link; a bare one would be invalid
+        case ObjectKind::Related:
             return 0;
     }
     fit(l);
@@ -347,5 +351,47 @@ bool move_column(LayoutObject& o, int i, int delta) {
 }
 
 std::string link_label(const PortalLink& k) { return k.from + " · " + k.field; }
+
+// ── s011d: related fields ───────────────────────────────────────────────────
+
+bool missing_related_link(const LayoutObject& o, const std::vector<RelatedLink>& links) {
+    if (o.kind != ObjectKind::Related) return false;
+    return std::find(links.begin(), links.end(), RelatedLink{o.field, o.from}) == links.end();
+}
+
+std::string related_label(const std::string& link_field, const std::string& shows) {
+    return link_field + " → " + shows;
+}
+
+std::vector<std::string> related_not_on(const Layout& l, const RelatedLink& link,
+                                        const std::vector<std::string>& to_fields, const std::string& to_key) {
+    std::vector<std::string> out;
+    for (const auto& f : to_fields) {
+        if (f == to_key) continue;
+        bool on = false;
+        for (const auto& o : l.objects)
+            on = on || (o.kind == ObjectKind::Related && o.field == link.field && o.from == link.to && o.shows == f);
+        if (!on) out.push_back(f);
+    }
+    return out;
+}
+
+int add_related(Layout& l, const RelatedLink& link, const std::string& shows) {
+    const int y = next_row_y(l);
+    room_in_body(l, y, kFormRowH);
+    l.objects.push_back({ObjectKind::Text, "", shows, kFormMargin, y, kFormLabelW, kFormRowH});
+    LayoutObject o;
+    o.kind = ObjectKind::Related;
+    o.field = link.field;
+    o.from = link.to;
+    o.shows = shows;
+    o.x = kFormMargin + kFormLabelW + kFormGap;
+    o.y = y;
+    o.w = kFormBoxW;
+    o.h = kFormRowH;
+    l.objects.push_back(std::move(o));
+    fit(l);
+    return 2;
+}
 
 }  // namespace acorn::core
