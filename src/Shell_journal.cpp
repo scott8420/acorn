@@ -109,6 +109,7 @@ void Shell::journal_note(const std::string& text, const char* kind) {  // journa
     browse_note(text, kind);                      // s006c: and Browse
     graph_note(text, kind);                       // s008b: and the Graph
     layouts_note(text, kind);                     // s010b: and Layouts
+    accounts_note(text, kind);                    // s019b: and Accounts
 }
 
 void Shell::reload_schema(const std::string& show) {  // journal: re-read, repaint, select `show`

@@ -3538,6 +3538,248 @@ void test_accounts_pure() {
           account_lines(a, ts).empty() ? "" : account_lines(a, ts)[0]);
 }
 
+// s019b -- every acorn_selftest_<pid>_* account on the server, dropped
+// through g.inner() (fixture teardown, as the sample's DROP TABLEs are). Never
+// any other name: the pattern is this run's own.
+bool drop_test_accounts(Gate& g, Dialect d) {
+    const std::string pat = "acorn\\_selftest\\_" + std::to_string(::getpid()) + "\\_%";
+    const bool my = d == Dialect::MariaDB;
+    auto r = g.inner().query(my ? "SELECT User, Host FROM mysql.user WHERE User LIKE ?"
+                                : "SELECT rolname, '' FROM pg_roles WHERE rolname LIKE ?", {Value(pat)});
+    if (!r) return false;
+    bool ok = true;
+    for (const auto& row : r->rows) {
+        const std::string n = row[0].as_text() ? *row[0].as_text() : "";
+        const std::string h = row[1].as_text() ? *row[1].as_text() : "";
+        if (n.rfind("acorn_selftest_" + std::to_string(::getpid()) + "_", 0) != 0) { ok = false; continue; }
+        if (my) { ok = g.inner().query("DROP USER '" + n + "'@'" + h + "'").has_value() && ok; continue; }
+        (void)g.inner().query("REVOKE ALL ON ALL TABLES IN SCHEMA " + g.quote_ident("public") + " FROM " + g.quote_ident(n));
+        auto sc = g.inner().query("SELECT current_schema()");
+        if (sc && !sc->rows.empty() && sc->rows[0][0].as_text())
+            (void)g.inner().query("REVOKE ALL ON ALL TABLES IN SCHEMA " + g.quote_ident(*sc->rows[0][0].as_text()) + " FROM " + g.quote_ident(n));
+        ok = g.inner().query("DROP ROLE " + g.quote_ident(n)).has_value() && ok;
+    }
+    return ok;
+}
+
+// The walk's accounts as their pictures read (absent / present + rights).
+std::string acct_says(Journal& j, const Store::Id& id) {
+    j.store().clear_failed();
+    auto got = j.store().get(id);
+    if (j.store().failed()) { std::string e = j.store().error().message; j.store().clear_failed(); return "?" + e; }
+    if (!got) return "absent";
+    const auto& a = std::get<AccountDef>(*got);
+    std::string s = "present " + std::string(a.login ? "login" : "nologin") + " every=" + std::to_string(a.every);
+    for (const auto& [t, p] : a.tables) s += " " + t + "=" + std::to_string(p);
+    return s;
+}
+std::string walk_accounts(Journal& j) {
+    std::string s;
+    for (const char* w : {"new", "give", "every", "take", "del"}) {
+        const std::string n = "acorn_selftest_" + std::to_string(::getpid()) + "_walk_" + w;
+        s += std::string(w) + ": " + acct_says(j, Store::account_id(n, j.store().dialect() == Dialect::MariaDB ? "%" : "")) + "; ";
+    }
+    return s;
+}
+
+void test_accounts_changed_pure() {
+    using D = Dialect;
+    AccountDef r;
+    r.name = "r";
+    r.host = "%";
+    check("accounts: New Account's SQL -- MariaDB, the password a literal (quote and backslash doubled), or hidden",
+          account_sql(D::MariaDB, '`', "shop", std::nullopt, r, std::string("it's\\"), false) ==
+                  std::vector<std::string>{"CREATE USER 'r'@'%' IDENTIFIED BY 'it''s\\\\'"} &&
+              account_sql(D::MariaDB, '`', "shop", std::nullopt, r, std::string("it's\\"), true) ==
+                  std::vector<std::string>{"CREATE USER 'r'@'%' IDENTIFIED BY '********'"},
+          account_sql(D::MariaDB, '`', "shop", std::nullopt, r, std::string("it's\\"), false)[0]);
+    AccountDef back = r;
+    back.every = 1;
+    back.tables = {{"contacts", 2}};
+    const auto again = account_sql(D::MariaDB, '`', "shop", std::nullopt, back, std::nullopt, false);
+    check("accounts: made again with no password (Ctrl+Z of Delete) -- MariaDB locks it, then its rights: db.*, per table",
+          again == std::vector<std::string>{"CREATE USER 'r'@'%' ACCOUNT LOCK", "GRANT SELECT ON `shop`.* TO 'r'@'%'",
+                                            "GRANT INSERT ON `shop`.`contacts` TO 'r'@'%'"},
+          again.empty() ? "" : again.back());
+    check("accounts: MariaDB's delete is one DROP USER",
+          account_sql(D::MariaDB, '`', "shop", back, std::nullopt, std::nullopt, false) == std::vector<std::string>{"DROP USER 'r'@'%'"}, "");
+    AccountDef p;
+    p.name = "r";
+    p.tables = {{"contacts", 1}, {"phones", 2}};
+    const auto gone = account_sql(D::PostgreSQL, '"', "shop", p, std::nullopt, std::nullopt, false);
+    check("accounts: PostgreSQL takes its grants here back first, then DROP ROLE",
+          gone == std::vector<std::string>{"REVOKE SELECT ON \"contacts\" FROM \"r\"", "REVOKE INSERT ON \"phones\" FROM \"r\"",
+                                           "DROP ROLE \"r\""}, gone.empty() ? "" : gone[0]);
+    AccountDef p2 = p;
+    p2.tables = {{"contacts", 1 | 4 | 8}};
+    const auto ch = account_sql(D::PostgreSQL, '"', "shop", p, p2, std::nullopt, false);
+    check("accounts: a change is a GRANT / REVOKE per table that differs, nothing for the rest",
+          ch == std::vector<std::string>{"GRANT UPDATE, DELETE ON \"contacts\" TO \"r\"", "REVOKE INSERT ON \"phones\" FROM \"r\""},
+          ch.empty() ? "" : ch[0]);
+    const auto made = account_sql(D::PostgreSQL, '"', "shop", std::nullopt, AccountDef{"r", "", true, 0, {}}, std::string("pw"), false);
+    check("accounts: PostgreSQL's New Account is CREATE ROLE .. LOGIN PASSWORD",
+          made == std::vector<std::string>{"CREATE ROLE \"r\" LOGIN PASSWORD 'pw'"}, made.empty() ? "" : made[0]);
+    check("accounts: names refused in words -- empty, end spaces, quotes / @, too long; MariaDB needs a host",
+          !check_account_name(D::MariaDB, "", "%").empty() && !check_account_name(D::MariaDB, " a", "%").empty() &&
+              !check_account_name(D::PostgreSQL, "a'b", "").empty() && !check_account_name(D::MariaDB, "a@b", "%").empty() &&
+              !check_account_name(D::MariaDB, std::string(33, 'a'), "%").empty() &&
+              check_account_name(D::PostgreSQL, std::string(33, 'a'), "").empty() &&
+              !check_account_name(D::MariaDB, "clerk", "").empty() && check_account_name(D::MariaDB, "clerk", "%").empty(),
+          check_account_name(D::MariaDB, "clerk", ""));
+    std::string n, h;
+    const auto id = Store::account_id("a:b", "10.0.%");
+    check("accounts: an account's id read back -- a ':' in the name, a host",
+          Store::parse_account_id(id, n, h) && n == "a:b" && h == "10.0.%" && Store::is_account(id) && !Store::is_local(id) &&
+              Store::describe(id) == "the account “a:b@10.0.%”", id);
+}
+
+// On the sample Address Book, writable: New Account, rights given and taken,
+// Delete Account -- each one step, Ctrl+Z / redo; refusals in words; never
+// this connection's own account. Throwaway acorn_selftest_<pid>_* accounts only.
+void test_accounts_changed(Journal& j, Gate& g, Dialect d, const std::string& P) {
+    j.clear();
+    const int strays0 = j.strays();
+    const std::string who = "acorn_selftest_" + std::to_string(::getpid()) + "_clerk";
+    const bool my = d == Dialect::MariaDB;
+    const std::string host = my ? "%" : "";
+    const auto id = Store::account_id(who, host);
+    if (d == Dialect::SQLite) {
+        const auto n = j.size();
+        auto a = verbs::new_account(j, who, host, "pw");
+        auto b = verbs::set_rights(j, id, "contacts", kRead, true);
+        check(P + "accounts changed: SQLite -- New Account and rights refused in words, no step",
+              !a && !b && a.error().message.find("no accounts") != std::string::npos && j.size() == n,
+              a ? "made!" : a.error().message);
+        return;
+    }
+    auto sch = g.introspect();
+    if (!sch) { check(P + "accounts changed: the schema", false, ""); return; }
+    std::vector<std::string> ts;
+    for (const auto& t : sch->tables) ts.push_back(t.name);
+    auto mine = [&]() -> const Account* {
+        static std::optional<AccountList> list;
+        auto r = read_accounts(g, d, *sch);
+        list = r ? std::optional<AccountList>(*r) : std::nullopt;
+        if (list) for (const auto& a : list->accounts) if (a.name == who && a.host == host) return &a;
+        return nullptr;
+    };
+    auto says = [&](const Account* a, const std::string& t) { return a ? privs_says(a->tables.at(t)) : std::string("none"); };
+
+    const std::string pw = "it's a \\ pass";
+    const auto n0 = j.size();
+    auto made = verbs::new_account(j, who, host, pw);
+    const Account* a = mine();
+    check(P + "accounts changed: New Account -- made, one step named for it, no rights yet",
+          made && j.size() == n0 + 1 && j.undo_label() == "New Account " + account_words(who, host) && a &&
+              a->every == 0 && says(a, "contacts") == "nothing",
+          made ? j.undo_label() : made.error().message);
+    check(P + "accounts changed: the password is nowhere in the step", j.undo_label().find(pw) == std::string::npos &&
+          acct_says(j, id).find("pass") == std::string::npos, "");
+    if (my) {
+        auto pwok = g.query("SELECT authentication_string = PASSWORD(?) FROM mysql.user WHERE User = ? AND Host = ?",
+                            {Value(pw), Value(who), Value(host)});
+        check(P + "accounts changed: MariaDB has the password as typed (a quote and a backslash in it)",
+              pwok && !pwok->rows.empty() && pwok->rows[0][0].as_int() == 1, pwok ? "" : pwok.error().message);
+    }
+    auto twice = verbs::new_account(j, who, host, "x");
+    auto nopw = verbs::new_account(j, who + "_b", host, "");
+    auto badname = verbs::new_account(j, "a'b", host, "x");
+    check(P + "accounts changed: refused in words -- a name taken, no password, a bad name; no step",
+          !twice && twice.error().code == Error::Code::Exists && !nopw && !badname && j.size() == n0 + 1,
+          twice ? "made twice!" : twice.error().message);
+
+    auto give = verbs::set_rights(j, id, "contacts", kRead, true);
+    a = mine();
+    check(P + "accounts changed: Give read on contacts -- one step, named; contacts read, phones nothing",
+          give && j.undo_label() == "Give " + account_words(who, host) + " read on “contacts”" && says(a, "contacts") == "read" &&
+              says(a, "phones") == "nothing", give ? j.undo_label() : give.error().message);
+    const auto n1 = j.size();
+    auto same = verbs::set_rights(j, id, "contacts", kRead, true);
+    check(P + "accounts changed: giving what it has is no step", same && j.size() == n1, "");
+    auto want = verbs::rights_wanted(j, id, "contacts", kChange, true);
+    auto pv = want ? verbs::account_preview(j, id, *want) : std::unexpected(want.error());
+    auto dbn = g.query(my ? "SELECT DATABASE()" : "SELECT current_database()");
+    const std::string db = dbn && !dbn->rows.empty() && dbn->rows[0][0].as_text() ? *dbn->rows[0][0].as_text() : "";
+    const std::string expect = my ? "GRANT UPDATE ON `" + db + "`.`contacts` TO '" + who + "'@'%'"
+                                  : "GRANT UPDATE ON \"contacts\" TO \"" + who + "\"";
+    check(P + "accounts changed: the preview is exactly the one GRANT the box will run",
+          pv && *pv == std::vector<std::string>{expect}, pv && !pv->empty() ? pv->front() : (pv ? "none" : pv.error().message));
+    auto chg = verbs::set_rights(j, id, "contacts", kChange, true);
+    check(P + "accounts changed: Give change -- contacts read · change",
+          chg && says(mine(), "contacts") == "read · change", chg ? says(mine(), "contacts") : chg.error().message);
+    auto u = j.undo();
+    const std::string after_undo = says(mine(), "contacts");
+    auto r = j.redo();
+    check(P + "accounts changed: Ctrl+Z takes change back (read), redo gives it again",
+          u && r && after_undo == "read" && says(mine(), "contacts") == "read · change",
+          after_undo + (u ? "" : " " + u.error().message));
+    auto every = verbs::set_rights(j, id, "", kAdd, true);
+    a = mine();
+    bool all_add = a != nullptr;
+    if (a) for (const auto& t : ts) all_add = all_add && (a->tables.at(t) & kAdd);
+    check(P + "accounts changed: Give add on every table -- one step, every table may add" +
+              std::string(my ? " (`db`.*)" : " (each table)"),
+          every && all_add && j.undo_label() == "Give " + account_words(who, host) + " add on every table",
+          every ? j.undo_label() : every.error().message);
+    (void)j.undo();
+    a = mine();
+    check(P + "accounts changed: Ctrl+Z -- no table may add again", a && !(a->tables.at("phones") & kAdd) &&
+          says(a, "contacts") == "read · change", says(a, "contacts"));
+
+    // Behind Acorn's back: undo is refused, nothing touched.
+    auto give2 = verbs::set_rights(j, id, "phones", kRead, true);
+    (void)g.inner().query("REVOKE SELECT ON " + (my ? g.quote_ident(db) + "." : std::string{}) + g.quote_ident("phones") +
+                          " FROM " + (my ? "'" + who + "'@'%'" : g.quote_ident(who)));
+    auto ref = j.undo();
+    check(P + "accounts changed: an account changed behind Acorn's back -- undo refused, nothing touched",
+          give2 && !ref && ref.error().code == Error::Code::Changed, ref ? "undone!" : ref.error().message);
+    j.clear();
+
+    // Never the connection's own account.
+    auto me = g.query(my ? "SELECT CURRENT_USER()" : "SELECT current_user::text");
+    const auto mep = me && !me->rows.empty() && me->rows[0][0].as_text() ? parse_grantee(*me->rows[0][0].as_text())
+                                                                          : std::pair<std::string, std::string>{};
+    const auto own = Store::account_id(mep.first, my ? mep.second : "");
+    auto take_own = verbs::set_rights(j, own, "contacts", kRead, false);
+    auto del_own = verbs::delete_account(j, own);
+    auto raw = j.run("by hand", {own}, [&](Store& s) { s.put(own, std::nullopt); });
+    const Account* meacct = nullptr;
+    auto lst = read_accounts(g, d, *sch);
+    if (lst) for (const auto& x : lst->accounts) if (x.you) meacct = &x;
+    check(P + "accounts changed: the connection's own account -- refused by the verbs AND the store; still may do all four",
+          !take_own && !del_own && !raw && raw.error().message.find("this connection uses") != std::string::npos &&
+              j.size() == 0 && meacct && (meacct->tables.at("contacts") & kAllPrivs) == kAllPrivs,
+          raw ? "the store let it through!" : raw.error().message);
+    if (my) {
+        auto adm = verbs::delete_account(j, Store::account_id("acorn", mep.second == "%" ? "localhost" : "%"));
+        check(P + "accounts changed: an account that makes accounts isn't deleted by Acorn -- said in words",
+              !adm && adm.error().message.find("makes accounts itself") != std::string::npos && j.size() == 0,
+              adm ? "deleted!" : adm.error().message);
+    }
+
+    // Delete Account: gone; Ctrl+Z makes it again with its rights -- not its password.
+    const std::string before = acct_says(j, id);
+    auto del = verbs::delete_account(j, id);
+    check(P + "accounts changed: Delete Account -- one step, named, gone (" + before + ")",
+          del && j.undo_label() == "Delete Account " + account_words(who, host) && !mine(), del ? j.undo_label() : del.error().message);
+    auto back = j.undo();
+    a = mine();
+    check(P + "accounts changed: Ctrl+Z makes it again with its rights here (contacts read · change)",
+          back && a && says(a, "contacts") == "read · change" && acct_says(j, id) == before,
+          back ? acct_says(j, id) : back.error().message);
+    if (my) {
+        auto lk = g.query("SELECT JSON_VALUE(Priv, '$.account_locked') FROM mysql.global_priv WHERE User = ? AND Host = ?",
+                          {Value(who), Value(host)});
+        const std::string l = lk && !lk->rows.empty() && lk->rows[0][0].as_text() ? *lk->rows[0][0].as_text() : "?";
+        check(P + "accounts changed: ... without its password: MariaDB makes it locked", l == "true" || l == "1", l);
+    }
+    auto again = j.redo();
+    check(P + "accounts changed: redo deletes it again", again && !mine(), again ? "" : again.error().message);
+    j.clear();
+    check(P + "accounts changed: the throwaway accounts dropped; no strays",
+          drop_test_accounts(g, d) && !mine() && j.strays() == strays0, std::to_string(j.strays()));
+}
+
 // On the sample Address Book: this connection's account, and a throwaway one
 // given read on contacts only. Accounts live at SERVER level, outside the
 // throwaway database, so only acorn_selftest_<pid>_* names are ever made or
@@ -4093,6 +4335,7 @@ void test_sample(Journal& j, Gate& g, const std::string& P, Dialect d) {
     test_export_book(g, P);        // s018a
     test_import_book(j, g, P);     // s018b
     test_accounts(g, d, P);        // s019a
+    test_accounts_changed(j, g, d, P);   // s019b
     {   // s016
         const auto* lab = sol.layout("addresses", kSampleLabelsName);
         check(P + "labels: the sample's Mailing Labels kept beside the report", lab && *lab == sample_labels_layout(), "");
@@ -4127,16 +4370,40 @@ void test_journal(Engine* e, const ConnectParams& rw, const ConnectParams& ro, c
     // Walk every verb the UI offers: a step, nothing strays, undo puts it back
     // exactly, redo reproduces it exactly.
     for (const auto& v : verbs::all()) {
+        if (v.accounts && d == Dialect::SQLite) {   // s019b: no accounts to change
+            const auto n = j.size();
+            auto r = v.run(j);
+            check(P + "verb " + v.name + ": a SQLite file has no accounts -- refused in words, no step",
+                  !r && r.error().message.find("no accounts") != std::string::npos && j.size() == n,
+                  r ? "ran!" : r.error().message);
+            continue;
+        }
         if (v.setup) {
             auto su = v.setup(j);
             check(P + "verb " + v.name + ": its fixture, through the door", su.has_value(), su ? "" : su.error().message);
         }
         const auto before = snapshot(g);
         const auto sol_before = walk_solution;
-        const auto steps = j.size();
+        const auto acc_before = v.accounts ? walk_accounts(j) : std::string{};
+        const auto steps = j.size() - (j.can_redo() ? 1 : 0);   // s019b: a redo the step discards
         auto r = v.run(j);
         const auto after = snapshot(g);
         const auto sol_after = walk_solution;
+        const auto acc_after = v.accounts ? walk_accounts(j) : std::string{};
+        if (v.accounts) {   // s019b: the server's accounts change, this database's tables don't
+            check(P + "verb " + v.name + ": runs, is one step, changes the server's accounts -- not the tables",
+                  r.has_value() && j.size() == steps + 1 && j.can_undo() && after == before && acc_after != acc_before,
+                  r ? acc_before + " -> " + acc_after : r.error().message);
+            auto u = j.undo();
+            check(P + "verb " + v.name + ": undo puts the account back exactly",
+                  u.has_value() && walk_accounts(j) == acc_before && snapshot(g) == before && j.can_redo(),
+                  u ? walk_accounts(j) : u.error().message);
+            auto re = j.redo();
+            check(P + "verb " + v.name + ": redo reproduces it exactly",
+                  re.has_value() && walk_accounts(j) == acc_after && snapshot(g) == after, re ? walk_accounts(j) : re.error().message);
+            (void)j.undo();
+            continue;
+        }
         if (v.local) {   // s009: the solution changes, the database never does
             check(P + "verb " + v.name + ": runs, is one step, changes the solution -- not the database",
                   r.has_value() && j.size() == steps + 1 && j.can_undo() && after == before && sol_after != sol_before,
@@ -4157,6 +4424,9 @@ void test_journal(Engine* e, const ConnectParams& rw, const ConnectParams& ro, c
         (void)j.undo();
     }
     check(P + "no verb wrote outside the door", j.strays() == 1, std::to_string(j.strays()) + " strays");
+    if (d != Dialect::SQLite)   // s019b: the walk's throwaway accounts go (fixture teardown, behind the door)
+        check(P + "the walk's throwaway accounts dropped", drop_test_accounts(g, d) && walk_accounts(j).find("present") == std::string::npos,
+              walk_accounts(j));
 
     // New Table, by hand: the label names it; the table is real and empty.
     TableDef t;
@@ -4403,6 +4673,7 @@ void db_tests(CheckFn fn, int& skip_count) {
         test_export_pure();                   // s018a: export
         test_import_pure();                   // s018b: import
         test_accounts_pure();                 // s019a: accounts
+        test_accounts_changed_pure();         // s019b: accounts changed
         {   // s005b: the door, on its own fresh fixture file
             Target J = T;
             J.rw.path = (tmp.p / "journal.sqlite").string();

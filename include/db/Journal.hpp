@@ -67,6 +67,7 @@
 #include <cstdint>
 #include <expected>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -167,12 +168,30 @@ struct BoxDef {
     bool operator==(const BoxDef&) const = default;
 };
 
+// s019b: an account of the SERVER and the four record rights it was GIVEN
+// here -- its own grants, not what it reaches through PUBLIC, a group or
+// ownership (those can't be given or taken on it). Bits are db::Privs
+// (read 1, add 2, change 4, delete 8). A table it was given nothing on is
+// not in `tables`. NEVER a password: Acorn sends one when an account is made
+// and keeps none, so an account made again (Ctrl+Z of Delete Account, redo
+// of New Account) has none -- MariaDB makes it ACCOUNT LOCK, PostgreSQL with
+// no password -- until one is set.
+struct AccountDef {
+    std::string name;
+    std::string host;                         // MariaDB's '@host'; "" on PostgreSQL
+    bool        login = true;                 // PostgreSQL: LOGIN / NOLOGIN (a group)
+    unsigned    every = 0;                    // MariaDB: given on this database (`db`.*); 0 on PostgreSQL
+    std::map<std::string, unsigned> tables;   // given on each table
+    bool operator==(const AccountDef&) const = default;
+};
+
 // s010: a layout -- also kept in the solution, never the database. Its own
 // table and name say which (core::Layout).
 // s014a: a calculation field -- in the solution too (core::Calc).
 // s014b: a summary -- in the solution too (core::Summary).
 // s014c: a value list -- in the solution too (core::ValueList).
-using Record = std::variant<TableDef, RowDef, FieldData, BoxDef, core::Layout, core::Calc, core::Summary, core::ValueList, core::Script>;
+using Record = std::variant<TableDef, RowDef, FieldData, BoxDef, core::Layout, core::Calc, core::Summary, core::ValueList, core::Script,
+                            AccountDef>;
 
 // ── the DDL writer: one place, per dialect, shared by preview and act ─────────
 // The New Table window shows exactly the string the store will run.
@@ -210,6 +229,25 @@ std::string drop_index_sql(Dialect d, char quote, const std::string& table, cons
 // Every index name in the schema (SQLite and PostgreSQL keep them per database,
 // not per table -- a new index must not reuse one).
 bool index_name_taken(const Schema& s, const std::string& name);
+
+// s019b -- the accounts' SQL: the statements that turn the account `live`
+// into `want` (either absent), in order -- what the Accounts area previews
+// and exactly what put() runs. Made: CREATE USER 'n'@'h' IDENTIFIED BY ... /
+// CREATE ROLE "n" LOGIN PASSWORD ... (no password: MariaDB ACCOUNT LOCK,
+// PostgreSQL none), then its grants; gone: PostgreSQL REVOKEs its grants
+// here first, then DROP USER / DROP ROLE; else a GRANT / REVOKE per table
+// whose rights differ (MariaDB: `db`.* for every table). `hide_password`
+// writes '********' in the password's place -- the preview's.
+std::vector<std::string> account_sql(Dialect d, char quote, const std::string& database,
+                                     const std::optional<AccountDef>& live, const std::optional<AccountDef>& want,
+                                     const std::optional<std::string>& password, bool hide_password);
+// A name for a new account, in words ("" = fine): not empty, no space at an
+// end, no quote / backslash / '@' / control character, at most 32 (MariaDB)
+// / 63 (PostgreSQL) bytes. The host (MariaDB): not empty, the same rules,
+// '%' allowed.
+std::string check_account_name(Dialect d, const std::string& name, const std::string& host);
+// "“reader@%”" (MariaDB) / "“reader”" (PostgreSQL).
+std::string account_words(const std::string& name, const std::string& host);
 
 // ── the gate ──────────────────────────────────────────────────────────────────
 // True for statements that only read (SELECT, WITH .. SELECT is NOT counted as
@@ -270,6 +308,19 @@ public:
     // A record of the solution, not the database: a step of only these needs
     // no transaction and works on a read-only connection.
     static bool is_local(const Id& id) { return is_box(id) || is_layout(id) || is_calc(id) || is_summary(id) || is_list(id) || is_script(id); }
+    // s019b: an account of the server -- "account:<bytes in name>:<name>@<host>".
+    // Not local: it writes the server, like a table.
+    static Id account_id(const std::string& name, const std::string& host);
+    static bool parse_account_id(const Id& id, std::string& name, std::string& host);
+    static bool is_account(const Id& id) { return id.rfind("account:", 0) == 0; }
+    // The password New Account sends -- for the NEXT put of an account that
+    // makes it, then forgotten (never in a step, a picture or a log).
+    void set_password(std::optional<std::string> pw) { m_password = std::move(pw); }
+    // This connection's own account (CURRENT_USER() / current_user) -- the
+    // store refuses any change to it. False when it can't be read.
+    bool is_own_account(const std::string& name, const std::string& host) const;
+    // The database the account statements name (MariaDB's `db`.*).
+    std::string database_name() const;
     // s017a: a script, by table and name -- "script:<bytes in table>:<table>/<name>".
     static Id script_id(const std::string& table, const std::string& name);
     static bool parse_script_id(const Id& id, std::string& table, std::string& name);
@@ -341,6 +392,8 @@ private:
     std::optional<Record> get_field(const Id& id) const;
     void put_field(const Id& id, const FieldData* v);
     void put_local(const Id& id, const std::optional<Record>& v);   // s009 / s010: the solution
+    std::optional<Record> get_account(const Id& id) const;         // s019b
+    void put_account(const Id& id, const AccountDef* v);
     bool exec_all(const std::vector<std::string>& sql);
     std::int64_t count_where(const std::string& table, const std::string& column, const char* cond) const;   // -1: failed
     std::vector<std::string> primary_key_of(const std::string& table) const;
@@ -360,6 +413,7 @@ private:
     int                   m_strays = 0;
     core::Solution*       m_solution = nullptr;   // s009
     std::function<bool()> m_save_solution;
+    std::optional<std::string> m_password;        // s019b: one put, then gone
 };
 
 // ── the journal ───────────────────────────────────────────────────────────────
@@ -592,6 +646,36 @@ std::expected<void, Error> save_script(Journal& j, const core::Script& s, const 
 // Delete Script “n”. Refused in words when there's none by that name.
 std::expected<void, Error> delete_script(Journal& j, const std::string& table, const std::string& name);
 
+// s019b -- accounts: the SERVER's, so every one is a write the whole server
+// sees. Each is one step; Ctrl+Z gives the other picture back. Refused in
+// words, before anything runs: SQLite (no accounts), the connection's OWN
+// account (the store refuses it too -- you can't take your rights away from
+// under the connection). On MariaDB a step that is more than one statement
+// (an account made again WITH its rights) can't roll back: a grant that
+// fails drops the account it just made.
+//
+// New Account “n@h”: made with `password` (sent, never kept), no rights
+// yet. Refused: a bad name / host, no password, an account by that name.
+std::expected<void, Error> new_account(Journal& j, const std::string& name, const std::string& host,
+                                       const std::string& password);
+// Give / take `privs` (db::Privs bits) on `table` ("" = every table: MariaDB
+// `db`.*, PostgreSQL each table of this schema). Label: Give “r” read on
+// “contacts” / Take read on every table from “r”. Already so: no step.
+std::expected<void, Error> set_rights(Journal& j, const Store::Id& account, const std::string& table, unsigned privs,
+                                      bool on);
+// The account as set_rights would leave it (the preview builds from this).
+std::expected<AccountDef, Error> rights_wanted(Journal& j, const Store::Id& account, const std::string& table,
+                                               unsigned privs, bool on);
+std::string rights_label(const AccountDef& a, const std::string& table, unsigned privs, bool on);
+// Delete Account “n@h”. Refused also: an account that makes accounts or may
+// do everything (Acorn leaves those to the server's own tools). Ctrl+Z makes
+// it again with the rights it had HERE -- not its password, not anything it
+// had in other databases.
+std::expected<void, Error> delete_account(Journal& j, const Store::Id& account);
+// What a change to the account would run, password hidden -- the preview.
+std::expected<std::vector<std::string>, Error> account_preview(Journal& j, const Store::Id& account,
+                                                               const std::optional<AccountDef>& want);
+
 // What a design step would do to the live table, as the SQL put() will run
 // (the designer's preview): `want` is the table as the designer has it.
 std::expected<std::vector<std::string>, Error> preview(Journal& j, const TableDef& want);
@@ -604,6 +688,10 @@ struct Verb {
     // before the walk counts. Optional.
     std::function<std::expected<void, Error>(Journal&)> setup = {};
     bool local = false;   // s009: changes the solution, not the database (the walk checks the solution)
+    // s019b: changes the SERVER's accounts, not this database -- the walk
+    // checks its throwaway accounts (acorn_selftest_<pid>_walk_*), refuses
+    // in words on SQLite, and drops them after.
+    bool accounts = false;
 };
 const std::vector<Verb>& all();
 }  // namespace verbs

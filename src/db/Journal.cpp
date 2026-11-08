@@ -1,10 +1,13 @@
 #include "db/Journal.hpp"
 #include "db/Convert.hpp"
+#include "db/Accounts.hpp"   // s019b: kRead ... for the walk
 
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <utility>
+
+#include <unistd.h>   // s019b: getpid -- the walk's throwaway accounts
 
 // db/Journal.cpp -- the door (s005b). Read include/db/Journal.hpp first.
 
@@ -1127,6 +1130,8 @@ std::string Store::describe(const Id& id) {
     if (parse_summary_id(id, table, name)) return "the summary " + curly(name) + " of " + curly(table);
     if (parse_list_id(id, table, name)) return "the value list " + curly(name) + " of " + curly(table);
     if (parse_script_id(id, table, name)) return "the script " + curly(name) + " of " + curly(table);
+    std::string host;
+    if (parse_account_id(id, name, host)) return "the account " + account_words(name, host);
     return curly(name_of(id));
 }
 
@@ -1156,6 +1161,7 @@ std::optional<Record> Store::get(const Id& id) const {
     if (id.rfind("table:", 0) == 0) return get_table(name_of(id));
     if (id.rfind("row:", 0) == 0) return get_row(id);
     if (id.rfind("field:", 0) == 0) return get_field(id);
+    if (is_account(id)) return get_account(id);   // s019b: the server's
     if (is_box(id)) {   // s009: from the solution, not the database
         if (!m_solution) return std::nullopt;
         const std::string t = id.substr(4);
@@ -1458,6 +1464,11 @@ void Store::put(const Id& id, const std::optional<Record>& v) {
     if (id.rfind("field:", 0) == 0) {
         if (v && !std::holds_alternative<FieldData>(*v)) { fail(Error::Code::Internal, id + " given a table or record"); return; }
         put_field(id, v ? &std::get<FieldData>(*v) : nullptr);
+        return;
+    }
+    if (is_account(id)) {   // s019b
+        if (v && !std::holds_alternative<AccountDef>(*v)) { fail(Error::Code::Internal, id + " given something else"); return; }
+        put_account(id, v ? &std::get<AccountDef>(*v) : nullptr);
         return;
     }
     if (is_local(id)) { put_local(id, v); return; }
@@ -1793,7 +1804,8 @@ Journal::~Journal() { m_gate.set_door({}); }
 
 namespace {
 bool touches_tables(const std::vector<Store::Id>& ids) {
-    for (const auto& id : ids) if (id.rfind("table:", 0) == 0) return true;
+    // s019b: an account's statements commit implicitly on MariaDB, as DDL does.
+    for (const auto& id : ids) if (id.rfind("table:", 0) == 0 || Store::is_account(id)) return true;
     return false;
 }
 // Everything a step declares except a field's kept values.
@@ -2934,6 +2946,21 @@ std::expected<void, Error> key_fixture(Journal& j) {
 }  // namespace
 
 namespace {
+// s019b: the walk's accounts -- acorn_selftest_<pid>_walk_<what> (the selftest
+// drops every acorn_selftest_<pid>_* account after). '%' is MariaDB's host.
+std::string walk_account_name(const char* what) {
+    return "acorn_selftest_" + std::to_string(::getpid()) + "_walk_" + what;
+}
+Store::Id walk_account(Journal& j, const char* what) {
+    return Store::account_id(walk_account_name(what), j.store().dialect() == Dialect::MariaDB ? "%" : "");
+}
+std::expected<void, Error> rows_fixture(Journal& j);
+std::expected<void, Error> account_fixture(Journal& j, const char* what, unsigned privs) {
+    if (auto r = rows_fixture(j); !r) return r;
+    if (auto r = new_account(j, walk_account_name(what), "%", "walk"); !r) return r;
+    if (privs) return set_rights(j, walk_account(j, what), "acorn_verb_rows", privs, true);
+    return {};
+}
 // The walk's fixture for the record verbs: a table with a counting key and one
 // record in it -- made through the door, like everything else.
 constexpr const char* kRows = "acorn_verb_rows";
@@ -3153,6 +3180,22 @@ const std::vector<Verb>& all() {
              if (!row) return std::unexpected(row.error());
              return delete_record(j, *row);
          }, [](Journal& j) { return link_fixture(j, OnDelete::SetEmpty); }},
+        // s019b -- accounts: the server's, so only throwaway ones (walk_account)
+        {"New Account", [](Journal& j) {
+             return new_account(j, walk_account_name("new"), "%", "walk's pw: it's \\ 'quoted'");
+         }, {}, false, true},
+        {"Give Rights", [](Journal& j) {
+             return set_rights(j, walk_account(j, "give"), kRows, kRead | kChange, true);
+         }, [](Journal& j) { return account_fixture(j, "give", 0); }, false, true},
+        {"Give Rights on Every Table", [](Journal& j) {
+             return set_rights(j, walk_account(j, "every"), "", kRead, true);
+         }, [](Journal& j) { return account_fixture(j, "every", 0); }, false, true},
+        {"Take Rights", [](Journal& j) {
+             return set_rights(j, walk_account(j, "take"), kRows, kRead, false);
+         }, [](Journal& j) { return account_fixture(j, "take", kRead | kAdd); }, false, true},
+        {"Delete Account", [](Journal& j) {
+             return delete_account(j, walk_account(j, "del"));
+         }, [](Journal& j) { return account_fixture(j, "del", kRead); }, false, true},
     };
     return kVerbs;
 }

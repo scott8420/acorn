@@ -114,6 +114,7 @@ add_library(acorn_core STATIC
     # s005a: the one place Acorn creates a database file (never overwrites).
     src/db/NewFile.cpp
     src/db/Journal.cpp
+    src/db/JournalAccounts.cpp   # s019b: the door's accounts -- made, given rights, deleted
     src/db/Starter.cpp    # s009b: starter databases (the Address Book)
     src/db/Convert.cpp    # s007c: what a value becomes when its field changes kind
     src/db/Browse.cpp     # s006b: a table's records, a page at a time

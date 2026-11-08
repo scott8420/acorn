@@ -195,6 +195,10 @@ private:
     void build_graph_page();                     // category: graph: the Graph area
     void build_accounts_page();                  // category: accounts: s019a -- the Accounts area
     void paint_accounts();                       // category: accounts: one card per account, its rights per table (reads only)
+    void accounts_note(const std::string& text, const char* kind);  // category: accounts: s019b -- under the Accounts title
+    void account_editor_check();                 // category: accounts: New Account's live line and SQL
+    void make_account();                         // category: accounts: New Account -> verbs::new_account
+    void ask_delete_account(const std::string& name, const std::string& host);  // category: accounts: asks, then verbs::delete_account
     void paint_graph();                          // category: graph: boxes laid out by depth, lines drawn
     void graph_note(const std::string& text, const char* kind);  // category: graph: under the Graph title
     void on_graph_drop(const std::string& st, const std::string& sf, const std::string& dt, const std::string& df,
@@ -449,6 +453,17 @@ private:
     widgets::Box                    m_accounts_page;        // s019a
     widgets::Label                  m_accounts_where;
     widgets::ScrolledWindow         m_accounts_scroll;
+    // s019b: the changes -- New Account (an editor in place), the note, and
+    // whether this connection may change accounts at all (and why not).
+    widgets::Label                  m_accounts_note;
+    widgets::Button                 m_accounts_new;
+    widgets::Box                    m_accounts_editor;
+    widgets::Entry                  m_acct_name, m_acct_host, m_acct_pw, m_acct_pw2;
+    widgets::Label                  m_acct_sql, m_acct_say;
+    widgets::Button                 m_acct_make, m_acct_cancel;
+    Gtk::Label                      m_acct_host_label{"Host"};
+    bool                            m_accounts_can = false;
+    std::string                     m_accounts_why;
     widgets::Box                    m_graph_page;
     widgets::Label                  m_graph_where, m_graph_note;
     widgets::ScrolledWindow         m_graph_scroll;
