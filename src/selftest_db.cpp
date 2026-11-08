@@ -10,6 +10,7 @@
 #include "db/Starter.hpp"
 #include "db/Browse.hpp"
 #include "db/Print.hpp"
+#include "db/Script.hpp"
 #include "core/Print.hpp"
 #include "db/Convert.hpp"
 #include "db/Loader.hpp"
@@ -3127,6 +3128,213 @@ void test_report_pure(const fs::path& dir) {
 }
 
 // ── s016: labels ─────────────────────────────────────────────────────────────
+// ── s017a: scripts ─────────────────────────────────────────────────────────
+void test_script_pure(const fs::path& dir) {
+    using core::Script; using core::ScriptStep; using K = core::StepKind;
+    bool names = core::step_kinds().size() == 10;
+    for (auto k : core::step_kinds()) names = names && core::parse_step_kind(core::step_name(k)) == k;
+    check("scripts: ten kinds of step, each name read back; an unknown one isn't one; only three write",
+          names && !core::parse_step_kind("loop") && core::step_writes(K::SetField) && core::step_writes(K::NewRecord) &&
+          core::step_writes(K::DeleteRecord) && !core::step_writes(K::Find) && !core::step_writes(K::Print), "");
+    auto a = core::parse_assignments("first_name = \"Ada\"\n\n  last_name=Upper(\"x\")  \n");
+    auto b = core::parse_assignments("first_name \"Ada\"");
+    auto c = core::parse_assignments("x = 1\n= 2");
+    auto d = core::parse_assignments("x =  ");
+    const auto* av = std::get_if<0>(&a);
+    check("scripts: New Record's lines -- “field = what”, blank lines skipped; refused in words with the line",
+          av && av->size() == 2 && (*av)[0] == std::pair<std::string, std::string>{"first_name", "\"Ada\""} &&
+          (*av)[1].second == "Upper(\"x\")" && std::get_if<1>(&b) && std::get<1>(b).find("line 1") != std::string::npos &&
+          std::get_if<1>(&c) && std::get<1>(c).find("line 2") != std::string::npos && std::get_if<1>(&d) &&
+          core::parse_assignments("").index() == 0, std::get_if<1>(&c) ? std::get<1>(c) : "");
+    check("scripts: how each step says itself",
+          core::step_says({K::Find, "city", "Mill"}) == "Find “city” has “Mill”" &&
+          core::step_says({K::Find, "company", "="}) == "Find “company” empty" &&
+          core::step_says({K::Sort, "birthday", "", true}) == "Sort by “birthday”, descending" &&
+          core::step_says({K::SetField, "last_name", "Upper(last_name)"}) == "Set Field “last_name” to Upper(last_name)" &&
+          core::step_says({K::NewRecord, "", "a = 1\nb = 2"}) == "New Record with “a”, “b”" &&
+          core::step_says({K::GoToLayout, "Contact Card"}) == "Go to Layout “Contact Card”" &&
+          core::script_says(Script{"t", "n", {{K::Find, "a", "b"}, {K::Preview}}}) == "2 steps: Find · Preview",
+          core::step_says({K::NewRecord, "", "a = 1\nb = 2"}));
+    const std::vector<std::string> f = {"id", "first_name", "last_name"}, L = {"Contact Card"};
+    auto chk = [&](std::vector<ScriptStep> st, std::vector<std::string> taken = {}, std::string name = "s") {
+        return core::check_script(Script{"contacts", name, std::move(st)}, taken, f, L);
+    };
+    const auto ok = chk({{K::GoToLayout, "Contact Card"}, {K::Find, "last_name", "a"}, {K::Sort, "id", "", true},
+                         {K::NewRecord, "", "first_name = \"Ada\""}, {K::SetField, "last_name", "Upper(first_name)"},
+                         {K::DeleteRecord}, {K::Preview}, {K::Print}, {K::Message, "", "hi"}, {K::ShowAll}});
+    const auto r1 = chk({});
+    const auto r2 = chk({{K::Find, "nope", "a"}});
+    const auto r3 = chk({{K::GoToLayout, "Nope"}});
+    const auto r4 = chk({{K::Find, "id", "  "}});
+    const auto r5 = chk({{K::ShowAll}, {K::SetField, "last_name", "Upper("}});
+    const auto r6 = chk({{K::NewRecord, "", "nope = 1"}});
+    const auto r7 = chk({{K::Message, "", ""}});
+    const auto r8 = chk({{K::ShowAll}}, {"s"});
+    const auto r9 = chk({{K::ShowAll}}, {}, " s");
+    check("scripts: a good script passes; refused in words, naming the step -- none, no field, no layout, nothing to "
+          "find, an expression that doesn't parse, New Record's field, no words, a name taken / bad",
+          ok.empty() && r1 == "A script needs a step" && r2.find("Step 1 (Find)") == 0 && r2.find("no field") != std::string::npos &&
+          r3.find("no layout") != std::string::npos && r4.find("something to find") != std::string::npos &&
+          r5.find("Step 2 (Set Field)") == 0 && r6.find("no field “nope”") != std::string::npos &&
+          r7.find("words") != std::string::npos && r8.find("already has a script") != std::string::npos && !r9.empty(),
+          ok + " | " + r5);
+    std::string ti, na;
+    check("scripts: ids round-trip; a script is the solution's",
+          Store::parse_script_id(Store::script_id("a/b", "tidy up"), ti, na) && ti == "a/b" && na == "tidy up" &&
+          !Store::parse_script_id(Store::list_id("a", "s"), ti, na) && Store::is_local(Store::script_id("x", "y")) &&
+          script_label(Script{"t", "tidy", {}}) == "Script “tidy”", "");
+    core::Solution sol;
+    sol.points_at.engine = "sqlite";
+    sol.points_at.path = (dir / "sc.sqlite").string();
+    sol.scripts["contacts"]["tidy"] = Script{"contacts", "tidy", {{K::Find, "last_name", "=x"}, {K::Sort, "id", "", true},
+                                                               {K::NewRecord, "", "a = 1\nb = \"x\""}, {K::Message, "", "two\nlines"}}};
+    sol.scripts["phones"]["p"] = Script{"phones", "p", {{K::ShowAll}}};
+    const auto file = (dir / "sc.acorn").string();
+    auto back = core::save_solution(file, sol) ? core::load_solution(file) : std::nullopt;
+    std::ifstream in(file);
+    const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    check("scripts: round-trip in the .acorn, every key only when it says something",
+          back && *back == sol && text.find("\"scripts\"") != std::string::npos && text.find("\"descending\": true") != std::string::npos &&
+          text.find("\"descending\": false") == std::string::npos, "");
+    {
+        std::ofstream o(dir / "sc_half.acorn");
+        o << R"({"acorn": 1, "scripts": {"t": {"good": [{"step": "show_all"}, {"step": "sort", "field": "x"}],)"
+             R"( "none": [], "odd": [{"step": "show_all"}, {"step": "loop"}], "notalist": {"step": "show_all"}}}})";
+    }
+    auto half = core::load_solution((dir / "sc_half.acorn").string());
+    check("scripts: a broken one is skipped (no steps, a step this Acorn doesn't know), the rest reads",
+          half && half->script("t", "good") && half->script("t", "good")->steps.size() == 2 && !half->script("t", "none") &&
+          !half->script("t", "odd") && !half->script("t", "notalist"), "");
+    core::Solution plain;
+    plain.points_at = sol.points_at;
+    const auto pf = (dir / "sc_plain.acorn").string();
+    std::string ptext;
+    if (core::save_solution(pf, plain)) {
+        std::ifstream pi(pf);
+        ptext.assign((std::istreambuf_iterator<char>(pi)), std::istreambuf_iterator<char>());
+    }
+    check("scripts: a solution without any never writes the key", !ptext.empty() && ptext.find("scripts") == std::string::npos, "");
+}
+
+// On the sample Address Book, writable: whole runs through ScriptRun.
+void test_scripts(Journal& j, Gate& g, core::Solution& sol, const std::string& P) {
+    using core::Script; using K = core::StepKind;
+    auto count = [&](const std::string& t) {
+        auto r = g.query("SELECT COUNT(*) FROM " + g.quote_ident(t));
+        return r && !r->rows.empty() ? num(r->rows[0][0]).value_or(-1) : -1.0;
+    };
+    auto one = [&](const std::string& sql) -> std::string {
+        auto r = g.query(sql);
+        if (!r || r->rows.empty() || r->rows[0][0].is_null()) return "(none)";
+        const auto& v = r->rows[0][0];
+        if (auto t = v.as_text()) return *t;
+        if (auto i = v.as_int()) return std::to_string(*i);
+        return "?";
+    };
+    const std::string C = g.quote_ident("contacts");
+    auto ln = g.quote_ident("last_name");
+    const std::string thorne_co = one("SELECT " + g.quote_ident("company") + " FROM " + C + " WHERE " + ln + " = 'Thorne'");
+    // Kept: a refusal first, then a good one.
+    auto bad = verbs::save_script(j, Script{"contacts", "x", {{K::SetField, "nope", "1"}}});
+    Script tidy{"contacts", "Tidy", {{K::GoToLayout, kSampleListName}, {K::Find, "last_name", "thorne"},
+                                     {K::SetField, "company", "Upper(company)"},
+                                     {K::NewRecord, "", "first_name = \"Ada\"\nlast_name = \"Lovelace\""},
+                                     {K::SetField, "notes", "first_name & \" \" & last_name"},
+                                     {K::Sort, "last_name", "", true}, {K::Message, "", "Tidied."}}};
+    auto kept = verbs::save_script(j, tidy);
+    check(P + "scripts: Save Script refuses a field the table hasn't, keeps a good one (a step)",
+          !bad && bad.error().message.find("no field") != std::string::npos && kept && sol.script("contacts", "Tidy") &&
+          j.undo_label() == "New Script “Tidy”", kept ? (bad ? "" : bad.error().message) : kept.error().message);
+    const auto steps0 = j.size();
+    const int strays0 = g.strays();
+    ScriptState st0{"contacts"};
+    {
+        ScriptRun run(j, sol, tidy, st0);
+        const auto p1 = run.go();
+        const bool msg = p1 == ScriptPause::Message && run.words() == "Tidied." && run.at() == 7;
+        const auto p2 = run.go();
+        const std::string ada = run.state().record;
+        check(P + "scripts: a run -- Go to Layout, Find, Set Field, New Record, Set Field, Sort, Show Message -- "
+                  "pauses at the message, then ends",
+              msg && p2 == ScriptPause::Done && run.writes() == 3 && run.state().layout == kSampleListName &&
+              run.state().sort == "last_name" && run.state().descending && run.state().found.size() == 1 && !ada.empty(),
+              run.words());
+        check(P + "scripts: its writes landed -- Thorne's company in capitals, Ada made with her notes worked out from her",
+              count("contacts") == 13.0 &&
+              one("SELECT " + g.quote_ident("company") + " FROM " + C + " WHERE " + ln + " = 'Thorne'") == "THORNE & DAUGHTERS BINDERY" &&
+              one("SELECT " + g.quote_ident("notes") + " FROM " + C + " WHERE " + ln + " = 'Lovelace'") == "Ada Lovelace", "");
+    }
+    check(P + "scripts: the whole run is ONE step on Ctrl+Z, named for the script, through the door",
+          j.size() == steps0 + 1 && j.undo_label() == "Script “Tidy”" && g.strays() == strays0,
+          std::to_string(steps0) + " -> " + std::to_string(j.size()) + " " + std::to_string(g.strays()));
+    auto u = j.undo();
+    check(P + "scripts: Ctrl+Z puts every write back -- Ada gone, the company as it was",
+          u && count("contacts") == 12.0 &&
+          one("SELECT " + g.quote_ident("company") + " FROM " + C + " WHERE " + ln + " = 'Thorne'") == thorne_co,
+          u ? "" : u.error().message);
+    auto rd = j.redo();
+    check(P + "scripts: redo does the run's writes again", rd && count("contacts") == 13.0, rd ? "" : rd.error().message);
+    (void)j.undo();
+    // Delete Record asks; No stops with nothing written.
+    Script gone{"contacts", "Gone", {{K::Find, "last_name", "=Thorne"}, {K::DeleteRecord}, {K::ShowAll}}};
+    const auto phones = count("phones");
+    const auto steps1 = j.size();
+    {
+        ScriptRun run(j, sol, gone, st0);
+        const auto p = run.go();
+        const bool asks = p == ScriptPause::Ask && run.words().find("Delete") == 0;
+        run.answer(false);
+        check(P + "scripts: Delete Record asks; No stops the script -- nothing written, no step",
+              asks && run.go() == ScriptPause::Stopped && run.writes() == 0 && count("contacts") == 12.0,
+              run.words());
+    }
+    check(P + "scripts: ... and no step was kept", j.size() == steps1, std::to_string(j.size()));
+    {
+        ScriptRun run(j, sol, gone, st0);
+        (void)run.go();
+        run.answer(true);
+        const auto p = run.go();
+        check(P + "scripts: Yes deletes -- her phones follow by the Cascade link, in the same step; Show All runs after",
+              p == ScriptPause::Done && count("contacts") == 11.0 && count("phones") < phones && run.state().found.empty() &&
+              !run.state().record.empty(), run.words());
+    }
+    auto u2 = j.undo();
+    check(P + "scripts: Ctrl+Z brings her and her phones back", u2 && j.undo_label() != "Script “Gone”" &&
+          count("contacts") == 12.0 && count("phones") == phones, u2 ? "" : u2.error().message);
+    // A refused write puts back everything the run wrote.
+    const auto steps2 = j.size();
+    Script key{"contacts", "Key", {{K::NewRecord, "", "last_name = \"Zed\""}, {K::SetField, "id", "5"}}};
+    {
+        ScriptRun run(j, sol, key, st0);
+        const auto p = run.go();
+        check(P + "scripts: a refused write (the key) stops the run and puts back what it wrote -- Zed never stays",
+              p == ScriptPause::Stopped && run.put_back() && run.writes() == 0 && run.at() == 1 &&
+              run.words().find("Step 2 (Set Field)") == 0 && run.words().find("put back") != std::string::npos &&
+              count("contacts") == 12.0, run.words());
+    }
+    check(P + "scripts: ... and leaves no step", j.size() == steps2 && g.strays() == strays0,
+          std::to_string(steps2) + " -> " + std::to_string(j.size()) + " " + std::to_string(g.strays()));
+    {
+        ScriptRun run(j, sol, Script{"contacts", "None", {{K::Find, "last_name", "zzzz"}, {K::ShowAll}}}, st0);
+        const auto p = run.go();
+        check(P + "scripts: a Find that finds nothing stops the run, saying so",
+              p == ScriptPause::Stopped && run.words().find("no records match") != std::string::npos && run.at() == 0, run.words());
+    }
+    {
+        ScriptRun run(j, sol, Script{"contacts", "Out", {{K::Preview}, {K::Print}, {K::SetField, "notes", "Length(last_name)"}}},
+                      ScriptState{"contacts"});
+        const auto a1 = run.go();
+        const auto a2 = run.go();
+        const auto a3 = run.go();
+        check(P + "scripts: Preview and Print... pause for the screen; Set Field with no record picked stops in words",
+              a1 == ScriptPause::Preview && a2 == ScriptPause::Print && a3 == ScriptPause::Stopped &&
+              run.words().find("no record") != std::string::npos, run.words());
+    }
+    auto del = verbs::delete_script(j, "contacts", "Tidy");
+    check(P + "scripts: Delete Script; Ctrl+Z brings it back",
+          del && !sol.script("contacts", "Tidy") && j.undo() && sol.script("contacts", "Tidy"), del ? "" : del.error().message);
+}
+
 void test_labels_pure(const fs::path& dir) {
     core::Layout l = sample_labels_layout();
     check("labels: the sample's Mailing Labels -- 2 across, 24 apart, a row 520 wide (fits Letter and A4 unscaled)",
@@ -3462,6 +3670,7 @@ void test_sample(Journal& j, Gate& g, const std::string& P) {
     j.clear();
     check(P + "sample: arrives with nothing to undo (the caller clears the journal)", !j.can_undo() && !j.can_redo(), "");
     test_report_book(g, sol, P);   // s015b
+    test_scripts(j, g, sol, P);    // s017a
     {   // s016
         const auto* lab = sol.layout("addresses", kSampleLabelsName);
         check(P + "labels: the sample's Mailing Labels kept beside the report", lab && *lab == sample_labels_layout(), "");
@@ -3767,6 +3976,7 @@ void db_tests(CheckFn fn, int& skip_count) {
         test_print(e, T.ro, "sqlite: ");      // s015a: a record's layout resolved to what it prints
         test_report_pure(tmp.p);              // s015b: sub-summary parts
         test_labels_pure(tmp.p);              // s016: labels
+        test_script_pure(tmp.p);              // s017a: scripts
         {   // s005b: the door, on its own fresh fixture file
             Target J = T;
             J.rw.path = (tmp.p / "journal.sqlite").string();

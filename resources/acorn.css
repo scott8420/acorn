@@ -260,6 +260,7 @@ window.acorn button.acorn-graph-handle:not(.acorn-primary):not(.titlebutton) {
 popover.acorn-graph-pop > contents,
 popover.acorn-graph-pop > arrow { background: @acorn_panel; color: @acorn_ink; border: 1px solid @acorn_panel_edge; }
 popover.acorn-graph-pop checkbutton { color: @acorn_ink; }
+popover.acorn-graph-pop button.flat { color: @acorn_ink; }   /* s017a: Browse's Scripts menu */
 popover.acorn-graph-pop .acorn-status.error,
 popover.acorn-graph-pop label.error { color: #ff9a8a; }
 

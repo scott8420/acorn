@@ -273,6 +273,14 @@ void Shell::show_table(const std::string& name) {  // tables: paint one table's 
         list_section(*t);
     }
 
+    // s017a: scripts -- the solution's, run on this table in Browse.
+    {
+        auto placeholder = Gtk::make_managed<Gtk::Box>();
+        m_sc_box = section("Scripts", *placeholder);
+        m_table_detail.append(*m_sc_box);
+        script_section(*t);
+    }
+
     // Indexes.
     auto ix = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 4);
     if (t->indexes.empty()) ix->append(*none("No indexes."));

@@ -2,6 +2,7 @@
 #include "core/Calc.hpp"
 #include "core/Connections.hpp"
 #include "core/Layout.hpp"
+#include "core/Script.hpp"
 #include "core/ValueList.hpp"
 
 #include <map>
@@ -56,6 +57,12 @@ struct Solution {
     std::map<std::string, std::map<std::string, ValueList>> lists;
     const ValueList* list(const std::string& table, const std::string& name) const;
     const std::map<std::string, ValueList>& lists_of(const std::string& table) const;
+    // s017a: scripts, by table then name. On disk: "scripts": { "<table>":
+    // { "<name>": [ {"step": "find", "field": f, "text": t}, ... ] } } --
+    // a step's keys only when they say something.
+    std::map<std::string, std::map<std::string, Script>> scripts;
+    const Script* script(const std::string& table, const std::string& name) const;
+    const std::map<std::string, Script>& scripts_of(const std::string& table) const;
     bool operator==(const Solution&) const = default;
 };
 

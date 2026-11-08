@@ -149,6 +149,14 @@ void Shell::build_browse_page() {  // browse: the Browse area
     m_browse_show_all.set_visible(false);
     bar->append(m_browse_find);
     bar->append(m_browse_show_all);
+    // s017a: Scripts -- the shown table's, filled each time it opens.
+    m_browse_scripts.set_label("Scripts");
+    m_browse_scripts.set_tooltip_text("Run one of this table's scripts -- Ctrl+Z undoes what it wrote, in one step");
+    m_browse_scripts.set_margin_start(12);
+    m_browse_scripts.set_popover(m_browse_scripts_pop);
+    m_browse_scripts_pop.add_css_class("acorn-graph-pop");   // the skin's popover ground
+    m_browse_scripts.set_create_popup_func([this] { fill_scripts_menu(); });   // filled before each opening
+    bar->append(m_browse_scripts);
     auto spacer = Gtk::make_managed<Gtk::Box>();
     spacer->set_hexpand(true);
     bar->append(*spacer);
@@ -352,6 +360,7 @@ void Shell::paint_browse() {  // browse: cards or grid
     m_browse_form_btn.set_sensitive(browse_info() != nullptr);
     m_browse_list_btn.set_sensitive(browse_info() != nullptr);
     m_browse_preview_btn.set_sensitive(browse_info() != nullptr);
+    m_browse_scripts.set_sensitive(browse_info() != nullptr && m_journal != nullptr && !m_script_run);   // s017a
     m_browse_show_all.set_visible(found_here());
     if (m_finding && browse_info()) {   // s013a: the Find screen
         m_browse_prev.set_sensitive(false);

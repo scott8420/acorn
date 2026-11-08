@@ -172,7 +172,7 @@ struct BoxDef {
 // s014a: a calculation field -- in the solution too (core::Calc).
 // s014b: a summary -- in the solution too (core::Summary).
 // s014c: a value list -- in the solution too (core::ValueList).
-using Record = std::variant<TableDef, RowDef, FieldData, BoxDef, core::Layout, core::Calc, core::Summary, core::ValueList>;
+using Record = std::variant<TableDef, RowDef, FieldData, BoxDef, core::Layout, core::Calc, core::Summary, core::ValueList, core::Script>;
 
 // ── the DDL writer: one place, per dialect, shared by preview and act ─────────
 // The New Table window shows exactly the string the store will run.
@@ -269,7 +269,11 @@ public:
     static bool is_layout(const Id& id) { return id.rfind("layout:", 0) == 0; }
     // A record of the solution, not the database: a step of only these needs
     // no transaction and works on a read-only connection.
-    static bool is_local(const Id& id) { return is_box(id) || is_layout(id) || is_calc(id) || is_summary(id) || is_list(id); }
+    static bool is_local(const Id& id) { return is_box(id) || is_layout(id) || is_calc(id) || is_summary(id) || is_list(id) || is_script(id); }
+    // s017a: a script, by table and name -- "script:<bytes in table>:<table>/<name>".
+    static Id script_id(const std::string& table, const std::string& name);
+    static bool parse_script_id(const Id& id, std::string& table, std::string& name);
+    static bool is_script(const Id& id) { return id.rfind("script:", 0) == 0; }
     // s014c: a value list, by table and name -- "vlist:<bytes in table>:<table>/<name>".
     static Id list_id(const std::string& table, const std::string& name);
     static bool parse_list_id(const Id& id, std::string& table, std::string& name);
@@ -387,6 +391,16 @@ public:
     std::size_t size() const { return m_core.size(); }
     void        clear() { m_core.clear(); }
     void        set_on_change(std::function<void()> f) { m_core.set_on_change(std::move(f)); }
+
+    // s017a -- a BATCH: every run between begin_batch and end_batch is its
+    // own write (its own transaction) but they make ONE step on Ctrl+Z,
+    // labelled `label` (a script's run). end_batch keeps it if anything
+    // changed; cancel_batch puts back everything the batch wrote and keeps
+    // nothing (a script stopped by a refusal).
+    void begin_batch(const std::string& label) { m_core.begin_group(label); }
+    bool in_batch() const { return m_core.in_group(); }
+    bool end_batch() { return m_core.end_group(); }
+    std::expected<void, Error> cancel_batch();
 
     bool   open() const { return m_txn || m_core.open(); }
     Store& store() { return m_store; }
@@ -567,6 +581,15 @@ std::expected<void, Error> delete_summary(Journal& j, const std::string& table, 
 std::expected<void, Error> save_value_list(Journal& j, const core::ValueList& v, const std::string& was = {});
 // Delete Value List “n”. Refused in words when there's none by that name.
 std::expected<void, Error> delete_value_list(Journal& j, const std::string& table, const std::string& name);
+
+// s017a -- scripts, kept in the solution (read-only connections too). Save
+// Script keeps `s`: "New Script “n”" / "Change Script “n”" (`was`: a new name
+// in the same step, as save_calc). Refused in words: no such table, anything
+// core::check_script refuses (a bad or taken name, no steps, a field or layout
+// the table hasn't, an expression that doesn't parse). The same: no step.
+std::expected<void, Error> save_script(Journal& j, const core::Script& s, const std::string& was = {});
+// Delete Script “n”. Refused in words when there's none by that name.
+std::expected<void, Error> delete_script(Journal& j, const std::string& table, const std::string& name);
 
 // What a design step would do to the live table, as the SQL put() will run
 // (the designer's preview): `want` is the table as the designer has it.

@@ -10,6 +10,7 @@
 #include "db/Schema.hpp"
 #include "db/Journal.hpp"   // s005b: the door
 #include "db/Browse.hpp"    // s006b: a table's records, a page at a time
+#include "db/Script.hpp"    // s017a: a script's run
 #include <gtkmm/togglebutton.h>
 #include <gtkmm/popover.h>
 #include <gtkmm/entry.h>
@@ -253,6 +254,13 @@ private:
     void paint_preview();                        // category: preview: the List's layout on pages, read-only
     void print_preview();                        // category: preview: Print... -- GtkPrintOperation over the same pages
     void save_preview_pdf();                     // category: preview: Save as PDF... -- Cairo's PDF surface, the same pages
+    void script_section(const db::Table& t);     // category: scripts: s017a -- the Tables area's Scripts section (list or editor)
+    void keep_script(const core::Script& s, const std::string& was);   // category: scripts: verbs::save_script, the note, a repaint
+    void drop_script(const std::string& table, const std::string& name);  // category: scripts: verbs::delete_script
+    void fill_scripts_menu();                    // category: scripts: Browse's Scripts menu -- the shown table's scripts
+    void run_script(const std::string& table, const std::string& name);  // category: scripts: Browse, that table, the steps in order
+    void script_continue();                      // category: scripts: on to the next pause (a question, a message, the end)
+    void script_apply();                         // category: scripts: the run's state (layout, find, sort, record) -> Browse
     void keep_list(const core::ValueList& v, const std::string& was);  // category: lists: verbs::save_value_list, the note, a repaint
     void drop_list(const std::string& table, const std::string& name);  // category: lists: verbs::delete_value_list
     std::vector<std::string> fields_of(const std::string& table) const;  // category: layouts: the live table's fields, in order
@@ -393,6 +401,8 @@ private:
     std::map<std::string, std::string> m_found_typed; // s013b: its boxes as typed (Find again shows them)
     std::int64_t                    m_found_of = 0;   // every record in the table, for "found 5 of 12"
     widgets::Button                 m_browse_find, m_browse_show_all;
+    widgets::MenuButton             m_browse_scripts;       // s017a: the shown table's scripts
+    Gtk::Popover                    m_browse_scripts_pop;
     Glib::RefPtr<Gio::SimpleAction> m_find_action, m_show_all_action;
     // s006c -- the record panel and its verbs.
     widgets::Label                  m_browse_note;    // "Changed “age”. Ctrl+Z undoes it." / a refusal
@@ -502,6 +512,14 @@ private:
     bool                            m_vl_new = false;
     core::ValueList                 m_vl_typed;
     std::string                     m_vl_typed_text;   // a typed list's lines as typed
+    // s017a: the Scripts section -- the script being changed ("" with
+    // m_sc_new: a new one) and its steps as they stand in the editor.
+    Gtk::Box*                       m_sc_box = nullptr;
+    std::string                     m_sc_table, m_sc_editing;
+    bool                            m_sc_new = false;
+    core::Script                    m_sc_typed;
+    std::string                     m_sc_focus;        // the editor widget a repaint gives the focus back to
+    std::unique_ptr<db::ScriptRun>  m_script_run;      // a run waiting on the person (or none)
     // s014d: what each value list offers, read once per view (m_view_gen) --
     // the List's rows share one read.
     std::map<std::string, db::ListItems> m_form_lists;

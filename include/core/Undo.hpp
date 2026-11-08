@@ -110,6 +110,22 @@ public:
         // the step being applied) is the step.
         if (m_depth > 0) { call(op, ids); return false; }
 
+        // s017a: inside a GROUP (a script's run) each run is its own write --
+        // the store settles it (a database commits) -- but they gather into
+        // ONE step: a record's before is the one it had when the group first
+        // touched it. A run the store refused adds nothing (it rolled back).
+        if (m_group) {
+            for (const auto& id : ids)
+                if (!has(m_open, id)) m_open.entries.push_back({id, m_store.get(id), std::nullopt});
+            ++m_depth;
+            const std::vector<Id> made = call(op, ids);
+            --m_depth;
+            if (store_failed() || !settle()) return false;
+            for (const auto& id : made)
+                if (!has(m_open, id)) m_open.entries.push_back({id, std::nullopt, std::nullopt});
+            return true;
+        }
+
         Step st;
         st.label     = label;
         st.merge_key = merge_key;
@@ -146,9 +162,52 @@ public:
         return true;
     }
 
+    // ── s017a: a GROUP -- many runs, ONE step (a script's run) ──────────────
+    // Unlike a gesture the door shuts between runs: each run is a whole write
+    // of its own (and may wait on the person in between), only the step is
+    // shared. end_group keeps it if anything changed; cancel_group puts every
+    // record back as the group found it, newest first, and keeps nothing.
+    void begin_group(const std::string& label) {
+        if (m_group || m_gesture) return;
+        m_group = true;
+        m_open = Step{};
+        m_open.label      = label;
+        m_open.sel_before = selection();
+    }
+    bool in_group() const { return m_group; }
+    std::vector<Id> group_ids() const {
+        std::vector<Id> v;
+        if (m_group) for (const auto& e : m_open.entries) v.push_back(e.id);
+        return v;
+    }
+    bool end_group(Clock::time_point now = Clock::now()) {
+        if (!m_group) return false;
+        m_group = false;
+        for (auto& e : m_open.entries) e.after = m_store.get(e.id);
+        m_open.sel_after = selection();
+        m_open.at        = now;
+        if (unchanged(m_open)) return false;
+        keep(std::move(m_open));
+        return true;
+    }
+    // false: the store refused a put -- the caller rolls back.
+    bool cancel_group() {
+        if (!m_group) return true;
+        m_group = false;
+        ++m_depth;
+        for (auto it = m_open.entries.rbegin(); it != m_open.entries.rend(); ++it) {
+            if (m_store.get(it->id) == it->before) continue;
+            m_store.put(it->id, it->before);
+            if (store_failed()) break;
+        }
+        const bool ok = !store_failed() && settle();
+        --m_depth;
+        return ok;
+    }
+
     // ── a gesture: press .. drag .. release = ONE step ──────────────────────
     void begin(const std::string& label, const std::vector<Id>& ids) {
-        if (m_gesture) return;   // a second press inside one gesture: same step
+        if (m_gesture || m_group) return;   // a second press inside one gesture: same step
         m_gesture = true;
         ++m_depth;
         m_open.label      = label;
@@ -185,6 +244,7 @@ public:
     Result undo() {
         Result r;
         if (m_gesture) commit();   // Ctrl+Z mid-drag: the drag is a step first
+        if (m_group) end_group();  // ... and a group's runs so far
         if (!can_undo()) return r;
         const Step& st = m_steps[--m_at];
         ++m_depth;
@@ -247,6 +307,7 @@ private:
     std::size_t                       m_at = 0;      // [0, m_at) done; the rest redoable
     int                               m_depth = 0;   // >0: inside the door
     bool                              m_gesture = false;
+    bool                              m_group = false;     // s017a
     Step                              m_open;        // the gesture being recorded
     std::function<std::vector<Id>()>  m_sel;
     std::function<void()>             m_changed;

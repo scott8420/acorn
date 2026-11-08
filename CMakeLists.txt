@@ -94,6 +94,7 @@ add_library(acorn_core STATIC
     src/core/Layout.cpp
     src/core/Calc.cpp     # s014a: calculation fields -- the language, parsed and worked out
     src/core/ValueList.cpp  # s014c: value lists -- typed, or a field's values
+    src/core/Script.cpp   # s017a: scripts -- named steps, kept in the solution
     src/core/Print.cpp    # s015a: paper, pages -- how records fall on them
     # s005c: the skin's base colour -- presets, the recipe, the saved choice.
     src/core/Ground.cpp
@@ -117,6 +118,7 @@ add_library(acorn_core STATIC
     src/db/Convert.cpp    # s007c: what a value becomes when its field changes kind
     src/db/Browse.cpp     # s006b: a table's records, a page at a time
     src/db/Print.cpp      # s015a: a record's layout resolved to the words it prints
+    src/db/Script.cpp     # s017a: a script's run -- steps on a state, writes in one batch
 )
 target_include_directories(acorn_core PUBLIC include)
 target_link_libraries(acorn_core PUBLIC acorn_db ${CMAKE_DL_LIBS})
@@ -192,6 +194,7 @@ add_executable(acorn
     src/Shell_tables.cpp
     src/Shell_calcs.cpp      # s014a: calculation fields -- the Tables section, the values per record
     src/Shell_lists.cpp      # s014c: value lists -- the Tables section and its editor
+    src/Shell_scripts.cpp    # s017a: scripts -- the Tables section, Browse's Scripts menu, the run
     src/Shell_preview.cpp    # s015a: Preview -- the List's layout on pages; Print / Save as PDF
     src/Shell_browse.cpp
     src/Shell_form.cpp

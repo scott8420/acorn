@@ -92,6 +92,19 @@ const std::map<std::string, ValueList>& Solution::lists_of(const std::string& ta
     return t == lists.end() ? none : t->second;
 }
 
+const Script* Solution::script(const std::string& table, const std::string& name) const {
+    auto t = scripts.find(table);
+    if (t == scripts.end()) return nullptr;
+    auto n = t->second.find(name);
+    return n == t->second.end() ? nullptr : &n->second;
+}
+
+const std::map<std::string, Script>& Solution::scripts_of(const std::string& table) const {
+    static const std::map<std::string, Script> none;
+    auto t = scripts.find(table);
+    return t == scripts.end() ? none : t->second;
+}
+
 std::optional<Solution> load_solution(const std::string& file) {
     std::ifstream in(file);
     if (!in) return std::nullopt;
@@ -211,6 +224,25 @@ std::optional<Solution> load_solution(const std::string& file) {
                     s.lists[table][name] = std::move(v);
                 }
             }
+        if (auto it = j.find("scripts"); it != j.end() && it->is_object())   // s017a
+            for (auto& [table, named] : it->items()) {
+                if (!named.is_object()) continue;
+                for (auto& [name, sj] : named.items()) {
+                    if (!sj.is_array() || !check_script_name(name).empty()) continue;
+                    Script sc{table, name, {}};
+                    bool broken = false;
+                    for (const auto& stj : sj) {
+                        if (!stj.is_object()) { broken = true; break; }
+                        const auto k = parse_step_kind(str_or_empty(stj, "step"));
+                        if (!k) { broken = true; break; }   // a step this Acorn doesn't know: never half a script
+                        ScriptStep st{*k, str_or_empty(stj, "field"), str_or_empty(stj, "text"), false};
+                        if (auto d = stj.find("descending"); d != stj.end() && d->is_boolean()) st.descending = d->get<bool>();
+                        sc.steps.push_back(std::move(st));
+                    }
+                    if (broken || sc.steps.empty()) continue;
+                    s.scripts[table][name] = std::move(sc);
+                }
+            }
         return s;
     } catch (const std::exception&) {
         return std::nullopt;
@@ -297,6 +329,22 @@ bool save_solution(const std::string& file, const Solution& s) {
                 lists[table][name] = std::move(vj);
             }
         j["value_lists"] = std::move(lists);
+    }
+    if (!s.scripts.empty()) {   // s017a: only when there are some
+        nlohmann::json all = nlohmann::json::object();
+        for (const auto& [table, named] : s.scripts)
+            for (const auto& [name, sc] : named) {
+                nlohmann::json steps = nlohmann::json::array();
+                for (const auto& st : sc.steps) {
+                    nlohmann::json stj = {{"step", step_name(st.kind)}};
+                    if (!st.field.empty()) stj["field"] = st.field;
+                    if (!st.text.empty()) stj["text"] = st.text;
+                    if (st.descending) stj["descending"] = true;
+                    steps.push_back(std::move(stj));
+                }
+                all[table][name] = std::move(steps);
+            }
+        j["scripts"] = std::move(all);
     }
     std::error_code ec;
     const fs::path p(file);
