@@ -3197,6 +3197,26 @@ const std::vector<Verb>& all() {
         {"Delete Account", [](Journal& j) {
              return delete_account(j, walk_account(j, "del"));
          }, [](Journal& j) { return account_fixture(j, "del", kRead); }, false, true},
+        // s021 -- the password (a locked one: it unlocks too), Lock, Unlock.
+        {"Set Password", [](Journal& j) {
+             return set_password(j, walk_account(j, "pw"), "walk's new pw: \\ 'quoted'");
+         }, [](Journal& j) -> std::expected<void, Error> {
+             if (auto r = account_fixture(j, "pw", kRead); !r) return r;
+             if (j.store().dialect() == Dialect::MariaDB) return set_locked(j, walk_account(j, "pw"), true);
+             return {};
+         }, false, true, {}, [](Journal& j) { return !j.store().shows_passwords(); }},
+        {"Lock Account", [](Journal& j) {
+             return set_locked(j, walk_account(j, "lock"), true);
+         }, [](Journal& j) { return account_fixture(j, "lock", 0); }, false, true,
+         [](Journal& j) { return j.store().dialect() == Dialect::MariaDB ? std::string{} : std::string("no account lock"); }},
+        {"Unlock Account", [](Journal& j) {
+             return set_locked(j, walk_account(j, "unlock"), false);
+         }, [](Journal& j) -> std::expected<void, Error> {
+             if (auto r = account_fixture(j, "unlock", 0); !r) return r;
+             if (j.store().dialect() == Dialect::MariaDB) return set_locked(j, walk_account(j, "unlock"), true);
+             return {};
+         }, false, true,
+         [](Journal& j) { return j.store().dialect() == Dialect::MariaDB ? std::string{} : std::string("no account lock"); }},
     };
     return kVerbs;
 }

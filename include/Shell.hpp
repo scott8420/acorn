@@ -222,6 +222,10 @@ private:
     void account_editor_check();                 // category: accounts: New Account's live line and SQL
     void make_account();                         // category: accounts: New Account -> verbs::new_account
     void ask_delete_account(const std::string& name, const std::string& host);  // category: accounts: asks, then verbs::delete_account
+    void open_password_editor(const db::AccountDef& a);  // category: accounts: s021 -- Password… on a card
+    void password_editor_check();                // category: accounts: s021 -- Set Password's live line and SQL
+    void set_account_password();                 // category: accounts: s021 -- verbs::set_password
+    void lock_account(const std::string& name, const std::string& host, bool lock);  // category: accounts: s021 -- verbs::set_locked
     void paint_graph();                          // category: graph: boxes laid out by depth, lines drawn
     void graph_note(const std::string& text, const char* kind);  // category: graph: under the Graph title
     void on_graph_drop(const std::string& st, const std::string& sf, const std::string& dt, const std::string& df,
@@ -505,6 +509,13 @@ private:
     Gtk::Label                      m_acct_host_label{"Host"};
     bool                            m_accounts_can = false;
     std::string                     m_accounts_why;
+    // s021: Set Password, in place (one editor; the account it's for).
+    widgets::Box                    m_pw_editor;
+    widgets::Label                  m_pw_title, m_pw_sql, m_pw_say;
+    widgets::Entry                  m_pw1, m_pw2;
+    widgets::Button                 m_pw_set, m_pw_cancel;
+    db::AccountDef                  m_pw_for;
+    bool                            m_passwords_kept = false;
     widgets::Box                    m_graph_page;
     widgets::Label                  m_graph_where, m_graph_note;
     widgets::ScrolledWindow         m_graph_scroll;

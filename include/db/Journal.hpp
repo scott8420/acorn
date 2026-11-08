@@ -184,8 +184,22 @@ struct AccountDef {
     bool        login = true;                 // PostgreSQL: LOGIN / NOLOGIN (a group)
     unsigned    every = 0;                    // MariaDB: given on this database (`db`.*); 0 on PostgreSQL
     std::map<std::string, unsigned> tables;   // given on each table
+    // s021: how it logs in. `locked` is MariaDB's ACCOUNT LOCK (PostgreSQL has
+    // none). `secret` is the password AS THE SERVER KEEPS IT -- a hash, never
+    // the password: MariaDB "plugin\nauthentication_string"; PostgreSQL
+    // pg_authid.rolpassword ("" = none) when this connection may read it, else
+    // kSecretHidden. It is what lets Ctrl+Z put an old password back; it is
+    // never shown, logged or previewed (the SQL says '********').
+    bool        locked = false;
+    std::string secret;
     bool operator==(const AccountDef&) const = default;
 };
+
+// s021: PostgreSQL shows the stored password only to superusers (pg_authid).
+inline constexpr const char* kSecretHidden = "\x01hidden";
+// May it log in with a password at all (MariaDB: a stored hash; PostgreSQL: a
+// password set, or one the server won't show).
+bool has_password(Dialect d, const AccountDef& a);
 
 // s010: a layout -- also kept in the solution, never the database. Its own
 // table and name say which (core::Layout).
@@ -321,9 +335,13 @@ public:
     static Id account_id(const std::string& name, const std::string& host);
     static bool parse_account_id(const Id& id, std::string& name, std::string& host);
     static bool is_account(const Id& id) { return id.rfind("account:", 0) == 0; }
-    // The password New Account sends -- for the NEXT put of an account that
-    // makes it, then forgotten (never in a step, a picture or a log).
+    // The password New Account / Set Password sends -- for the NEXT account
+    // put, then forgotten (never in a step, a picture or a log).
     void set_password(std::optional<std::string> pw) { m_password = std::move(pw); }
+    // s021: may this connection read the stored passwords (so a password
+    // change is a step Ctrl+Z can take back)? MariaDB: yes (mysql.user);
+    // PostgreSQL: only a superuser (pg_authid).
+    bool shows_passwords() const;
     // This connection's own account (CURRENT_USER() / current_user) -- the
     // store refuses any change to it. False when it can't be read.
     bool is_own_account(const std::string& name, const std::string& host) const;
@@ -680,6 +698,18 @@ std::string rights_label(const AccountDef& a, const std::string& table, unsigned
 // it again with the rights it had HERE -- not its password, not anything it
 // had in other databases.
 std::expected<void, Error> delete_account(Journal& j, const Store::Id& account);
+// s021 -- Set Password for “n@h”: `password` sent once (never kept); a locked
+// account is unlocked in the same statement ("... and Unlock"). One step,
+// Ctrl+Z puts the old password (and the lock) back -- where the server shows
+// this connection the stored one (shows_passwords); where it doesn't
+// (PostgreSQL, not a superuser) it is set and NO step (`*stepped` false).
+// Refused: no password, your own account, one that makes accounts.
+std::expected<void, Error> set_password(Journal& j, const Store::Id& account, const std::string& password,
+                                        bool* stepped = nullptr);
+std::string password_label(const AccountDef& a);
+// s021 -- Lock / Unlock “n@h” (MariaDB's ACCOUNT LOCK; PostgreSQL has none:
+// refused). Unlocking one with no password is refused -- Set Password unlocks.
+std::expected<void, Error> set_locked(Journal& j, const Store::Id& account, bool lock);
 // What a change to the account would run, password hidden -- the preview.
 std::expected<std::vector<std::string>, Error> account_preview(Journal& j, const Store::Id& account,
                                                                const std::optional<AccountDef>& want);
@@ -700,6 +730,12 @@ struct Verb {
     // checks its throwaway accounts (acorn_selftest_<pid>_walk_*), refuses
     // in words on SQLite, and drops them after.
     bool accounts = false;
+    // s021: on a server where the verb can't run, the words its refusal holds
+    // (Lock on PostgreSQL); "" = it runs here. The walk checks refused, no step.
+    std::function<std::string(Journal&)> refused_here = {};
+    // s021: true where it runs but keeps no step (Set Password where the server
+    // won't show the stored one). The walk checks: ran, no step.
+    std::function<bool(Journal&)> no_step_here = {};
 };
 const std::vector<Verb>& all();
 }  // namespace verbs
@@ -716,6 +752,7 @@ struct AccountCards {
     std::string                                  database;   // the statements' database (when it may)
     std::map<Store::Id, std::expected<AccountDef, std::string>> given;   // by account id; the error in words
     bool                                         stopped = false;
+    bool                                         passwords_kept = false;   // s021: Store::shows_passwords
 };
 // Why this connection can't change accounts ("" = it can) -- the words the
 // area shows greyed buttons with.

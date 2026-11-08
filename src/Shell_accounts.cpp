@@ -24,7 +24,11 @@
 //     unticking runs. MariaDB's "every table" is `db`.* -- a table's box it
 //     covers is ticked and greyed ("untick it on Every table").
 //   * Delete Account -- asks first (Cancel is the default), says what Ctrl+Z
-//     can't bring back (its password), shows the SQL.
+//     brings back, shows the SQL.
+// s021: Password… on a card -- an editor in place (typed twice, the SQL with
+// '********'); a locked account is unlocked by it. Lock / Unlock (MariaDB).
+// Ctrl+Z puts the old password back where the server shows Acorn the stored
+// one (MariaDB; PostgreSQL to a superuser) -- otherwise said before you press.
 // Greyed, with the reason in the tooltip, on a read-only connection, when
 // this account can't make accounts, and on your own account and one that may
 // do everything.
@@ -71,6 +75,7 @@ void Shell::build_accounts_page() {  // accounts: the Accounts area
         m_acct_host.set_text("%");
         m_acct_pw.set_text("");
         m_acct_pw2.set_text("");
+        m_pw_editor.set_visible(false);   // s021: one editor at a time
         m_accounts_editor.set_visible(true);
         account_editor_check();
         m_acct_name.grab_focus();
@@ -142,6 +147,53 @@ void Shell::build_accounts_page() {  // accounts: the Accounts area
     m_acct_make.signal_clicked().connect([this] { make_account(); });
     m_accounts_page.append(m_accounts_editor);
 
+    // s021: Set Password, in place, hidden until a card's Password…
+    m_pw_editor.add_css_class("acorn-card");
+    m_pw_title.set_xalign(0.0f);
+    m_pw_title.add_css_class("acorn-card-title");
+    m_pw_editor.append(m_pw_title);
+    auto pgrid = Gtk::make_managed<Gtk::Grid>();
+    pgrid->set_row_spacing(6);
+    pgrid->set_column_spacing(10);
+    m_pw1.set_hexpand(true);
+    m_pw1.set_visibility(false);
+    m_pw2.set_visibility(false);
+    m_pw1.set_tooltip_text("Sent to the server once -- Acorn keeps no copy, and never writes it in the journal");
+    pgrid->attach(*label("New password"), 0, 0);
+    pgrid->attach(m_pw1, 1, 0);
+    pgrid->attach(*label("Again"), 0, 1);
+    pgrid->attach(m_pw2, 1, 1);
+    m_pw_editor.append(*pgrid);
+    m_pw_sql.set_xalign(0.0f);
+    m_pw_sql.set_wrap(true);
+    m_pw_sql.set_selectable(true);
+    m_pw_sql.add_css_class("acorn-mono");
+    m_pw_editor.append(m_pw_sql);
+    m_pw_say.set_xalign(0.0f);
+    m_pw_say.set_wrap(true);
+    m_pw_say.add_css_class("acorn-status");
+    m_pw_editor.append(m_pw_say);
+    auto pbuttons = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+    pbuttons->set_halign(Gtk::Align::END);
+    m_pw_cancel.set_label("Cancel");
+    m_pw_set.set_label("Set Password");
+    m_pw_set.add_css_class("acorn-primary");
+    pbuttons->append(m_pw_cancel);
+    pbuttons->append(m_pw_set);
+    m_pw_editor.append(*pbuttons);
+    m_pw_editor.set_visible(false);
+    m_pw_editor.set_size_request(420, -1);
+    m_pw_editor.set_halign(Gtk::Align::START);
+    for (auto* e : {&m_pw1, &m_pw2}) e->signal_changed().connect([this] { password_editor_check(); });
+    m_pw2.signal_activate().connect([this] { set_account_password(); });
+    m_pw_cancel.signal_clicked().connect([this] {
+        m_pw1.set_text("");
+        m_pw2.set_text("");
+        m_pw_editor.set_visible(false);
+    });
+    m_pw_set.signal_clicked().connect([this] { set_account_password(); });
+    m_accounts_page.append(m_pw_editor);
+
     m_accounts_scroll.set_vexpand(true);
     m_accounts_scroll.set_hexpand(true);
     m_accounts_scroll.set_policy(Gtk::PolicyType::NEVER, Gtk::PolicyType::AUTOMATIC);
@@ -181,7 +233,8 @@ void Shell::account_editor_check() {  // accounts: New Account's live line and S
                                                                           std::string("x"), true)) + ";"
                               : std::string{});
     m_acct_sql.set_visible(named);
-    m_acct_say.set_text(why.empty() ? "Ready -- the server gets the password; Acorn keeps no copy. Ctrl+Z deletes the account again."
+    m_acct_say.set_text(why.empty() ? "Ready -- the server gets the password; Acorn keeps no copy of what you type. Ctrl+Z "
+                                      "deletes the account again."
                                     : why);
     m_acct_say.remove_css_class("error");
     m_acct_say.remove_css_class("ok");
@@ -208,8 +261,9 @@ void Shell::make_account() {  // accounts: New Account -> verbs::new_account
     }
     m_accounts_editor.set_visible(false);
     paint_accounts(true);
-    journal_note("Made the account " + db::account_words(name, host) + ". Ctrl+Z deletes it again "
-                 "(a redo would make it without its password).", "ok");
+    journal_note("Made the account " + db::account_words(name, host) + ". Ctrl+Z deletes it again" +
+                 std::string(m_passwords_kept ? "; a redo makes it with this password."
+                                              : " (a redo makes it with a password no one knows -- set one after)."), "ok");
 }
 
 void Shell::ask_delete_account(const std::string& name, const std::string& host) {  // accounts: asks first
@@ -220,10 +274,12 @@ void Shell::ask_delete_account(const std::string& name, const std::string& host)
     auto dlg = Gtk::AlertDialog::create("Delete the account " + db::account_words(name, host) + "?");
     dlg->set_detail(
         "It goes from the whole server, not only this database.\n\n"
-        "Ctrl+Z can make it again with what it may do here -- but NOT its password " +
-        std::string(maria ? "(it comes back locked: set a password and unlock it before anyone logs in with it)"
-                          : "(it comes back with none: set one before anyone logs in with it)") +
-        ", and not what it may do in other databases.\n\nWill run:\n" + (pv ? joined(*pv) + ";" : pv.error().message));
+        "Ctrl+Z can make it again with what it may do here" +
+        std::string(m_passwords_kept ? " and its password as it was"
+                    : maria ? " -- locked, without its password (set one to let it in)"
+                            : " -- with a password no one knows: PostgreSQL shows the stored one only to a superuser "
+                              "(set one to let it in)") +
+        " -- but not what it may do in other databases.\n\nWill run:\n" + (pv ? joined(*pv) + ";" : pv.error().message));
     dlg->set_buttons({"Cancel", "Delete Account"});
     dlg->set_cancel_button(0);
     dlg->set_default_button(0);   // never pre-chosen
@@ -237,9 +293,78 @@ void Shell::ask_delete_account(const std::string& name, const std::string& host)
             lg->info("journal: delete account '{}': {}", name, r ? "deleted" : r.error().message);
         paint_accounts(true);
         if (r) journal_note("Deleted the account " + db::account_words(name, host) + ". Ctrl+Z makes it again with its "
-                            "rights here -- not its password.", "ok");
+                            "rights here" + std::string(m_passwords_kept ? " and its password." : " -- not its password."), "ok");
         else   journal_note("Not deleted: " + r.error().message + ".", "error");
     });
+}
+
+void Shell::open_password_editor(const db::AccountDef& a) {  // accounts: s021 -- Password… on a card
+    m_accounts_editor.set_visible(false);
+    m_pw_for = a;
+    m_pw_title.set_text("Password for " + db::account_words(a.name, a.host));
+    m_pw1.set_text("");
+    m_pw2.set_text("");
+    m_pw_editor.set_visible(true);
+    password_editor_check();
+    m_pw1.grab_focus();
+}
+
+void Shell::password_editor_check() {  // accounts: s021 -- Set Password's live line and SQL
+    if (!m_conn || !m_conn_engine) return;
+    const auto d = m_conn_engine->dialect();
+    const std::string pw = m_pw1.get_text(), pw2 = m_pw2.get_text();
+    std::string why;
+    if (!m_accounts_can) why = m_accounts_why;
+    else if (pw.empty()) why = "Type the new password -- twice.";
+    else if (pw != pw2) why = pw2.empty() ? "Type it again." : "The two passwords differ.";
+    db::AccountDef want = m_pw_for;
+    want.locked = false;
+    m_pw_sql.set_text("Will run:\n" + joined(db::account_sql(d, m_conn->quote_ident("x").front(), {}, m_pw_for, want,
+                                                             std::string("x"), true)) + ";");
+    std::string ready = "Ready -- the server gets the password; Acorn keeps no copy of what you type.";
+    if (m_pw_for.locked) ready += " It unlocks the account too.";
+    ready += m_passwords_kept ? " Ctrl+Z puts the old password back."
+                              : " PostgreSQL shows the stored password only to a superuser, so Ctrl+Z can't put the old "
+                                "one back -- this one isn't a step.";
+    m_pw_say.set_text(why.empty() ? ready : why);
+    m_pw_say.remove_css_class("error");
+    m_pw_say.remove_css_class("ok");
+    m_pw_say.add_css_class(why.empty() ? "ok" : "error");
+    m_pw_set.set_sensitive(why.empty());
+}
+
+void Shell::set_account_password() {  // accounts: s021 -- verbs::set_password
+    password_editor_check();
+    if (!m_pw_set.get_sensitive() || !m_journal) return;
+    const auto who = db::account_words(m_pw_for.name, m_pw_for.host);
+    bool stepped = false;
+    auto r = db::verbs::set_password(*m_journal, db::Store::account_id(m_pw_for.name, m_pw_for.host), m_pw1.get_text(),
+                                     &stepped);
+    m_pw1.set_text("");    // never left lying in the window
+    m_pw2.set_text("");
+    if (auto lg = log::get(log::Area::App))
+        lg->info("journal: set password '{}': {}", m_pw_for.name, r ? (stepped ? "a step" : "set, no step") : r.error().message);
+    if (!r) {
+        m_pw_say.set_text("Not set: " + r.error().message + ".");
+        m_pw_say.remove_css_class("ok");
+        m_pw_say.add_css_class("error");
+        return;
+    }
+    m_pw_editor.set_visible(false);
+    paint_accounts(true);
+    if (stepped) journal_note("Did " + m_journal->undo_label() + ". Ctrl+Z puts the old password back.", "ok");
+    else         journal_note("Set the password for " + who + " -- not a step: the server doesn't show Acorn the old "
+                              "one, so Ctrl+Z can't put it back.", "ok");
+}
+
+void Shell::lock_account(const std::string& name, const std::string& host, bool lock) {  // accounts: s021 -- verbs::set_locked
+    if (!m_journal) return;
+    auto r = db::verbs::set_locked(*m_journal, db::Store::account_id(name, host), lock);
+    if (auto lg = log::get(log::Area::App))
+        lg->info("journal: {} '{}': {}", lock ? "lock" : "unlock", name, r ? m_journal->undo_label() : r.error().message);
+    paint_accounts(true);
+    if (r) journal_note("Did " + m_journal->undo_label() + ". Ctrl+Z undoes it.", "ok");
+    else   journal_note(std::string(lock ? "Not locked: " : "Not unlocked: ") + r.error().message + ".", "error");
 }
 
 void Shell::paint_accounts(bool keep) {  // accounts: read on the worker (s020c), painted by paint_account_cards
@@ -247,6 +372,7 @@ void Shell::paint_accounts(bool keep) {  // accounts: read on the worker (s020c)
         m_accounts_can = false;
         m_accounts_new.set_visible(false);
         m_accounts_editor.set_visible(false);
+        m_pw_editor.set_visible(false);
         m_accounts_where.set_text("Connect to a database first.");
         m_accounts_scroll.set_child(*account_status("The server's accounts appear here once you connect."));
         return;
@@ -322,6 +448,8 @@ void Shell::paint_account_cards(const db::AccountCards& c) {  // accounts: one c
     // (s020c: worked out with the read, db::accounts_why).
     m_accounts_why = c.why;
     m_accounts_can = m_accounts_why.empty() && m_journal;
+    m_passwords_kept = c.passwords_kept;
+    if (!m_accounts_can) m_pw_editor.set_visible(false);
     m_accounts_new.set_visible(true);
     m_accounts_new.set_sensitive(m_accounts_can);
     m_accounts_new.set_tooltip_text(m_accounts_can ? "Make an account on the server -- a name, a password; rights after, per table"
@@ -384,6 +512,39 @@ void Shell::paint_account_cards(const db::AccountCards& c) {  // accounts: one c
             continue;
         }
         const auto& pic = *got->second;
+
+        // s021: how it logs in -- the lock, Password…, Lock / Unlock.
+        const bool has_pw = db::has_password(d, pic);
+        if (pic.locked)
+            card->append(*line(has_pw ? "Locked -- no one logs in with it until it's unlocked."
+                                      : "Locked, and no password -- Password… lets it in.", "acorn-status"));
+        auto acts = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
+        acts->set_margin_top(4);
+        auto pwb = Gtk::make_managed<Gtk::Button>("Password…");
+        pwb->set_name("shell.accounts.password");
+        pwb->set_sensitive(!a.admin);
+        pwb->set_tooltip_text(a.admin ? "It makes accounts itself -- Acorn leaves its password to the server's own tools."
+                              : pic.locked ? "Set a new password -- that unlocks it too"
+                                           : "Set a new password -- typed twice, sent to the server, never kept");
+        pwb->signal_clicked().connect([this, pic] { open_password_editor(pic); });
+        acts->append(*pwb);
+        if (maria) {
+            auto lkb = Gtk::make_managed<Gtk::Button>(pic.locked ? "Unlock" : "Lock");
+            lkb->set_name("shell.accounts.lock");
+            db::AccountDef want = pic;
+            want.locked = !pic.locked;
+            const auto sql = db::account_sql(d, q, dbname, pic, want, std::nullopt, true);
+            const bool can = !a.admin && (!pic.locked || has_pw);
+            lkb->set_sensitive(can);
+            lkb->set_tooltip_text(a.admin ? "It makes accounts itself -- Acorn leaves locking it to the server's own tools."
+                                  : !can ? "It has no password -- unlocked, anyone could log in as it. Password… unlocks it too."
+                                         : std::string(pic.locked ? "Let it log in again. Runs:\n" : "Keep everyone from logging "
+                                                       "in with it (its rights stay). Runs:\n") + joined(sql) + ";");
+            lkb->signal_clicked().connect([this, nme = a.name, hst = a.host, lock = !pic.locked] { lock_account(nme, hst, lock); });
+            acts->append(*lkb);
+        }
+        card->append(*acts);
+
         auto grid = Gtk::make_managed<Gtk::Grid>();
         grid->set_column_spacing(8);
         grid->set_row_spacing(2);

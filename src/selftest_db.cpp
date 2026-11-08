@@ -3607,12 +3607,15 @@ std::string acct_says(Journal& j, const Store::Id& id) {
     if (!got) return "absent";
     const auto& a = std::get<AccountDef>(*got);
     std::string s = "present " + std::string(a.login ? "login" : "nologin") + " every=" + std::to_string(a.every);
+    // s021: how it logs in -- the lock, and a fingerprint of the stored hash
+    // (never the hash itself in a check's words).
+    s += std::string(a.locked ? " locked" : "") + " pw#" + std::to_string(std::hash<std::string>{}(a.secret) % 100003);
     for (const auto& [t, p] : a.tables) s += " " + t + "=" + std::to_string(p);
     return s;
 }
 std::string walk_accounts(Journal& j) {
     std::string s;
-    for (const char* w : {"new", "give", "every", "take", "del"}) {
+    for (const char* w : {"new", "give", "every", "take", "del", "pw", "lock", "unlock"}) {
         const std::string n = "acorn_selftest_" + std::to_string(::getpid()) + "_walk_" + w;
         s += std::string(w) + ": " + acct_says(j, Store::account_id(n, j.store().dialect() == Dialect::MariaDB ? "%" : "")) + "; ";
     }
@@ -3668,6 +3671,75 @@ void test_accounts_changed_pure() {
     check("accounts: an account's id read back -- a ':' in the name, a host",
           Store::parse_account_id(id, n, h) && n == "a:b" && h == "10.0.%" && Store::is_account(id) && !Store::is_local(id) &&
               Store::describe(id) == "the account “a:b@10.0.%”", id);
+}
+
+// s021 -- passwords and locks: the SQL, pure.
+void test_passwords_pure() {
+    using D = Dialect;
+    AccountDef r;
+    r.name = "r";
+    r.host = "%";
+    r.secret = "mysql_native_password\n*OLD";
+    r.locked = true;
+    AccountDef open = r;
+    open.locked = false;
+    auto set = account_sql(D::MariaDB, '`', "shop", r, open, std::string("it's"), false);
+    auto shown = account_sql(D::MariaDB, '`', "shop", r, open, std::string("it's"), true);
+    check("passwords: MariaDB's Set Password on a locked account -- ONE ALTER USER, typed, unlocked; the preview hides it",
+          set == std::vector<std::string>{"ALTER USER 'r'@'%' IDENTIFIED BY 'it''s' ACCOUNT UNLOCK"} &&
+              shown == std::vector<std::string>{"ALTER USER 'r'@'%' IDENTIFIED BY '********' ACCOUNT UNLOCK"},
+          set.empty() ? "" : set[0]);
+    AccountDef now = open;
+    now.secret = "mysql_native_password\n*NEW";
+    auto back = account_sql(D::MariaDB, '`', "shop", now, r, std::nullopt, false);
+    auto back_shown = account_sql(D::MariaDB, '`', "shop", now, r, std::nullopt, true);
+    check("passwords: MariaDB's Ctrl+Z -- the stored hash put back as kept, and the lock; the preview hides the hash",
+          back == std::vector<std::string>{"ALTER USER 'r'@'%' IDENTIFIED VIA mysql_native_password USING '*OLD' ACCOUNT LOCK"} &&
+              back_shown == std::vector<std::string>{"ALTER USER 'r'@'%' IDENTIFIED VIA mysql_native_password USING '********' ACCOUNT LOCK"},
+          back.empty() ? "" : back[0]);
+    auto lock = account_sql(D::MariaDB, '`', "shop", open, r, std::nullopt, false);
+    check("passwords: Lock alone is ACCOUNT LOCK, the password untouched",
+          lock == std::vector<std::string>{"ALTER USER 'r'@'%' ACCOUNT LOCK"}, lock.empty() ? "" : lock[0]);
+    auto remade = account_sql(D::MariaDB, '`', "shop", std::nullopt, open, std::nullopt, false);
+    AccountDef bad = open;
+    bad.secret = "x; DROP\n*OLD";
+    auto remade_bad = account_sql(D::MariaDB, '`', "shop", std::nullopt, bad, std::nullopt, false);
+    check("passwords: made again (Ctrl+Z of Delete) with its hash; a plugin that isn't a word isn't put back -- locked",
+          remade == std::vector<std::string>{"CREATE USER 'r'@'%' IDENTIFIED VIA mysql_native_password USING '*OLD'"} &&
+              remade_bad == std::vector<std::string>{"CREATE USER 'r'@'%' ACCOUNT LOCK"},
+          remade.empty() ? "" : remade[0]);
+    AccountDef p;
+    p.name = "r";
+    p.secret = "SCRAM-SHA-256$4096:abc";
+    AccountDef p2 = p;
+    p2.secret = "";
+    AccountDef ph = p;
+    ph.secret = kSecretHidden;
+    auto pset = account_sql(D::PostgreSQL, '"', "shop", p, p, std::string("pw"), false);
+    auto pback = account_sql(D::PostgreSQL, '"', "shop", p2, p, std::nullopt, false);
+    auto pnull = account_sql(D::PostgreSQL, '"', "shop", p, p2, std::nullopt, false);
+    auto pmade = account_sql(D::PostgreSQL, '"', "shop", std::nullopt, p2, std::nullopt, false);
+    auto phid = account_sql(D::PostgreSQL, '"', "shop", std::nullopt, ph, std::nullopt, false);
+    auto phid_shown = account_sql(D::PostgreSQL, '"', "shop", std::nullopt, ph, std::nullopt, true);
+    const std::string hp = "CREATE ROLE \"r\" LOGIN PASSWORD '";
+    const bool hid_ok = phid.size() == 1 && phid[0].rfind(hp, 0) == 0 && phid[0].size() == hp.size() + 33 &&
+                        phid[0].back() == '\'' && phid[0].find_first_not_of("0123456789abcdef", hp.size()) == phid[0].size() - 1;
+    check("passwords: PostgreSQL -- typed; a hash put back; none is PASSWORD NULL; made again with none, or (hidden) one no "
+          "one knows -- 32 hex digits, shown as ********",
+          pset == std::vector<std::string>{"ALTER ROLE \"r\" PASSWORD 'pw'"} &&
+              pback == std::vector<std::string>{"ALTER ROLE \"r\" PASSWORD 'SCRAM-SHA-256$4096:abc'"} &&
+              pnull == std::vector<std::string>{"ALTER ROLE \"r\" PASSWORD NULL"} &&
+              pmade == std::vector<std::string>{"CREATE ROLE \"r\" LOGIN"} && hid_ok &&
+              phid_shown == std::vector<std::string>{"CREATE ROLE \"r\" LOGIN PASSWORD '********'"} &&
+              account_sql(D::PostgreSQL, '"', "shop", ph, ph, std::nullopt, false).empty(),
+          phid.empty() ? "" : phid[0]);
+    AccountDef none = open;
+    none.secret = "mysql_native_password\n";
+    check("passwords: has a password -- MariaDB a stored hash, PostgreSQL one set or one it won't show",
+          has_password(D::MariaDB, open) && !has_password(D::MariaDB, none) && has_password(D::PostgreSQL, p) &&
+              !has_password(D::PostgreSQL, p2) && has_password(D::PostgreSQL, ph) &&
+              verbs::password_label(r) == "Set Password for “r@%” and Unlock" && verbs::password_label(open) == "Set Password for “r@%”",
+          verbs::password_label(r));
 }
 
 // On the sample Address Book, writable: New Account, rights given and taken,
@@ -3804,17 +3876,148 @@ void test_accounts_changed(Journal& j, Gate& g, Dialect d, const std::string& P)
     check(P + "accounts changed: Ctrl+Z makes it again with its rights here (contacts read · change)",
           back && a && says(a, "contacts") == "read · change" && acct_says(j, id) == before,
           back ? acct_says(j, id) : back.error().message);
-    if (my) {
-        auto lk = g.query("SELECT JSON_VALUE(Priv, '$.account_locked') FROM mysql.global_priv WHERE User = ? AND Host = ?",
-                          {Value(who), Value(host)});
+    if (my) {   // s021: with its own password back (the stored hash), not locked
+        auto lk = g.query("SELECT COALESCE(JSON_VALUE(g.Priv, '$.account_locked'), 'false'), u.authentication_string = PASSWORD(?) "
+                          "FROM mysql.user u JOIN mysql.global_priv g ON g.User = u.User AND g.Host = u.Host "
+                          "WHERE u.User = ? AND u.Host = ?", {Value(pw), Value(who), Value(host)});
         const std::string l = lk && !lk->rows.empty() && lk->rows[0][0].as_text() ? *lk->rows[0][0].as_text() : "?";
-        check(P + "accounts changed: ... without its password: MariaDB makes it locked", l == "true" || l == "1", l);
+        const bool same = lk && !lk->rows.empty() && lk->rows[0][1].as_int() == 1;
+        check(P + "accounts changed: ... with its own password (MariaDB keeps the hash Acorn puts back), not locked",
+              (l == "false" || l == "0") && same, l);
     }
     auto again = j.redo();
     check(P + "accounts changed: redo deletes it again", again && !mine(), again ? "" : again.error().message);
     j.clear();
     check(P + "accounts changed: the throwaway accounts dropped; no strays",
           drop_test_accounts(g, d) && !mine() && j.strays() == strays0, std::to_string(j.strays()));
+}
+
+// s021 -- Set Password, Lock / Unlock on the sample: each one step, Ctrl+Z puts
+// the old password and lock back (the hash, where the server shows it). On
+// MariaDB, LOGGING IN as the account says it worked (an @localhost account:
+// the test server's anonymous ''@localhost would shadow a '%' one).
+void test_passwords(Engine* e, const ConnectParams& rw, Journal& j, Gate& g, Dialect d, const std::string& P) {
+    j.clear();
+    const int strays0 = j.strays();
+    const bool my = d == Dialect::MariaDB;
+    const std::string who = "acorn_selftest_" + std::to_string(::getpid()) + "_login";
+    const std::string host = my ? "localhost" : "";
+    const auto id = Store::account_id(who, host);
+    if (d == Dialect::SQLite) {
+        const auto n = j.size();
+        auto a = verbs::set_password(j, id, "pw");
+        auto b = verbs::set_locked(j, id, true);
+        check(P + "passwords: SQLite -- Set Password and Lock refused in words, no step",
+              !a && !b && a.error().message.find("no accounts") != std::string::npos && j.size() == n,
+              a ? "set!" : a.error().message);
+        return;
+    }
+    // Logs in as it? "" = yes, else the server's words.
+    auto login = [&](const std::string& pw) -> std::string {
+        ConnectParams p = rw;
+        p.user = who;
+        p.host = "127.0.0.1";
+        p.password = pw;
+        p.read_only = true;
+        auto c = e->open(p);
+        if (!c) return c.error().message.empty() ? std::string("refused") : c.error().message;
+        auto q = (*c)->query("SELECT 1");
+        return q ? std::string{} : q.error().message;
+    };
+    const std::string pw1 = "first 'pw' \\ one", pw2 = "second pw";
+    auto made = verbs::new_account(j, who, host, pw1);
+    auto give = made ? verbs::set_rights(j, id, "contacts", kRead, true) : std::unexpected(made.error());
+    check(P + "passwords: the fixture -- an account given read on contacts", made && give, made ? "" : made.error().message);
+    if (!made) return;
+    if (my) check(P + "passwords: it logs in with its password, not with another",
+                  login(pw1).empty() && !login(pw2).empty(), login(pw1));
+
+    const auto n0 = j.size();
+    if (my) {
+        auto lk = verbs::set_locked(j, id, true);
+        const std::string locked_says = login(pw1);
+        check(P + "passwords: Lock -- one step named for it; logging in is refused (locked)",
+              lk && j.size() == n0 + 1 && j.undo_label() == "Lock " + account_words(who, host) &&
+                  locked_says.find("locked") != std::string::npos,
+              lk ? j.undo_label() + " / " + locked_says : lk.error().message);
+        auto u = j.undo();
+        const std::string unl = login(pw1);
+        auto r = j.redo();
+        check(P + "passwords: Lock's Ctrl+Z lets it in again; redo locks it again",
+              u && r && unl.empty() && !login(pw1).empty(), unl);
+        auto same = verbs::set_locked(j, id, true);
+        check(P + "passwords: locking a locked account is no step", same && j.size() == n0 + 1, "");
+    }
+
+    const auto n1 = j.size();
+    bool stepped = true;
+    auto set = verbs::set_password(j, id, pw2, &stepped);
+    const std::string label = "Set Password for " + account_words(who, host) + (my ? " and Unlock" : "");
+    if (my) {
+        check(P + "passwords: Set Password on a locked account -- ONE step, named, unlocked; logs in with the new one, "
+                  "not the old",
+              set && stepped && j.size() == n1 + 1 && j.undo_label() == label && login(pw2).empty() && !login(pw1).empty(),
+              set ? j.undo_label() + " / " + login(pw2) : set.error().message);
+        check(P + "passwords: neither password is anywhere in the step or the picture",
+              j.undo_label().find("pw") == std::string::npos && acct_says(j, id).find("pw'") == std::string::npos &&
+                  acct_says(j, id).find("second") == std::string::npos, acct_says(j, id));
+        auto u = j.undo();
+        const std::string old_locked = login(pw1);
+        const std::string says = acct_says(j, id);
+        auto r = j.redo();
+        check(P + "passwords: Ctrl+Z puts the old password back AND the lock (refused: locked); redo -- the new one again",
+              u && r && old_locked.find("locked") != std::string::npos && says.find(" locked") != std::string::npos &&
+                  login(pw2).empty(), old_locked);
+        auto unlock_back = j.undo();   // locked, old password
+        auto unl = verbs::set_locked(j, id, false);
+        check(P + "passwords: Unlock (it has a password) -- one step; the OLD password logs in again",
+              unlock_back && unl && j.undo_label() == "Unlock " + account_words(who, host) && login(pw1).empty(), login(pw1));
+    } else {
+        const bool kept = j.store().shows_passwords();
+        check(P + "passwords: PostgreSQL" + std::string(kept ? " (a superuser) -- one step" : " (not a superuser) -- set, NO step: "
+                                                                                              "the server won't show the old one"),
+              set && stepped == kept && j.size() == n1 + (kept ? 1 : 0),
+              set ? std::to_string(j.size() - n1) : set.error().message);
+        auto lk = verbs::set_locked(j, id, true);
+        check(P + "passwords: PostgreSQL has no account lock -- refused in words, no step",
+              !lk && lk.error().message.find("no account lock") != std::string::npos && j.size() == n1 + (kept ? 1 : 0),
+              lk ? "locked!" : lk.error().message);
+    }
+
+    // Refused, in words, no step.
+    const auto n2 = j.size();
+    auto empty = verbs::set_password(j, id, "");
+    auto me = g.query(my ? "SELECT CURRENT_USER()" : "SELECT current_user::text");
+    const auto mep = me && !me->rows.empty() && me->rows[0][0].as_text() ? parse_grantee(*me->rows[0][0].as_text())
+                                                                          : std::pair<std::string, std::string>{};
+    auto own = verbs::set_password(j, Store::account_id(mep.first, my ? mep.second : ""), "x");
+    auto own_lock = my ? verbs::set_locked(j, Store::account_id(mep.first, mep.second), true)
+                       : std::expected<void, Error>(std::unexpected(Error{Error::Code::Unsupported, "this connection uses"}));
+    check(P + "passwords: refused in words -- an empty password, your own account (password and lock); no step",
+          !empty && !own && !own_lock && own.error().message.find("this connection uses") != std::string::npos &&
+              j.size() == n2, own ? "set!" : own.error().message);
+    if (my) {
+        auto adm = verbs::set_password(j, Store::account_id("acorn", mep.second == "%" ? "localhost" : "%"), "x");
+        check(P + "passwords: an account that makes accounts -- its password left to the server's tools, said in words",
+              !adm && adm.error().message.find("makes accounts itself") != std::string::npos && j.size() == n2,
+              adm ? "set!" : adm.error().message);
+        // An account locked with NO password (an older Ctrl+Z of Delete, another
+        // tool): Unlock is refused; Set Password unlocks it.
+        const std::string bare = "acorn_selftest_" + std::to_string(::getpid()) + "_bare";
+        (void)g.inner().query("CREATE USER '" + bare + "'@'%' ACCOUNT LOCK");   // fixture, behind the door
+        const auto bid = Store::account_id(bare, "%");
+        auto unl = verbs::set_locked(j, bid, false);
+        bool st = false;
+        auto setb = verbs::set_password(j, bid, "now one", &st);
+        const std::string after = acct_says(j, bid);
+        check(P + "passwords: locked with no password -- Unlock refused (anyone could log in); Set Password unlocks it, one step",
+              !unl && unl.error().message.find("no password") != std::string::npos && setb && st &&
+                  after.find(" locked") == std::string::npos && j.undo_label() == "Set Password for “" + bare + "@%” and Unlock",
+              unl ? "unlocked!" : unl.error().message + " / " + after);
+    }
+    j.clear();
+    check(P + "passwords: the throwaway accounts dropped; no strays", drop_test_accounts(g, d) && j.strays() == strays0,
+          std::to_string(j.strays()));
 }
 
 // s020c: the Accounts area's read in one go (it runs on the worker) -- the
@@ -4208,7 +4411,7 @@ void test_starter(Journal& j, Gate& g, const std::string& P) {
 }
 
 // ── s010f: the sample Address Book ───────────────────────────────────────────
-void test_sample(Journal& j, Gate& g, const std::string& P, Dialect d) {
+void test_sample(Journal& j, Gate& g, const std::string& P, Dialect d, Engine* e, const ConnectParams& rw) {
     for (const char* t : {"phones", "addresses", "contacts"})   // test_starter's tables
         (void)g.inner().query("DROP TABLE IF EXISTS " + g.quote_ident(t));
     auto count = [&](const std::string& t) {
@@ -4420,6 +4623,7 @@ void test_sample(Journal& j, Gate& g, const std::string& P, Dialect d) {
     test_accounts(g, d, P);        // s019a
     test_accounts_changed(j, g, d, P);   // s019b
     test_account_cards(j, g, d, P);      // s020c
+    test_passwords(e, rw, j, g, d, P);   // s021
     {   // s016
         const auto* lab = sol.layout("addresses", kSampleLabelsName);
         check(P + "labels: the sample's Mailing Labels kept beside the report", lab && *lab == sample_labels_layout(), "");
@@ -4465,6 +4669,21 @@ void test_journal(Engine* e, const ConnectParams& rw, const ConnectParams& ro, c
         if (v.setup) {
             auto su = v.setup(j);
             check(P + "verb " + v.name + ": its fixture, through the door", su.has_value(), su ? "" : su.error().message);
+        }
+        if (const auto why = v.refused_here ? v.refused_here(j) : std::string{}; !why.empty()) {   // s021
+            const auto n = j.size();
+            auto r = v.run(j);
+            check(P + "verb " + v.name + ": not on this server -- refused in words (" + why + "), no step",
+                  !r && r.error().message.find(why) != std::string::npos && j.size() == n, r ? "ran!" : r.error().message);
+            continue;
+        }
+        if (v.no_step_here && v.no_step_here(j)) {   // s021: runs, but the server keeps nothing Acorn could put back
+            const auto n = j.size();
+            const bool redo = j.can_redo();
+            auto r = v.run(j);
+            check(P + "verb " + v.name + ": runs here but keeps no step (the server won't show what to put back)",
+                  r.has_value() && j.size() == n && j.can_redo() == redo, r ? std::to_string(j.size()) : r.error().message);
+            continue;
         }
         const auto before = snapshot(g);
         const auto sol_before = walk_solution;
@@ -4611,7 +4830,7 @@ void test_journal(Engine* e, const ConnectParams& rw, const ConnectParams& ro, c
     test_key(j, g, e, P);
     test_links(j, g, e, P);
     test_starter(j, g, P);
-    test_sample(j, g, P, d);
+    test_sample(j, g, P, d, e, rw);
 }
 
 // SQLite-only behaviour: files.
@@ -4758,6 +4977,7 @@ void db_tests(CheckFn fn, int& skip_count) {
         test_import_pure();                   // s018b: import
         test_accounts_pure();                 // s019a: accounts
         test_accounts_changed_pure();         // s019b: accounts changed
+        test_passwords_pure();                // s021: passwords and locks
         {   // s005b: the door, on its own fresh fixture file
             Target J = T;
             J.rw.path = (tmp.p / "journal.sqlite").string();

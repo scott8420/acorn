@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <random>
 #include <set>
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -67,7 +68,33 @@ std::string db_pattern(const std::string& db) {
 Error refused(std::string m) { return Error{Error::Code::Unsupported, std::move(m)}; }
 const char* kNoAccounts = "a SQLite file has no accounts -- the file's own permissions decide who may read and change it";
 const char* kOwn = "that's the account this connection uses -- Acorn doesn't change its own account from under it";
+
+// s021: MariaDB's secret is "plugin\nauthentication_string". A plugin name is
+// a word (it goes into the SQL bare); anything else isn't put back.
+std::pair<std::string, std::string> maria_secret(const std::string& s) {
+    const auto nl = s.find('\n');
+    if (nl == std::string::npos) return {};
+    std::string plugin = s.substr(0, nl);
+    for (unsigned char ch : plugin)
+        if (!std::isalnum(ch) && ch != '_') return {};
+    return {plugin, s.substr(nl + 1)};
+}
+
+// A password no one knows -- PostgreSQL's stand-in when the stored one can't
+// be read (a role made again by Ctrl+Z). 32 hex digits, never shown or kept.
+std::string unknowable() {
+    std::random_device rd;
+    std::string out;
+    const char* hex = "0123456789abcdef";
+    for (int i = 0; i < 32; ++i) out += hex[rd() & 15u];
+    return out;
+}
 }  // namespace
+
+bool has_password(Dialect d, const AccountDef& a) {
+    if (d == Dialect::MariaDB) return !maria_secret(a.secret).second.empty();
+    return !a.secret.empty();
+}
 
 // ── ids, names ──────────────────────────────────────────────────────────────
 Store::Id Store::account_id(const std::string& name, const std::string& host) {
@@ -129,10 +156,33 @@ std::vector<std::string> account_sql(Dialect d, char q, const std::string& datab
     auto grant  = [&](unsigned p, const std::string& t) { if (p) out.push_back("GRANT " + privs_sql(p) + " ON " + on(t) + " TO " + who); };
     auto revoke = [&](unsigned p, const std::string& t) { if (p) out.push_back("REVOKE " + privs_sql(p) + " ON " + on(t) + " FROM " + who); };
     const std::string pw = !password ? std::string{} : hide_password ? std::string("'********'") : lit(d, *password);
+    const std::string masked = "'********'";
+    // s021: the stored password put back as the server keeps it (a hash), or
+    // "" when there's nothing to say. MariaDB: IDENTIFIED VIA <plugin> USING
+    // '<hash>'. PostgreSQL: PASSWORD '<hash>' / NULL / one no one knows.
+    auto restore = [&](const AccountDef& a) -> std::string {
+        if (maria) {
+            const auto [plugin, auth] = maria_secret(a.secret);
+            if (plugin.empty()) return {};
+            return " IDENTIFIED VIA " + plugin + " USING " + (hide_password && !auth.empty() ? masked : lit(d, auth));
+        }
+        if (a.secret.empty()) return " PASSWORD NULL";
+        if (a.secret == kSecretHidden) return " PASSWORD " + (hide_password ? masked : lit(d, unknowable()));
+        return " PASSWORD " + (hide_password ? masked : lit(d, a.secret));
+    };
 
     if (!live && want) {   // made: then what it may do here
-        if (maria) out.push_back("CREATE USER " + who + (password ? " IDENTIFIED BY " + pw : std::string(" ACCOUNT LOCK")));
-        else out.push_back("CREATE ROLE " + who + (want->login ? " LOGIN" : " NOLOGIN") + (password ? " PASSWORD " + pw : std::string{}));
+        if (maria) {
+            // Typed: as typed. Made again (Ctrl+Z of Delete, redo of New):
+            // with the hash it had and its lock. No hash known: locked, so no
+            // one logs in with an empty password.
+            const std::string how = password ? " IDENTIFIED BY " + pw : restore(*want);
+            out.push_back("CREATE USER " + who + how + (want->locked || how.empty() ? " ACCOUNT LOCK" : ""));
+        } else {
+            std::string how = password ? " PASSWORD " + pw : restore(*want);
+            if (how == " PASSWORD NULL") how.clear();
+            out.push_back("CREATE ROLE " + who + (want->login ? " LOGIN" : " NOLOGIN") + how);
+        }
         if (maria) grant(want->every, "");
         for (const auto& [t, p] : want->tables) grant(p, t);
         return out;
@@ -144,6 +194,16 @@ std::vector<std::string> account_sql(Dialect d, char q, const std::string& datab
         return out;
     }
     if (!maria && live->login != want->login) out.push_back("ALTER ROLE " + who + (want->login ? " LOGIN" : " NOLOGIN"));
+    // s021: the password (typed, or the old one put back) and the lock -- one
+    // statement on MariaDB, so it lands whole or not at all.
+    const bool pw_changes = password || want->secret != live->secret;
+    if (maria) {
+        std::string how = password ? " IDENTIFIED BY " + pw : pw_changes ? restore(*want) : std::string{};
+        if (want->locked != live->locked) how += want->locked ? " ACCOUNT LOCK" : " ACCOUNT UNLOCK";
+        if (!how.empty()) out.push_back("ALTER USER " + who + how);
+    } else if (pw_changes) {
+        out.push_back("ALTER ROLE " + who + (password ? " PASSWORD " + pw : restore(*want)));
+    }
     if (maria) {
         revoke(live->every & ~want->every, "");
         grant(want->every & ~live->every, "");
@@ -161,6 +221,13 @@ std::vector<std::string> account_sql(Dialect d, char q, const std::string& datab
 }
 
 // ── the store ───────────────────────────────────────────────────────────────
+bool Store::shows_passwords() const {
+    if (m_dialect == Dialect::MariaDB) return true;
+    if (m_dialect != Dialect::PostgreSQL) return false;
+    auto r = m_conn.query("SELECT has_table_privilege('pg_catalog.pg_authid', 'SELECT')::int");
+    return r && !r->rows.empty() && yes(r->rows[0][0]);
+}
+
 bool Store::is_own_account(const std::string& name, const std::string& host) const {
     if (m_dialect == Dialect::MariaDB) {
         auto r = m_conn.query("SELECT CURRENT_USER()");
@@ -188,9 +255,14 @@ std::optional<Record> Store::get_account(const Id& id) const {
     a.name = name;
     a.host = host;
     if (m_dialect == Dialect::MariaDB) {
-        auto u = m_conn.query("SELECT 1 FROM mysql.user WHERE User = ? AND Host = ?", {db::Value(name), db::Value(host)});
+        // s021: how it logs in, too -- the stored hash and the lock.
+        auto u = m_conn.query("SELECT u.plugin, u.authentication_string, JSON_VALUE(g.Priv, '$.account_locked') "
+                              "FROM mysql.user u LEFT JOIN mysql.global_priv g ON g.User = u.User AND g.Host = u.Host "
+                              "WHERE u.User = ? AND u.Host = ?", {db::Value(name), db::Value(host)});
         if (!u) { fail(u.error().code, "can't read the server's accounts: " + u.error().message); return std::nullopt; }
         if (u->rows.empty()) return std::nullopt;
+        a.secret = text_of(u->rows[0][0]) + "\n" + text_of(u->rows[0][1]);
+        a.locked = yes(u->rows[0][2]);
         const std::string grantee = "'" + name + "'@'" + host + "'";
         auto s = m_conn.query("SELECT PRIVILEGE_TYPE FROM information_schema.SCHEMA_PRIVILEGES "
                               "WHERE GRANTEE = ? AND TABLE_SCHEMA = ?", {db::Value(grantee), db::Value(db_pattern(database_name()))});
@@ -205,6 +277,12 @@ std::optional<Record> Store::get_account(const Id& id) const {
         if (!u) { fail(u.error().code, "can't read the server's roles: " + u.error().message); return std::nullopt; }
         if (u->rows.empty()) return std::nullopt;
         a.login = yes(u->rows[0][0]);
+        a.secret = kSecretHidden;   // s021: the stored password, when this connection may see it
+        if (shows_passwords()) {
+            auto p = m_conn.query("SELECT rolpassword FROM pg_authid WHERE rolname = ?", {db::Value(name)});
+            if (!p) { fail(p.error().code, p.error().message); return std::nullopt; }
+            a.secret = p->rows.empty() ? std::string{} : text_of(p->rows[0][0]);
+        }
         auto t = m_conn.query(
             "SELECT c.relname, a.privilege_type FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
             "CROSS JOIN LATERAL aclexplode(c.relacl) a JOIN pg_roles r ON r.oid = a.grantee "
@@ -229,7 +307,7 @@ void Store::put_account(const Id& id, const AccountDef* v) {
     const std::optional<AccountDef> want = v ? std::optional<AccountDef>(*v) : std::nullopt;
     const bool making = !live && want;
     const auto sql = account_sql(m_dialect, m_conn.quote_ident("x").front(), database_name(), live, want,
-                                 making ? pw : std::nullopt, false);
+                                 want ? pw : std::nullopt, false);
     for (std::size_t i = 0; i < sql.size(); ++i) {
         if (exec(sql[i])) continue;
         // MariaDB can't roll an account back: one it just made goes again.
@@ -322,18 +400,65 @@ std::expected<void, Error> set_rights(Journal& j, const Store::Id& id, const std
     return j.run(rights_label(*live, table, privs & kAllPrivs, on), {id}, [&](Store& st) { st.put(id, want); });
 }
 
+// Your own account, or one that makes accounts: Acorn leaves `what` to the
+// server's own tools. "" = it may.
+std::string held(Journal& j, const AccountDef& live, const char* what) {
+    auto& s = j.store();
+    if (s.is_own_account(live.name, live.host)) return kOwn;
+    if (auto list = read_accounts(s.connection(), s.dialect(), Schema{}))
+        for (const auto& a : list->accounts)
+            if (a.name == live.name && a.host == live.host && (a.super || a.admin))
+                return account_words(a.name, a.host) + " makes accounts itself -- Acorn leaves " + what +
+                       " an account like that to the server's own tools";
+    return {};
+}
+
 std::expected<void, Error> delete_account(Journal& j, const Store::Id& id) {
     auto live = live_account(j, id);
     if (!live) return std::unexpected(live.error());
-    auto& s = j.store();
-    if (s.is_own_account(live->name, live->host)) return std::unexpected(refused(kOwn));
-    if (auto list = read_accounts(s.connection(), s.dialect(), Schema{}))
-        for (const auto& a : list->accounts)
-            if (a.name == live->name && a.host == live->host && (a.super || a.admin))
-                return std::unexpected(refused(account_words(a.name, a.host) + " makes accounts itself -- Acorn leaves "
-                                               "deleting an account like that to the server's own tools"));
+    if (auto why = held(j, *live, "deleting"); !why.empty()) return std::unexpected(refused(why));
     return j.run("Delete Account " + account_words(live->name, live->host), {id},
                  [&](Store& st) { st.put(id, std::nullopt); });
+}
+
+std::string password_label(const AccountDef& a) {
+    return "Set Password for " + account_words(a.name, a.host) + (a.locked ? " and Unlock" : "");
+}
+
+std::expected<void, Error> set_password(Journal& j, const Store::Id& id, const std::string& password, bool* stepped) {
+    if (stepped) *stepped = false;
+    auto live = live_account(j, id);
+    if (!live) return std::unexpected(live.error());
+    if (password.empty()) return std::unexpected(refused("type a password -- an empty one would let anyone in"));
+    if (auto why = held(j, *live, "the password of"); !why.empty()) return std::unexpected(refused(why));
+    auto& s = j.store();
+    AccountDef want = *live;
+    want.locked = false;   // setting a password lets it in
+    const auto n = j.size();
+    const bool redo_before = j.can_redo();
+    s.set_password(password);
+    auto r = j.run(password_label(*live), {id}, [&](Store& st) { st.put(id, want); });
+    s.set_password(std::nullopt);   // a refusal before the put leaves nothing behind
+    // A step was kept iff the list changed: it grew, or a redo was discarded.
+    if (r && stepped) *stepped = j.size() != n || (redo_before && !j.can_redo());
+    return r;
+}
+
+std::expected<void, Error> set_locked(Journal& j, const Store::Id& id, bool lock) {
+    auto live = live_account(j, id);
+    if (!live) return std::unexpected(live.error());
+    if (j.store().dialect() != Dialect::MariaDB)
+        return std::unexpected(refused("PostgreSQL has no account lock -- a role no one should log in as is one that "
+                                       "can't log in"));
+    if (auto why = held(j, *live, lock ? "locking" : "unlocking"); !why.empty()) return std::unexpected(refused(why));
+    if (live->locked == lock) return {};   // already so: no step
+    if (!lock && !has_password(Dialect::MariaDB, *live))
+        return std::unexpected(refused(account_words(live->name, live->host) + " has no password -- unlocked, anyone "
+                                       "could log in as it; Set Password unlocks it too"));
+    AccountDef want = *live;
+    want.locked = lock;
+    return j.run((lock ? "Lock " : "Unlock ") + account_words(live->name, live->host), {id},
+                 [&](Store& st) { st.put(id, want); });
 }
 
 std::expected<std::vector<std::string>, Error> account_preview(Journal& j, const Store::Id& id,
@@ -380,6 +505,7 @@ AccountCards read_account_cards(Connection& c, Dialect d, const Schema& s, Store
     out.why = accounts_why(writable && st, *out.list);
     if (!out.why.empty()) return out;
     out.database = st->database_name();
+    out.passwords_kept = st->shows_passwords();   // s021
     std::int64_t n = 0;
     for (const auto& a : out.list->accounts) {
         if (!account_hold(a).empty()) continue;
