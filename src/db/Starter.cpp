@@ -113,7 +113,8 @@ std::expected<void, Error> make_sample(Journal& j) {  // s010f
     if (auto r = verbs::save_layout(j, sample_list_layout()); !r) return r;   // s012b
     // s015b: a report -- addresses by state, each state's count.
     if (auto r = verbs::save_summary(j, core::Summary{"addresses", kSampleCountName, core::SummaryOp::Count, "id"}); !r) return r;
-    return verbs::save_layout(j, sample_report_layout());
+    if (auto r = verbs::save_layout(j, sample_report_layout()); !r) return r;
+    return verbs::save_layout(j, sample_labels_layout());   // s016
 }
 
 core::Layout sample_layout() {  // s010f: "Contact Card" -- on the 8 px grid
@@ -208,6 +209,27 @@ core::Layout sample_report_layout() {  // s015b: "Addresses by State" -- a leadi
     l.footer = 40;                                            // [152, 192)
     left("Acorn's sample", 16, 160, 200);
     l.height = 192;
+    return l;
+}
+
+core::Layout sample_labels_layout() {  // s016: "Mailing Labels" -- two across, 24 px apart
+    using K = core::ObjectKind;
+    core::Layout l;
+    l.table = "addresses";
+    l.name = kSampleLabelsName;
+    l.width = 248;   // two across with the gap: 520 -- Letter and A4 unscaled
+    l.across = 2;
+    l.gap = 24;
+    core::LayoutObject who{K::Related, "contact_id", "", 8, 8, 232, 24};   // the contact's last name, through the link
+    who.from = "contacts";
+    who.shows = "last_name";
+    l.objects.push_back(std::move(who));
+    auto box = [&](const char* f, int x, int y, int w) { l.objects.push_back({K::Field, f, "", x, y, w, 24}); };
+    box("street", 8, 32, 232);
+    box("city", 8, 56, 120);
+    box("region", 136, 56, 40);
+    box("postal_code", 184, 56, 56);
+    l.height = 88;
     return l;
 }
 

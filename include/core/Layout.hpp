@@ -80,6 +80,10 @@ struct Layout {
     // LEADING subs (in this order), the body, the TRAILING subs (in this
     // order), the footer -- so the body is what the rest leave.
     std::vector<SubSummary> subs;
+    // s016: LABELS -- Preview / Print lay the body `across` to a row (1: a
+    // list, one per row), `gap` px between labels both ways. The label's
+    // size is the layout's width by the body's height.
+    int across = 1, gap = 0;
     std::vector<LayoutObject> objects;  // drawn in order (later on top)
     bool operator==(const Layout&) const = default;
 };
@@ -296,5 +300,16 @@ struct ReportBlock {
     bool operator==(const ReportBlock&) const = default;
 };
 std::vector<ReportBlock> report_blocks(const Layout& l, const std::vector<std::vector<std::string>>& keys);
+
+// ── s016: labels ────────────────────────────────────────────────────────────
+inline constexpr int kLabelsMax = 8;   // the most across
+inline bool is_labels(const Layout& l) { return l.across > 1; }
+// How wide a row of labels prints: across labels and the gaps between.
+int labels_width(const Layout& l);
+// What prints for `records` records as labels: one Body block per ROW, its
+// `record` the row's first (the row holds up to `across` from there).
+std::vector<ReportBlock> label_blocks(const Layout& l, int records);
+// "3 across, 16 px apart" / "one per row"
+std::string labels_label(const Layout& l);
 
 }  // namespace acorn::core

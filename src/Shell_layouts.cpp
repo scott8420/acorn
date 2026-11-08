@@ -576,6 +576,21 @@ void Shell::draw_layout(const Cairo::RefPtr<Cairo::Context>& cr, int w, int h) {
         band(b.top, b.top + b.height, name.c_str());
         rule(b.top + b.height);
     }
+    if (core::is_labels(m_lay)) {   // s016: the label's own edge, named -- the rest of the row is copies of it
+        const int top = core::body_top(m_lay), bh = core::part_height(m_lay, core::Part::Body);
+        set(0.45);
+        cr->set_line_width(1);
+        cr->set_dash(std::vector<double>{2, 3}, 0);
+        cr->rectangle(0.5, top + 0.5, m_lay.width - 1, bh - 1);
+        cr->stroke();
+        cr->unset_dash();
+        auto pl = m_lay_canvas.create_pango_layout("label · " + core::labels_label(m_lay));
+        int tw = 0, th = 0;
+        pl->get_pixel_size(tw, th);
+        set(0.40);
+        cr->move_to(std::max(0, m_lay.width - tw), top + bh + 4);   // under the edge, clear of the boxes
+        pl->show_in_cairo_context(cr);
+    }
 
     auto text_in = [&](const std::string& s, const core::LayoutObject& o, Pango::Alignment how, double alpha) {
         auto pl = m_lay_canvas.create_pango_layout(s);
@@ -973,6 +988,44 @@ void Shell::paint_inspector() {  // layouts: the picked object's field / words /
         });
         if (!live.empty()) { m_lay_inspector.append(*sdd); m_lay_inspector.append(*wdd); }
         m_lay_inspector.append(*addsub);
+        // s016: labels -- the body printed several across in Preview / Print.
+        auto lab_head = side_label("Labels", "acorn-field-name");
+        lab_head->set_margin_top(10);
+        m_lay_inspector.append(*lab_head);
+        m_lay_inspector.append(*side_label(core::is_labels(m_lay)
+            ? "Preview prints the body as labels -- " + core::labels_label(m_lay) + ", each " + std::to_string(m_lay.width) +
+              " × " + std::to_string(core::part_height(m_lay, core::Part::Body)) + " px (the layout's width by the body's height); "
+              "as many rows a page as fit. Sub-summaries don't print on labels."
+            : std::string("Preview prints one body per row. Several across makes labels -- each the layout's width by the body's height."),
+            "acorn-status"));
+        std::vector<Glib::ustring> acr{"One per row -- a list"};
+        for (int n = 2; n <= core::kLabelsMax; ++n) acr.push_back(std::to_string(n) + " across");
+        auto add_dd = Gtk::make_managed<Gtk::DropDown>(Gtk::StringList::create(acr));
+        add_dd->set_name("layouts.labels.across");
+        add_dd->set_selected(static_cast<guint>(std::clamp(m_lay.across, 1, core::kLabelsMax) - 1));
+        add_dd->set_sensitive(can);
+        static const int kGaps[] = {0, 8, 16, 24, 32};
+        auto gap_dd = Gtk::make_managed<Gtk::DropDown>(Gtk::StringList::create({"Touching", "8 px apart", "16 px apart", "24 px apart", "32 px apart"}));
+        gap_dd->set_name("layouts.labels.gap");
+        guint gi = 0;
+        for (guint k = 0; k < 5; ++k) if (kGaps[k] == m_lay.gap) gi = k;
+        gap_dd->set_selected(gi);
+        gap_dd->set_sensitive(can && core::is_labels(m_lay));
+        auto set_labels = [this, add_dd, gap_dd, gen] {
+            if (gen != m_lay_gen) return;
+            const auto a = add_dd->get_selected(), g = gap_dd->get_selected();
+            if (a == GTK_INVALID_LIST_POSITION || g == GTK_INVALID_LIST_POSITION || g >= 5) return;
+            auto l = m_lay;
+            l.across = static_cast<int>(a) + 1;
+            l.gap = l.across > 1 ? kGaps[g] : 0;
+            if (l == m_lay) return;
+            const std::string what = l.across > 1 ? "Set labels: " + core::labels_label(l) : "Set one per row (no labels)";
+            Glib::signal_idle().connect_once([this, l, what] { keep_layout(l, what); });
+        };
+        add_dd->property_selected().signal_changed().connect(set_labels);
+        gap_dd->property_selected().signal_changed().connect(set_labels);
+        m_lay_inspector.append(*add_dd);
+        m_lay_inspector.append(*gap_dd);
         return;
     }
     const auto idx = static_cast<std::size_t>(lay_one());

@@ -42,6 +42,8 @@ std::string check_layout(const Layout& l) {
         if (x.height <= 0) return "a sub-summary needs a height";
         subs += x.height;
     }
+    if (l.across < 1 || l.across > kLabelsMax) return "labels are 1 to " + std::to_string(kLabelsMax) + " across";   // s016
+    if (l.gap < 0) return "the gap between labels can't be negative";
     if (l.header < 0 || l.footer < 0 || l.header + l.footer + subs >= l.height)
         return "a layout's header and footer leave no room for its body";
     for (const auto& o : l.objects) {
@@ -622,6 +624,25 @@ std::vector<ReportBlock> report_blocks(const Layout& l, const std::vector<std::v
                 out.push_back({Part::Sub, bd.sub, r});
     }
     return out;
+}
+
+// ── s016: labels ────────────────────────────────────────────────────────────
+
+int labels_width(const Layout& l) {
+    const int n = std::max(1, l.across);
+    return n * l.width + (n - 1) * std::max(0, l.gap);
+}
+
+std::vector<ReportBlock> label_blocks(const Layout& l, int records) {
+    std::vector<ReportBlock> out;
+    const int n = std::max(1, l.across);
+    for (int r = 0; r < records; r += n) out.push_back({Part::Body, -1, r});
+    return out;
+}
+
+std::string labels_label(const Layout& l) {
+    if (!is_labels(l)) return "one per row";
+    return std::to_string(l.across) + " across, " + std::to_string(l.gap) + " px apart";
 }
 
 }  // namespace acorn::core

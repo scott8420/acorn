@@ -2,6 +2,7 @@
 
 #include "json.hpp"
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <unistd.h>
@@ -138,6 +139,10 @@ std::optional<Solution> load_solution(const std::string& file) {
                                 l.subs.push_back(std::move(sub));
                             }
                     }
+                    if (auto lb = lj.find("labels"); lb != lj.end() && lb->is_object()) {   // s016
+                        l.across = std::max(1, num_or_0(*lb, "across"));
+                        l.gap = num_or_0(*lb, "gap");
+                    }
                     if (auto ob = lj.find("objects"); ob != lj.end() && ob->is_array())
                         for (const auto& oj : *ob) {
                             if (!oj.is_object()) continue;
@@ -254,6 +259,8 @@ bool save_solution(const std::string& file, const Solution& s) {
                 objects.push_back(std::move(oj));
             }
             layouts[table][name] = {{"width", l.width}, {"height", l.height}, {"objects", std::move(objects)}};
+            if (l.across > 1)   // s016: only for labels
+                layouts[table][name]["labels"] = {{"across", l.across}, {"gap", l.gap}};
             if (l.header || l.footer || !l.subs.empty()) {   // s010d: only when there are parts (an older Acorn reads it as all body)
                 layouts[table][name]["parts"] = {{"header", l.header}, {"footer", l.footer}};
                 if (!l.subs.empty()) {   // s015b: only when there are some

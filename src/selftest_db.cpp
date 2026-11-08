@@ -3126,6 +3126,43 @@ void test_report_pure(const fs::path& dir) {
           !core::check_layout(bad).empty() && !core::check_layout(tall).empty(), "");
 }
 
+// ── s016: labels ─────────────────────────────────────────────────────────────
+void test_labels_pure(const fs::path& dir) {
+    core::Layout l = sample_labels_layout();
+    check("labels: the sample's Mailing Labels -- 2 across, 24 apart, a row 520 wide (fits Letter and A4 unscaled)",
+          core::check_layout(l).empty() && core::is_labels(l) && core::labels_width(l) == 520 &&
+          core::print_scale(core::labels_width(l), core::paper_a4()) == 1.0 && core::labels_label(l) == "2 across, 24 px apart",
+          core::check_layout(l));
+    using B = core::ReportBlock;
+    const auto rows = core::label_blocks(l, 5);
+    core::Layout three = l;
+    three.across = 3;
+    check("labels: rows -- 5 two across: 3 rows (0, 2, 4); 12 three across: 4; none: none; a list: one per record",
+          rows == std::vector<B>{{core::Part::Body, -1, 0}, {core::Part::Body, -1, 2}, {core::Part::Body, -1, 4}} &&
+          core::label_blocks(three, 12).size() == 4 && core::label_blocks(l, 0).empty() &&
+          core::label_blocks(core::default_layout("t", {"a"}), 3).size() == 3, std::to_string(rows.size()));
+    const int body = core::part_height(l, core::Part::Body);
+    const auto pages = core::paginate_blocks(0, 0, std::vector<int>(6, body + l.gap), {}, 300);
+    check("labels: pages -- rows of 112 on a 300 room: 2 a page (3 pages for 12 labels two across)",
+          body == 88 && pages.size() == 3 && pages[0] == core::PrintPage{0, 2}, std::to_string(pages.size()));
+    core::Layout bad = l, neg = l;
+    bad.across = core::kLabelsMax + 1;
+    neg.gap = -8;
+    check("labels: check_layout -- 1 to 8 across, no negative gap",
+          !core::check_layout(bad).empty() && !core::check_layout(neg).empty() && core::labels_label(core::Layout{}) == "one per row", "");
+    core::Solution sol;
+    sol.layouts["addresses"][l.name] = l;
+    sol.layouts["addresses"]["plain"] = core::default_layout("addresses", {"city"});
+    sol.layouts["addresses"]["plain"].name = "plain";
+    const auto file = (dir / "labels.acorn").string();
+    const bool saved = core::save_solution(file, sol);
+    auto back = core::load_solution(file);
+    const std::string text = slurp(file);
+    check("labels: kept in the .acorn and read back (\"labels\" only on a labels layout)",
+          saved && back && *back == sol && text.find("\"labels\"") != std::string::npos &&
+          text.find("\"across\": 2") != std::string::npos, "");
+}
+
 // s015b: the sample's "Addresses by State" -- grouped, summed by group.
 void test_report_book(Gate& g, const core::Solution& sol, const std::string& P) {
     auto sch = g.introspect();
@@ -3425,6 +3462,10 @@ void test_sample(Journal& j, Gate& g, const std::string& P) {
     j.clear();
     check(P + "sample: arrives with nothing to undo (the caller clears the journal)", !j.can_undo() && !j.can_redo(), "");
     test_report_book(g, sol, P);   // s015b
+    {   // s016
+        const auto* lab = sol.layout("addresses", kSampleLabelsName);
+        check(P + "labels: the sample's Mailing Labels kept beside the report", lab && *lab == sample_labels_layout(), "");
+    }
     j.store().set_solution(nullptr, {});
     for (const char* t : {"phones", "addresses", "contacts"})
         (void)g.inner().query("DROP TABLE IF EXISTS " + g.quote_ident(t));
@@ -3725,6 +3766,7 @@ void db_tests(CheckFn fn, int& skip_count) {
         test_print_pure();                    // s015a
         test_print(e, T.ro, "sqlite: ");      // s015a: a record's layout resolved to what it prints
         test_report_pure(tmp.p);              // s015b: sub-summary parts
+        test_labels_pure(tmp.p);              // s016: labels
         {   // s005b: the door, on its own fresh fixture file
             Target J = T;
             J.rw.path = (tmp.p / "journal.sqlite").string();

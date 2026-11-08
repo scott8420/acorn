@@ -31,6 +31,8 @@
 // its groups' fields first, each sub printed where its group starts (leading)
 // or ends (trailing), its summaries worked out over that group (one GROUP BY
 // SELECT per level).
+// s016: a LABELS layout (across > 1) prints its body `across` to a row, `gap`
+// apart both ways, as many rows a page as fit -- no sub-summaries.
 
 namespace acorn {
 
@@ -136,6 +138,7 @@ void draw_part(const Cairo::RefPtr<Cairo::Context>& cr, const PreviewDoc& d, con
         case core::ObjectKind::Field:
         case core::ObjectKind::Related:
             text_in(cr, p.text, x, y, w, h, Pango::Alignment::LEFT, 0.05);
+            if (core::is_labels(L)) break;          // s016: a label is plain words
             cr->set_source_rgb(0.82, 0.82, 0.82);   // a hairline under the value, where its box was
             cr->move_to(x, y + h - 0.5);
             cr->line_to(x + w, y + h - 0.5);
@@ -187,7 +190,15 @@ void draw_page(const Cairo::RefPtr<Cairo::Context>& cr, const PreviewDoc& d, int
     for (int k = 0; k < pg.count; ++k) {
         const auto& b = d.blocks[static_cast<std::size_t>(pg.first + k)];
         if (b.at.part == core::Part::Sub) draw_part(cr, d, band_of(L, core::Part::Sub, b.at.sub), b.sub, y);
-        else draw_part(cr, d, band_of(L, core::Part::Body), d.records[static_cast<std::size_t>(b.at.record)], y);
+        else
+            for (int c = 0; c < std::max(1, L.across); ++c) {   // s016: a row of labels (one, for a list)
+                const auto r = static_cast<std::size_t>(b.at.record + c);
+                if (r >= d.records.size()) break;
+                cr->save();
+                cr->translate(c * (L.width + L.gap), 0);
+                draw_part(cr, d, band_of(L, core::Part::Body), d.records[r], y);
+                cr->restore();
+            }
         y += b.height;
     }
     if (footer > 0 && any) draw_part(cr, d, band_of(L, core::Part::Footer), lead, d.room - footer);
@@ -212,13 +223,15 @@ void Shell::paint_preview() {  // preview: the List's layout on pages, read-only
     bool kept = false;
     doc->layout = form_layout(&kept);
     doc->paper = default_paper();
-    doc->scale = core::print_scale(doc->layout.width, doc->paper);
+    doc->scale = core::print_scale(core::labels_width(doc->layout), doc->paper);   // s016: a row of labels
     doc->room = (doc->paper.height - 2 * doc->paper.margin - kFolio) / doc->scale;
     doc->title = t->name + " — " + doc->layout.name;
 
     // s015b: a sub-summary by a field the table no longer has is left out
     // (the line above the pages says so).
     std::string gone;
+    const bool labels = core::is_labels(doc->layout);   // s016: labels print no sub-summaries
+    if (labels) while (!doc->layout.subs.empty()) core::remove_sub(doc->layout, static_cast<int>(doc->layout.subs.size()) - 1);
     for (int i = static_cast<int>(doc->layout.subs.size()) - 1; i >= 0; --i)
         if (!t->column(doc->layout.subs[static_cast<std::size_t>(i)].by)) {
             gone = doc->layout.subs[static_cast<std::size_t>(i)].by;
@@ -259,7 +272,9 @@ void Shell::paint_preview() {  // preview: the List's layout on pages, read-only
                 if (gs) level[k] = std::move(*gs);
                 else why = gs.error().message;
             }
-        for (const auto& b : core::report_blocks(doc->layout, keys)) {
+        const auto run = labels ? core::label_blocks(doc->layout, static_cast<int>(page->rows.size()))
+                                : core::report_blocks(doc->layout, keys);
+        for (const auto& b : run) {
             PreviewDoc::Block blk;
             blk.at = b;
             if (b.part == core::Part::Sub) {
@@ -275,7 +290,7 @@ void Shell::paint_preview() {  // preview: the List's layout on pages, read-only
                 }
                 blk.sub = db::print_record(*m_conn, m_schema, *t, doc->layout, page->rows[static_cast<std::size_t>(b.record)], calcs, gsum, today);
             } else {
-                blk.height = core::part_height(doc->layout, core::Part::Body);
+                blk.height = core::part_height(doc->layout, core::Part::Body) + (labels ? doc->layout.gap : 0);
             }
             doc->blocks.push_back(std::move(blk));
         }
@@ -306,6 +321,7 @@ void Shell::paint_preview() {  // preview: the List's layout on pages, read-only
         says += " · grouped by ";
         for (std::size_t k = 0; k < groups.size(); ++k) says += (k ? ", " : "") + curly(groups[k]);
     }
+    if (labels) says += " · labels " + core::labels_label(doc->layout);
     if (!gone.empty()) says += " · there's no " + curly(gone) + " now -- its sub-summary is left out";
     if (doc->scale < 1.0) says += " · scaled to " + std::to_string(static_cast<int>(std::lround(doc->scale * 100))) + "%";
     auto cap = Gtk::make_managed<Gtk::Label>(why.empty() ? says : "Could not read the records: " + why);

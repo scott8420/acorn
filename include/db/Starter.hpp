@@ -40,5 +40,9 @@ inline constexpr const char* kSampleListName = "Contact List";
 core::Layout sample_report_layout();
 inline constexpr const char* kSampleReportName = "Addresses by State";
 inline constexpr const char* kSampleCountName = "how_many";
+// s016: and "Mailing Labels" -- addresses two across, 24 px apart: the
+// contact's last name, street, city / region / postal code. Passes check_layout.
+core::Layout sample_labels_layout();
+inline constexpr const char* kSampleLabelsName = "Mailing Labels";
 
 }  // namespace acorn::db
