@@ -2811,6 +2811,24 @@ void test_value_list_pure(const fs::path& dir) {
         ptext.assign((std::istreambuf_iterator<char>(pi)), std::istreambuf_iterator<char>());
     }
     check("value list: a solution without any never writes the key", !ptext.empty() && ptext.find("value_lists") == std::string::npos, "");
+    // s025a: only values from the list -- said, kept, written only when on.
+    core::Solution st;
+    st.points_at = sol.points_at;
+    st.lists["t"]["only"] = core::ValueList{"t", "only", {"a", "b"}};
+    st.lists["t"]["only"].strict = true;
+    st.lists["t"]["free"] = core::ValueList{"t", "free", {"a"}};
+    const auto sf = (dir / "vl_strict.acorn").string();
+    std::string stext;
+    auto sback = core::save_solution(sf, st) ? core::load_solution(sf) : std::nullopt;
+    { std::ifstream si(sf); stext.assign((std::istreambuf_iterator<char>(si)), std::istreambuf_iterator<char>()); }
+    std::size_t keys = 0;
+    for (std::size_t at = stext.find("only_from_list"); at != std::string::npos; at = stext.find("only_from_list", at + 1)) ++keys;
+    check("value list: \"only values from the list\" -- said in its words, round-trips, the key written only when on",
+          sback && sback->list("t", "only") && sback->list("t", "only")->strict && sback->list("t", "free") &&
+              !sback->list("t", "free")->strict && keys == 1 &&
+              core::value_list_says(st.lists["t"]["only"]) == "a · b -- only these" &&
+              core::value_list_says(st.lists["t"]["free"]) == "a",
+          core::value_list_says(st.lists["t"]["only"]));
 }
 
 void test_value_lists(Engine* e, const ConnectParams& ro, const std::string& P) {
@@ -2838,6 +2856,18 @@ void test_value_lists(Engine* e, const ConnectParams& ro, const std::string& P) 
           m2 && same && after_same == "Change Value List “kinds”" && m3 && !sol.list("orders", "kinds") &&
           sol.list("orders", "phone kinds") && j.undo_label() == "Change Value List “kinds”",
           m3 ? j.undo_label() : m3.error().message);
+    {   // s025a: ticking "only values from the list" is a change, one step; Ctrl+Z unticks it
+        auto strict = *sol.list("orders", "phone kinds");
+        strict.strict = true;
+        auto ms = verbs::save_value_list(j, strict, "phone kinds");
+        const bool on = sol.list("orders", "phone kinds") && sol.list("orders", "phone kinds")->strict;
+        auto us = j.undo();
+        check(P + "value lists: only values from the list -- a change, one step; Ctrl+Z takes it off",
+              ms && on && j.can_redo() && us && !sol.list("orders", "phone kinds")->strict,
+              ms ? j.redo_label() : ms.error().message);
+        (void)j.redo();
+        (void)j.undo();
+    }
     auto u = j.undo();
     auto del = verbs::delete_value_list(j, "orders", "kinds");
     auto ud = del ? j.undo() : std::expected<std::string, Error>(std::unexpected(del.error()));

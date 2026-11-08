@@ -429,8 +429,9 @@ Gtk::Fixed* Shell::layout_part(const core::Layout& L, core::Part part, bool edit
                 holder->append(*cb);
                 w = holder;
             } else if (const core::ValueList* kv = o.list.empty() ? nullptr : m_solution.list(t->name, o.list);
-                       kv && !kv->shows.empty() && form_list(t->name, o.list)) {
+                       kv && (!kv->shows.empty() || kv->strict) && form_list(t->name, o.list)) {
                 // s014d: a key showing another field -- a pick-only drop-down of the names.
+                // s025a: so is a list that offers only its values.
                 w = list_pick(*kv, *form_list(t->name, o.list), o.field, shown, row_id, gen);
             } else {
                 // s014d: any other value list adds a drop arrow beside the box.

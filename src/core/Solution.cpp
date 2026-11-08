@@ -219,6 +219,7 @@ std::optional<Solution> load_solution(const std::string& file) {
                 for (auto& [name, vj] : named.items()) {
                     if (!vj.is_object() || !check_value_list_name(name).empty()) continue;
                     ValueList v{table, name, {}, str_or_empty(vj, "from"), str_or_empty(vj, "field"), str_or_empty(vj, "shows")};
+                    if (auto it = vj.find("only_from_list"); it != vj.end() && it->is_boolean()) v.strict = it->get<bool>();   // s025a
                     if (auto vs = vj.find("values"); vs != vj.end() && vs->is_array())
                         for (const auto& x : *vs) if (x.is_string() && !x.get<std::string>().empty()) v.values.push_back(x.get<std::string>());
                     if (v.typed() ? v.values.empty() || !v.from.empty() : v.from.empty() || !v.values.empty())
@@ -332,6 +333,7 @@ bool save_solution(const std::string& file, const Solution& s) {
                     vj["from"] = v.from; vj["field"] = v.field;
                     if (!v.shows.empty()) vj["shows"] = v.shows;
                 }
+                if (v.strict) vj["only_from_list"] = true;   // s025a: only when it says something
                 lists[table][name] = std::move(vj);
             }
         j["value_lists"] = std::move(lists);

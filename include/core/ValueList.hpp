@@ -25,6 +25,9 @@ struct ValueList {
     std::string from;                 // from a field: the table it reads
     std::string field;                // ... the field whose values it offers (what a pick saves)
     std::string shows;                // ... optional: a field of `from` shown in place of the value
+    // s025a: only its values -- a box offering it is a pick-only drop-down
+    // (no typing), as one showing another field always was.
+    bool        strict = false;
     bool typed() const { return field.empty(); }
     bool operator==(const ValueList&) const = default;
 };

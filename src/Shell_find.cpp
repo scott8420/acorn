@@ -369,8 +369,20 @@ void Shell::paint_find() {  // find: the layout's boxes, empty
             l->add_css_class("acorn-form-static");
             w = l;
         } else {
-            w = entry("field|" + o.field, "find.field." + o.field,
-                      col && col->type == db::FieldType::Date ? "YYYY-MM-DD, <, >" : nullptr);
+            auto* e = entry("field|" + o.field, "find.field." + o.field,
+                            col && col->type == db::FieldType::Date ? "YYYY-MM-DD, <, >" : nullptr);
+            w = e;
+            // s025a: a box offering a value list offers it here too -- a pick finds exactly that value.
+            if (const db::ListItems* li = o.list.empty() || !m_solution.list(t->name, o.list) ? nullptr : form_list(t->name, o.list)) {
+                auto line = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 4);
+                e->set_hexpand(true);
+                line->append(*e);
+                auto* arrow = list_arrow(*li, e, o.field, "", gen);
+                arrow->set_name("find.list." + o.field);
+                arrow->set_tooltip_text("Pick a value to find exactly it (=value)");
+                line->append(*arrow);
+                w = line;
+            }
         }
         w->set_size_request(o.w, o.h);
         fixed->put(*w, o.x, o.y - top);

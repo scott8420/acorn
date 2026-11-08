@@ -237,13 +237,21 @@ void Shell::list_section(const db::Table& t) {  // lists: the Value lists sectio
         save->add_css_class("acorn-primary");
         buttons->append(*cancel);
         buttons->append(*save);
+        // s025a: only its values -- a pick-only drop-down where a box offers it.
+        auto strict_cb = Gtk::make_managed<Gtk::CheckButton>("Only values from the list");
+        strict_cb->set_name("tables.list.strict");
+        strict_cb->set_active(m_vl_typed.strict);
+        strict_cb->set_tooltip_text("Ticked: a box offering it is a drop-down only -- no other value can be typed there");
+        strict_cb->set_hexpand(true);
+        buttons->prepend(*strict_cb);
         ed->attach(*buttons, 0, 4, 4, 1);
         body->append(*ed);
 
         // Read the widgets into m_vl_typed (and the text as typed).
-        auto gather = [this, name_e, text, from_dd, field_dd, shows_dd, tables, fields, table] {
+        auto gather = [this, name_e, text, from_dd, field_dd, shows_dd, tables, fields, table, strict_cb] {
             m_vl_typed.table = table;
             m_vl_typed.name = name_e->get_text();
+            m_vl_typed.strict = strict_cb->get_active();   // s025a
             if (text) {
                 m_vl_typed_text = text->get_buffer()->get_text();
                 m_vl_typed.values = core::parse_list_values(m_vl_typed_text);
@@ -287,6 +295,7 @@ void Shell::list_section(const db::Table& t) {  // lists: the Value lists sectio
         };
         check();
         name_e->signal_changed().connect(check);
+        strict_cb->signal_toggled().connect(check);   // s025a
         if (text) text->get_buffer()->signal_changed().connect(check);
         if (field_dd) field_dd->property_selected().signal_changed().connect(check);
         if (shows_dd) shows_dd->property_selected().signal_changed().connect(check);
@@ -414,7 +423,9 @@ Gtk::Widget* Shell::list_pick(const core::ValueList& v, const db::ListItems& li,
         dd->set_expression(Gtk::PropertyExpression<Glib::ustring>::create(Gtk::StringObject::get_type(), "string"));
         dd->set_enable_search(true);
     }
-    dd->set_tooltip_text("From " + curly(v.name) + ": a pick saves the " + curly(v.field) + " -- you see the " + curly(v.shows) +
+    dd->set_tooltip_text((v.shows.empty() ? "From " + curly(v.name) + ": only its values"   // s025a: a strict list
+                                          : "From " + curly(v.name) + ": a pick saves the " + curly(v.field) + " -- you see the " +
+                                                curly(v.shows)) +
                          (li.more ? " (the first " + std::to_string(core::kValueListMax) + ")" : std::string{}));
     dd->property_selected().signal_changed().connect([this, dd, values, field, row_id, gen] {
         if (m_browse_painting || gen != m_view_gen) return;
@@ -464,8 +475,12 @@ Gtk::Widget* Shell::list_arrow(const db::ListItems& li, Gtk::Entry* e, const std
         const int i = r->get_index();
         if (i < 0 || static_cast<std::size_t>(i) >= values->size()) return;
         const std::string value = (*values)[static_cast<std::size_t>(i)];
-        e->set_text(value);
         pop->popdown();
+        if (m_finding) {   // s025a: a Find box -- exactly that value, nothing saved
+            e->set_text("=" + value);
+            return;
+        }
+        e->set_text(value);
         Glib::signal_idle().connect_once([this, row_id, field, value, gen] {
             if (gen == m_view_gen) commit_field(row_id, field, value);
         });

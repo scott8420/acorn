@@ -64,15 +64,16 @@ std::string check_value_list(const ValueList& v, const std::vector<std::string>&
 }
 
 std::string value_list_says(const ValueList& v) {
+    const std::string only = v.strict ? " -- only these" : "";   // s025a
     if (!v.typed()) {
-        if (v.shows.empty()) return "every " + curly(v.field) + " of " + curly(v.from);
-        return curly(v.field) + " of " + curly(v.from) + ", showing " + curly(v.shows);
+        if (v.shows.empty()) return "every " + curly(v.field) + " of " + curly(v.from) + only;
+        return curly(v.field) + " of " + curly(v.from) + ", showing " + curly(v.shows) + only;
     }
     constexpr std::size_t kShown = 4;
     std::string s;
     for (std::size_t i = 0; i < v.values.size() && i < kShown; ++i) s += (i ? " · " : "") + v.values[i];
     if (v.values.size() > kShown) s += "  + " + std::to_string(v.values.size() - kShown) + " more";
-    return s;
+    return s + only;
 }
 
 std::vector<ListItem> typed_items(const ValueList& v) {
