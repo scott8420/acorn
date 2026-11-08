@@ -169,7 +169,8 @@ struct BoxDef {
 
 // s010: a layout -- also kept in the solution, never the database. Its own
 // table and name say which (core::Layout).
-using Record = std::variant<TableDef, RowDef, FieldData, BoxDef, core::Layout>;
+// s014a: a calculation field -- in the solution too (core::Calc).
+using Record = std::variant<TableDef, RowDef, FieldData, BoxDef, core::Layout, core::Calc>;
 
 // ── the DDL writer: one place, per dialect, shared by preview and act ─────────
 // The New Table window shows exactly the string the store will run.
@@ -266,10 +267,15 @@ public:
     static bool is_layout(const Id& id) { return id.rfind("layout:", 0) == 0; }
     // A record of the solution, not the database: a step of only these needs
     // no transaction and works on a read-only connection.
-    static bool is_local(const Id& id) { return is_box(id) || is_layout(id); }
+    static bool is_local(const Id& id) { return is_box(id) || is_layout(id) || is_calc(id); }
+    // s014a: a calculation field, by table and name -- "calc:<bytes in table>:<table>/<name>".
+    static Id calc_id(const std::string& table, const std::string& name);
+    static bool parse_calc_id(const Id& id, std::string& table, std::string& name);
+    static bool is_calc(const Id& id) { return id.rfind("calc:", 0) == 0; }
     // The solution the box / layout records live in, and how to save it
     // (false: not saved -- the step is refused). None set: such a step is refused.
     void set_solution(core::Solution* s, std::function<bool()> save) { m_solution = s; m_save_solution = std::move(save); }
+    const core::Solution* solution() const { return m_solution; }   // s014a: the calc verbs check against it
     // "“customers” record 7" -- for messages.
     static std::string describe(const Id& id);
 
@@ -516,6 +522,20 @@ std::expected<void, Error> delete_layout(Journal& j, const std::string& table, c
 // name. The same name: no step.
 std::expected<void, Error> rename_layout(Journal& j, const std::string& table, const std::string& from,
                                          const std::string& to);
+
+// s014a -- calculation fields, kept in the solution (read-only connections
+// too). Save Calculation keeps `c` under its table and name: "New Calculation
+// “n”" when there was none, else "Change Calculation “n”". `was` (a name the
+// table has a calculation by) makes it a rename in the same step: "Change
+// Calculation “was”" -- the old name gone, `c` kept. Refused in words: no
+// such table, anything core::check_calc refuses (a bad name, a field's name,
+// an expression that doesn't parse, a name it reads that the table hasn't, a
+// loop), a calculation by the new name already there. The same: no step.
+std::expected<void, Error> save_calc(Journal& j, const core::Calc& c, const std::string& was = {});
+// Delete Calculation “n”. Refused in words when there's none by that name.
+// Calculations and layouts that read it are left as they are (they show "?"
+// and say why, until it comes back -- Ctrl+Z).
+std::expected<void, Error> delete_calc(Journal& j, const std::string& table, const std::string& name);
 
 // What a design step would do to the live table, as the SQL put() will run
 // (the designer's preview): `want` is the table as the designer has it.

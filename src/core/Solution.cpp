@@ -52,6 +52,19 @@ const Layout* Solution::layout(const std::string& table, const std::string& name
     return n == t->second.end() ? nullptr : &n->second;
 }
 
+const Calc* Solution::calc(const std::string& table, const std::string& name) const {
+    auto t = calcs.find(table);
+    if (t == calcs.end()) return nullptr;
+    auto n = t->second.find(name);
+    return n == t->second.end() ? nullptr : &n->second;
+}
+
+const std::map<std::string, Calc>& Solution::calcs_of(const std::string& table) const {
+    static const std::map<std::string, Calc> none;
+    auto t = calcs.find(table);
+    return t == calcs.end() ? none : t->second;
+}
+
 std::optional<Solution> load_solution(const std::string& file) {
     std::ifstream in(file);
     if (!in) return std::nullopt;
@@ -124,6 +137,15 @@ std::optional<Solution> load_solution(const std::string& file) {
                     s.layouts[table][name] = std::move(l);
                 }
             }
+        if (auto it = j.find("calcs"); it != j.end() && it->is_object())   // s014a
+            for (auto& [table, named] : it->items()) {
+                if (!named.is_object()) continue;
+                for (auto& [name, cj] : named.items()) {
+                    if (!cj.is_object() || !cj.contains("expr") || !cj["expr"].is_string()) continue;
+                    if (!check_calc_name(name).empty()) continue;   // never a name Acorn wouldn't make
+                    s.calcs[table][name] = Calc{table, name, cj["expr"].get<std::string>()};
+                }
+            }
         return s;
     } catch (const std::exception&) {
         return std::nullopt;
@@ -173,6 +195,12 @@ bool save_solution(const std::string& file, const Solution& s) {
                 layouts[table][name]["parts"] = {{"header", l.header}, {"footer", l.footer}};
         }
     j["layouts"] = std::move(layouts);
+    if (!s.calcs.empty()) {   // s014a: only when there are some (an older Acorn never sees the key)
+        nlohmann::json calcs = nlohmann::json::object();
+        for (const auto& [table, named] : s.calcs)
+            for (const auto& [name, c] : named) calcs[table][name] = {{"expr", c.expr}};
+        j["calcs"] = std::move(calcs);
+    }
     std::error_code ec;
     const fs::path p(file);
     if (p.has_parent_path()) fs::create_directories(p.parent_path(), ec);

@@ -1048,6 +1048,16 @@ bool Store::parse_layout_id(const Id& id, std::string& table, std::string& name)
     return !table.empty() && !name.empty();
 }
 
+Store::Id Store::calc_id(const std::string& table, const std::string& name) {
+    return "calc:" + std::to_string(table.size()) + ":" + table + "/" + name;
+}
+
+bool Store::parse_calc_id(const Id& id, std::string& table, std::string& name) {
+    if (!is_calc(id)) return false;
+    // The same shape as a layout's id after its prefix.
+    return parse_layout_id("layout:" + id.substr(5), table, name);
+}
+
 Store::Id Store::field_id(const std::string& table, const std::string& column) {
     return "field:" + std::to_string(table.size()) + ":" + table + ":" + column;
 }
@@ -1086,6 +1096,7 @@ std::string Store::describe(const Id& id) {
     if (is_box(id)) return curly(id.substr(4)) + "'s place in the Graph";
     std::string name;
     if (parse_layout_id(id, table, name)) return "the layout " + curly(name) + " of " + curly(table);
+    if (parse_calc_id(id, table, name)) return "the calculation " + curly(name) + " of " + curly(table);
     return curly(name_of(id));
 }
 
@@ -1126,6 +1137,12 @@ std::optional<Record> Store::get(const Id& id) const {
         std::string t, n;
         if (!m_solution || !parse_layout_id(id, t, n)) return std::nullopt;
         if (const auto* l = m_solution->layout(t, n)) return *l;
+        return std::nullopt;
+    }
+    if (is_calc(id)) {   // s014a: from the solution
+        std::string t, n;
+        if (!m_solution || !parse_calc_id(id, t, n)) return std::nullopt;
+        if (const auto* c = m_solution->calc(t, n)) return *c;
         return std::nullopt;
     }
     return std::nullopt;   // "new:..." -- a declaration, never a record
@@ -1403,8 +1420,9 @@ void Store::put(const Id& id, const std::optional<Record>& v) {
 // save that fails puts the solution back as it was -- no step.
 void Store::put_local(const Id& id, const std::optional<Record>& v) {
     if (!m_solution) {
-        fail(Error::Code::Unsupported, is_box(id) ? "there is no solution to keep the Graph's boxes in"
-                                                  : "there is no solution to keep layouts in");
+        fail(Error::Code::Unsupported, is_box(id)    ? "there is no solution to keep the Graph's boxes in"
+                                       : is_calc(id) ? "there is no solution to keep calculations in"
+                                                     : "there is no solution to keep layouts in");
         return;
     }
     const core::Solution before = *m_solution;
@@ -1413,6 +1431,18 @@ void Store::put_local(const Id& id, const std::optional<Record>& v) {
         const std::string t = id.substr(4);
         if (v) m_solution->boxes[t] = {std::get<BoxDef>(*v).x, std::get<BoxDef>(*v).y};
         else   m_solution->boxes.erase(t);
+    } else if (is_calc(id)) {   // s014a
+        std::string t, n;
+        if (!parse_calc_id(id, t, n)) { fail(Error::Code::Internal, "not a calculation: " + id); return; }
+        if (v && !std::holds_alternative<core::Calc>(*v)) { fail(Error::Code::Internal, id + " given something else"); return; }
+        if (v) {
+            const auto& c = std::get<core::Calc>(*v);
+            if (c.table != t || c.name != n) { fail(Error::Code::Internal, id + " given another calculation"); return; }
+            m_solution->calcs[t][n] = c;
+        } else if (auto it = m_solution->calcs.find(t); it != m_solution->calcs.end()) {
+            it->second.erase(n);
+            if (it->second.empty()) m_solution->calcs.erase(it);
+        }
     } else {
         std::string t, n;
         if (!parse_layout_id(id, t, n)) { fail(Error::Code::Internal, "not a layout: " + id); return; }
@@ -2538,6 +2568,47 @@ std::expected<void, Error> rename_layout(Journal& j, const std::string& table, c
     });
 }
 
+std::expected<void, Error> save_calc(Journal& j, const core::Calc& c, const std::string& was) {
+    Store& st = j.store();
+    if (!st.solution()) return std::unexpected(Error{Error::Code::Unsupported, "there is no solution to keep calculations in"});
+    st.forget_schema();
+    const Table* t = st.table_info(c.table);
+    if (st.failed()) { Error e = st.error(); st.clear_failed(); return std::unexpected(e); }
+    if (!t) return std::unexpected(Error{Error::Code::NotFound, "there's no table " + curly(c.table)});
+    std::vector<std::string> fields;
+    for (const auto& col : t->columns) fields.push_back(col.name);
+    auto calcs = st.solution()->calcs_of(c.table);
+    const bool renaming = !was.empty() && was != c.name;
+    if (!was.empty() && !calcs.contains(was))
+        return std::unexpected(Error{Error::Code::NotFound, curly(c.table) + " has no calculation " + curly(was)});
+    if (renaming) {
+        if (calcs.contains(c.name))
+            return std::unexpected(Error{Error::Code::Exists, curly(c.table) + " already has a calculation " + curly(c.name)});
+        calcs.erase(was);
+    }
+    if (auto why = core::check_calc(c, fields, calcs); !why.empty())
+        return std::unexpected(Error{Error::Code::Unsupported, why});
+    const auto id = Store::calc_id(c.table, c.name);
+    if (!renaming) {
+        const auto now = st.get(id);
+        if (now && std::get<core::Calc>(*now) == c) return {};   // already kept: no step
+        return j.run((now ? "Change Calculation " : "New Calculation ") + curly(c.name), {id},
+                     [&](Store& s) { s.put(id, c); });
+    }
+    const auto old = Store::calc_id(c.table, was);
+    return j.run("Change Calculation " + curly(was), {old, id}, [&](Store& s) {
+        s.put(old, std::nullopt);
+        s.put(id, c);
+    });
+}
+
+std::expected<void, Error> delete_calc(Journal& j, const std::string& table, const std::string& name) {
+    const auto id = Store::calc_id(table, name);
+    if (!j.store().get(id))
+        return std::unexpected(Error{Error::Code::NotFound, curly(table) + " has no calculation " + curly(name)});
+    return j.run("Delete Calculation " + curly(name), {id}, [&](Store& s) { s.put(id, std::nullopt); });
+}
+
 std::expected<std::vector<std::string>, Error> preview(Journal& j, const TableDef& want) {
     Store& st = j.store();
     st.forget_schema();
@@ -2787,6 +2858,15 @@ const std::vector<Verb>& all() {
              l.name = "walk to rename";
              return save_layout(j, l);
          }, true},
+        // s014a -- calculation fields, in the solution too.
+        {"New Calculation", [](Journal& j) { return save_calc(j, core::Calc{kDesign, "twice", "n * 2"}); },
+         design_fixture, true},
+        {"Change Calculation", [](Journal& j) { return save_calc(j, core::Calc{kDesign, "loud", "Upper(title) & \"!\""}); },
+         [](Journal& j) { return design_fixture(j).and_then([&] { return save_calc(j, core::Calc{kDesign, "loud", "Upper(title)"}); }); }, true},
+        {"Rename Calculation", [](Journal& j) { return save_calc(j, core::Calc{kDesign, "renamed", "n + 1"}, "to_rename"); },
+         [](Journal& j) { return design_fixture(j).and_then([&] { return save_calc(j, core::Calc{kDesign, "to_rename", "n + 1"}); }); }, true},
+        {"Delete Calculation", [](Journal& j) { return delete_calc(j, kDesign, "gone"); },
+         [](Journal& j) { return design_fixture(j).and_then([&] { return save_calc(j, core::Calc{kDesign, "gone", "Length(title)"}); }); }, true},
         {"Delete Record (Set Empty)", [](Journal& j) -> std::expected<void, Error> {
              auto row = newest_parent(j);
              if (!row) return std::unexpected(row.error());

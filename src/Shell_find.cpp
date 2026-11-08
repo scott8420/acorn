@@ -283,6 +283,11 @@ void Shell::paint_find() {  // find: the layout's boxes, empty
             } else {
                 w = find_label("missing link “" + o.from + "." + o.shows + "” -- not searched", "acorn-missing");
             }
+        } else if (!t->column(o.field) && m_solution.calc(t->name, o.field)) {   // s014a
+            auto l = find_label("calculation -- not searched", "acorn-null");
+            l->add_css_class("acorn-form-static");
+            l->set_tooltip_text("“" + o.field + "” is worked out by Acorn, not kept in the database -- Find can't ask it yet");
+            w = l;
         } else if (core::missing_field(o, fields)) {
             w = find_label("missing field “" + o.field + "”", "acorn-missing");
         } else if (const db::Column* col = t->column(o.field); col && col->type == db::FieldType::Container) {

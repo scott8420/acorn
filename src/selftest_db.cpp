@@ -2351,6 +2351,223 @@ void test_layouts(Engine* e, const ConnectParams& ro, const std::string& P) {
 }
 
 
+// ── s014a: calculation fields ────────────────────────────────────────────────
+void test_calc_pure(const fs::path& dir) {
+    using core::CalcValue;
+    // A record of `people`: the language over it, each answer as shown.
+    const std::map<std::string, CalcValue> rec = {
+        {"first", CalcValue{std::string("Ada")}}, {"last", CalcValue{std::string("Lovelace")}},
+        {"qty", CalcValue{3.0}}, {"price", CalcValue{2.5}}, {"none", CalcValue{}},
+        {"born", CalcValue{std::string("1815-12-10")}}, {"word", CalcValue{std::string("abc")}},
+        {"numtext", CalcValue{std::string(" 12.5 ")}}, {"accent", CalcValue{std::string("Ünïcode")}},
+    };
+    const core::CalcLookup look = [&](const std::string& n) -> std::optional<CalcValue> {
+        auto it = rec.find(n);
+        return it == rec.end() ? std::nullopt : std::optional<CalcValue>(it->second);
+    };
+    const auto run = [&](const std::string& src) -> std::string {
+        auto p = core::parse_calc(src);
+        if (auto* why = std::get_if<std::string>(&p)) return "PARSE: " + *why;
+        auto o = core::evaluate(std::get<core::CalcExpr>(p), look, "2026-11-07");
+        return o.ok() ? core::calc_text(o) : "ERR: " + o.error;
+    };
+    struct Case { const char* src; const char* want; };
+    const Case cases[] = {
+        {"1 + 2 * 3", "7"}, {"(1 + 2) * 3", "9"}, {"10 / 4", "2.5"}, {"-qty + 1", "-2"}, {"qty * price", "7.5"},
+        {"first & \" \" & last", "Ada Lovelace"}, {"\"say \\\"hi\\\"\"", "say \"hi\""}, {"qty & \"x\"", "3x"},
+        {"none + 1", ""}, {"none & \"!\"", "!"}, {"numtext * 2", "25"}, {"1 / 3", "0.3333333333"},
+        {"Length(last)", "8"}, {"length(accent)", "7"}, {"Upper(first)", "ADA"}, {"LOWER(last)", "lovelace"},
+        {"Left(last, 4)", "Love"}, {"Right(last, 3)", "ace"}, {"Left(accent, 2)", "Ün"}, {"Right(first, 99)", "Ada"},
+        {"Left(first, -1)", ""}, {"Trim(\"  x y \")", "x y"}, {"Round(2.567, 2)", "2.57"}, {"Round(2.5)", "3"},
+        {"If(qty > 2, \"many\", \"few\")", "many"}, {"If(qty > 5, \"many\")", ""}, {"If(none, 1, 2)", "2"},
+        {"qty = 3", "1"}, {"qty <> 3", "0"}, {"qty >= 3 and price < 3", "1"}, {"not (qty = 3) or none", "0"},
+        {"born < Today()", "1"}, {"Today()", "2026-11-07"}, {"\"b\" > \"a\"", "1"}, {"first = \"Ada\"", "1"},
+        {"If(1, \"y\", 1 / 0)", "y"}, {"qty ≠ 4", "1"},
+    };
+    std::string bad;
+    for (const auto& c : cases)
+        if (const auto got = run(c.src); got != c.want) bad += std::string(c.src) + " -> " + got + " (want " + c.want + "); ";
+    check("calc: the language -- arithmetic, &, compare, and / or / not, every function, empty", bad.empty(), bad);
+    const auto e1 = run("word + 1"), e2 = run("qty / 0"), e3 = run("nope & 1"), e4 = run("Left(first, word)");
+    check("calc: a record that can't be worked out says why (a word as a number, / 0, no such field)",
+          e1 == "ERR: “abc” is not a number" && e2 == "ERR: divided by zero" &&
+          e3 == "ERR: there's no field “nope”" && e4.rfind("ERR: ", 0) == 0, e1 + " | " + e2 + " | " + e3);
+    std::string pbad;
+    for (const char* src : {"", "1 +", "(1 + 2", "Upper(first", "Upper()", "Left(first)", "Nope(1)", "1 2", "\"open",
+                            "Upper", "qty $ 2", "2abc", "and"})
+        if (run(src).rfind("PARSE: ", 0) != 0) pbad += std::string(src) + " -> " + run(src) + "; ";
+    check("calc: what doesn't parse is refused in words", pbad.empty(), pbad);
+    check("calc: the words name the trouble",
+          run("(1 + 2") == "PARSE: a closing ) is missing after “(1 + 2”" &&
+          run("Left(first)") == "PARSE: “Left” takes 2 values, not 1" &&
+          run("Nope(1)") == "PARSE: there's no function “Nope”", run("(1 + 2") + " | " + run("Left(first)"));
+    auto pe = core::parse_calc("first & last & first & qty");
+    check("calc: the names an expression reads -- each once, in order",
+          std::holds_alternative<core::CalcExpr>(pe) &&
+          std::get<core::CalcExpr>(pe).names == std::vector<std::string>{"first", "last", "qty"}, "");
+
+    // The check before keeping one.
+    const std::vector<std::string> fields = {"id", "first", "last", "qty"};
+    std::map<std::string, core::Calc> calcs = {{"full", {"people", "full", "first & \" \" & last"}},
+                                              {"shout", {"people", "shout", "Upper(full)"}}};
+    check("calc: a good one passes; one reading another passes",
+          core::check_calc({"people", "twice", "qty * 2"}, fields, calcs).empty() &&
+          core::check_calc({"people", "loud", "shout & \"!\""}, fields, calcs).empty(), "");
+    const auto c1 = core::check_calc({"people", "x", "qty + missing"}, fields, calcs);
+    const auto c2 = core::check_calc({"people", "full", "shout"}, fields, calcs);
+    const auto c3 = core::check_calc({"people", "first", "1"}, fields, calcs);
+    const auto c4 = core::check_calc({"people", "two words", "1"}, fields, calcs);
+    const auto c5 = core::check_calc({"people", "if", "1"}, fields, calcs);
+    const auto c6 = core::check_calc({"people", "self", "self + 1"}, fields, calcs);
+    check("calc: refused in words -- a name it reads isn't there, a loop, a field's name, a bad name, a word of the language",
+          c1 == "there's no field “missing” in “people”" && c2.find("reading itself") != std::string::npos &&
+          c3.find("already has a field") != std::string::npos && !c4.empty() && !c5.empty() &&
+          c6.find("reading itself") != std::string::npos, c1 + " | " + c2 + " | " + c3);
+
+    // A record's every calculation, through the bridge from the database's values.
+    Table t;
+    t.name = "people";
+    t.columns = {{"id", "INTEGER", FieldType::Integer, false, std::nullopt, 1, true},
+                 {"first", "TEXT", FieldType::Text, true, std::nullopt, 0, false},
+                 {"last", "TEXT", FieldType::Text, true, std::nullopt, 0, false},
+                 {"qty", "DECIMAL", FieldType::Number, true, std::nullopt, 0, false},
+                 {"ok", "BOOLEAN", FieldType::Boolean, true, std::nullopt, 0, false}};
+    calcs["twice"] = {"people", "twice", "qty * 2"};
+    calcs["okay"] = {"people", "okay", "If(ok, \"yes\", \"no\")"};
+    calcs["broken"] = {"people", "broken", "first +"};
+    calcs["loop_a"] = {"people", "loop_a", "loop_b"};
+    calcs["loop_b"] = {"people", "loop_b", "loop_a & 1"};
+    calcs["leans"] = {"people", "leans", "broken & 1"};
+    auto out = row_calcs(t, {Value(1), Value("Ada"), Value("Lovelace"), Value("12.50"), Value("t")}, calcs, "2026-11-07");
+    check("calc: a record's calculations -- one reading another, a number given as text, a Yes-No as \"t\"",
+          core::calc_text(out["full"]) == "Ada Lovelace" && core::calc_text(out["shout"]) == "ADA LOVELACE" &&
+          core::calc_text(out["twice"]) == "25" && core::calc_text(out["okay"]) == "yes",
+          core::calc_text(out["full"]) + "|" + core::calc_text(out["twice"]) + "|" + core::calc_text(out["okay"]));
+    check("calc: ... one that doesn't parse, a loop, one reading a broken one -- \"?\" and the words, the rest unharmed",
+          core::calc_text(out["broken"]) == "?" && !out["broken"].error.empty() &&
+          !out["loop_a"].ok() && out["loop_a"].error.find("itself") != std::string::npos && !out["loop_b"].ok() &&
+          !out["leans"].ok() && out["leans"].error.find("broken") != std::string::npos,
+          out["loop_a"].error + " | " + out["leans"].error);
+    auto empty = row_calcs(t, {Value(2), Value(), Value(), Value(), Value(0)}, calcs, "2026-11-07");
+    check("calc: an empty record -- empty sums, empty joins as nothing",
+          core::calc_text(empty["twice"]) == "" && core::calc_text(empty["full"]) == " " && core::calc_text(empty["okay"]) == "no",
+          "[" + core::calc_text(empty["full"]) + "]");
+    check("calc: values from the database -- NULL, whole, real, text, decimal text, Yes-No, a date, a blob",
+          std::holds_alternative<std::monostate>(calc_value(Value(), FieldType::Text)) &&
+          calc_value(Value(4), FieldType::Integer) == CalcValue{4.0} && calc_value(Value(1.5), FieldType::Number) == CalcValue{1.5} &&
+          calc_value(Value("x"), FieldType::Text) == CalcValue{std::string("x")} &&
+          calc_value(Value("3.10"), FieldType::Number) == CalcValue{3.1} && calc_value(Value("f"), FieldType::Boolean) == CalcValue{0.0} &&
+          calc_value(Value("2026-01-02"), FieldType::Date) == CalcValue{std::string("2026-01-02")} &&
+          std::holds_alternative<std::monostate>(calc_value(Value(Blob{1}), FieldType::Container)), "");
+    check("calc: numbers shown -- whole without .0, others to 10 digits",
+          core::calc_text(CalcValue{3.0}) == "3" && core::calc_text(CalcValue{-0.5}) == "-0.5" &&
+          core::calc_text(CalcValue{1e20}) == "1e+20" && core::today_iso().size() == 10, core::today_iso());
+
+    // Ids and the .acorn.
+    std::string ti, na;
+    check("calc: ids round-trip, a '/' kept; a calculation is the solution's",
+          Store::parse_calc_id(Store::calc_id("a/b", "c"), ti, na) && ti == "a/b" && na == "c" &&
+          !Store::parse_calc_id(Store::layout_id("a", "c"), ti, na) && Store::is_local(Store::calc_id("x", "y")),
+          ti + "|" + na);
+    core::Solution sol;
+    sol.points_at.engine = "sqlite";
+    sol.points_at.path = (dir / "calc.sqlite").string();
+    sol.calcs["people"]["full"] = {"people", "full", "first & \" \" & last"};
+    sol.calcs["people"]["twice"] = {"people", "twice", "qty * 2"};
+    const auto file = (dir / "calc.acorn").string();
+    auto back = core::save_solution(file, sol) ? core::load_solution(file) : std::nullopt;
+    check("calc: round-trip in the .acorn", back && *back == sol && back->calc("people", "full"), "");
+    {
+        std::ofstream g(dir / "calc_half.acorn");
+        g << R"({"acorn": 1, "calcs": {"people": {"good": {"expr": "1"}, "bad name": {"expr": "1"}, "noexpr": {}}}})";
+    }
+    auto half = core::load_solution((dir / "calc_half.acorn").string());
+    check("calc: a broken calculation is skipped, the rest of the file reads; none -> no \"calcs\" key",
+          half && half->calc("people", "good") && !half->calc("people", "bad name") && !half->calc("people", "noexpr") &&
+          slurp(dir / "lay.acorn").find("calcs") == std::string::npos, "");
+}
+
+void test_calcs(Engine* e, const ConnectParams& ro, const std::string& P) {
+    auto c = e->open(ro);
+    if (!c) { check(P + "calcs: open read-only", false, c.error().message); return; }
+    Gate g(std::move(*c));
+    Journal j(g, e->dialect(), e->caps());
+    core::Solution sol;
+    int saves = 0;
+    j.store().set_solution(&sol, [&] { ++saves; return true; });
+    const core::Calc label{"customers", "label", "Upper(name) & \" <\" & email & \">\""};
+    auto m = verbs::save_calc(j, label);
+    check(P + "calcs: New Calculation on a READ-ONLY connection -- a step, saved, nothing written to the database",
+          m && sol.calc("customers", "label") && *sol.calc("customers", "label") == label && saves == 1 &&
+          j.undo_label() == "New Calculation “label”" && g.strays() == 0, m ? j.undo_label() : m.error().message);
+    auto changed = label;
+    changed.expr = "name & \"!\"";
+    auto m2 = verbs::save_calc(j, changed);
+    const auto n = j.size();
+    auto same = verbs::save_calc(j, changed);
+    check(P + "calcs: an edit is \"Change Calculation\"; saving what is kept -- no step",
+          m2 && j.undo_label() == "Change Calculation “label”" && same && j.size() == n, m2 ? j.undo_label() : m2.error().message);
+    auto renamed = changed;
+    renamed.name = "tag";
+    auto rn = verbs::save_calc(j, renamed, "label");
+    check(P + "calcs: a new name -- one step, the old name gone",
+          rn && !sol.calc("customers", "label") && sol.calc("customers", "tag") && j.undo_label() == "Change Calculation “label”",
+          rn ? j.undo_label() : rn.error().message);
+    auto u = j.undo();
+    check(P + "calcs: ... Ctrl+Z puts the old name back", u && sol.calc("customers", "label") && !sol.calc("customers", "tag") &&
+          *sol.calc("customers", "label") == changed, u ? "" : u.error().message);
+    auto del = verbs::delete_calc(j, "customers", "label");
+    auto ud = del ? j.undo() : std::expected<std::string, Error>(std::unexpected(del.error()));
+    check(P + "calcs: Delete Calculation, Ctrl+Z brings it back exactly",
+          del && ud && sol.calc("customers", "label") && *sol.calc("customers", "label") == changed, ud ? "" : ud.error().message);
+    const auto lbl0 = j.undo_label();
+    auto r1 = verbs::save_calc(j, {"customers", "x", "nosuch + 1"});
+    auto r2 = verbs::save_calc(j, {"customers", "name", "1"});
+    auto r3 = verbs::save_calc(j, {"nosuch", "x", "1"});
+    auto r4 = verbs::save_calc(j, {"customers", "y", "(1"});
+    auto r6 = verbs::save_calc(j, {"customers", "label", "1"}, "nosuch");
+    auto r7 = verbs::delete_calc(j, "customers", "nosuch");
+    const bool none_kept = j.undo_label() == lbl0;
+    (void)verbs::save_calc(j, {"customers", "other", "1"});
+    const auto n3 = j.size();
+    auto r8 = verbs::save_calc(j, {"customers", "other", "1"}, "label");
+    check(P + "calcs: refused in words, no step -- a field it reads isn't there, a field's name, no table, no parse, "
+              "renaming one that isn't there / onto one that is, deleting one that isn't",
+          !r1 && r1.error().message.find("nosuch") != std::string::npos && !r2 && !r3 && r3.error().code == Error::Code::NotFound &&
+          !r4 && !r6 && !r7 && none_kept && !r8 && r8.error().code == Error::Code::Exists && j.size() == n3,
+          std::string(r1 ? "1" : "") + (r2 ? "2" : "") + (r3 ? "3" : "") + (r4 ? "4" : "") + (r6 ? "6" : "") + (r7 ? "7" : "") +
+              (r8 ? "8" : "") + (none_kept ? "" : " a step kept"));
+    auto loop1 = verbs::save_calc(j, {"customers", "a", "other + 1"});
+    auto loop2 = verbs::save_calc(j, {"customers", "other", "a + 1"});
+    check(P + "calcs: a change that would make a loop -- refused", loop1 && !loop2 &&
+          loop2.error().message.find("itself") != std::string::npos, loop2 ? "kept!" : loop2.error().message);
+    Journal nosol(g, e->dialect(), e->caps());
+    auto ns = verbs::save_calc(nosol, label);
+    check(P + "calcs: no solution -- refused in words; the database untouched throughout",
+          !ns && ns.error().code == Error::Code::Unsupported && g.strays() == 0, std::to_string(g.strays()));
+    // Worked out over the fixture's own records, each against the same rule in C++.
+    const Table* t = nullptr;
+    auto sch = g.introspect();
+    if (sch) t = sch->table("customers");
+    auto page = t ? read_page(g, *t, PageRequest{}) : std::expected<Page, Error>(std::unexpected(Error{}));
+    bool same_all = page.has_value() && !page->rows.empty();
+    std::string why;
+    const std::map<std::string, core::Calc> cs = {{"label", {"customers", "label", "Upper(name) & \"/\" & Length(name)"}}};
+    for (std::size_t i = 0; same_all && i < page->rows.size(); ++i) {
+        const auto& row = page->rows[i];
+        std::size_t ni = 0;
+        while (ni < t->columns.size() && t->columns[ni].name != "name") ++ni;
+        const std::string nm = row[ni].as_text() ? *row[ni].as_text() : "";
+        std::size_t cps = 0;
+        for (unsigned char ch : nm) if ((ch & 0xC0) != 0x80) ++cps;   // Length counts letters, not bytes
+        const std::string want = upper_of(nm) + "/" + std::to_string(cps);
+        const auto got = core::calc_text(row_calcs(*t, row, cs, "2026-11-07")["label"]);
+        if (got != want) { same_all = false; why = got + " vs " + want; }
+    }
+    check(P + "calcs: worked out over the table's own records (Upper, &, Length)", same_all,
+          page ? why : page.error().message);
+}
+
 // ── s009b: the Address Book starter ──────────────────────────────────────────
 void test_starter(Journal& j, Gate& g, const std::string& P) {
     auto count = [&](const std::string& t) {
@@ -2826,6 +3043,7 @@ void test_server(Engine* e, const char* env_name, const char* admin_db) {
     test_journal(e, T.rw, T.ro, e->id());   // s005b: the door, in the same throwaway database
     test_boxes(e, T.ro, std::string(e->id()) + ": ");   // s009
     test_layouts(e, T.ro, std::string(e->id()) + ": "); // s010
+    test_calcs(e, T.ro, std::string(e->id()) + ": ");   // s014a
 
     auto a2 = e->open(admin);
     std::string why = a2 ? "" : a2.error().message;
@@ -2877,6 +3095,8 @@ void db_tests(CheckFn fn, int& skip_count) {
         test_boxes(e, T.ro, "sqlite: ");      // s009: boxes move on a read-only connection
         test_layouts_pure(tmp.p);             // s010
         test_layouts(e, T.ro, "sqlite: ");    // s010: layouts kept on a read-only connection
+        test_calc_pure(tmp.p);                // s014a
+        test_calcs(e, T.ro, "sqlite: ");      // s014a: calculations kept on a read-only connection
         {   // s005b: the door, on its own fresh fixture file
             Target J = T;
             J.rw.path = (tmp.p / "journal.sqlite").string();

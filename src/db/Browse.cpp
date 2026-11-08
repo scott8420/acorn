@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 
 // db/Browse.cpp -- read include/db/Browse.hpp first.
 
@@ -189,6 +190,41 @@ std::expected<Page, Error> read_related(Connection& c, const Table& t, const std
             return p;
         }
     return read_where(c, t, r, link, values);
+}
+
+core::CalcValue calc_value(const Value& v, FieldType t) {
+    switch (v.kind()) {
+    case Value::Kind::Null:    return {};
+    case Value::Kind::Integer: return static_cast<double>(*v.as_int());
+    case Value::Kind::Real:    return *v.as_real();
+    case Value::Kind::Blob:    return {};
+    case Value::Kind::Text: {
+        const std::string& s = *v.as_text();
+        if (t == FieldType::Boolean) {
+            if (s == "t" || s == "true" || s == "1") return 1.0;
+            if (s == "f" || s == "false" || s == "0") return 0.0;
+        }
+        if (t == FieldType::Integer || t == FieldType::Number) {
+            char* end = nullptr;
+            const double d = std::strtod(s.c_str(), &end);
+            if (!s.empty() && end && *end == '\0' && std::isfinite(d)) return d;
+        }
+        return s;
+    }
+    }
+    return {};
+}
+
+std::map<std::string, core::CalcOutcome> row_calcs(const Table& t, const Row& row,
+                                                   const std::map<std::string, core::Calc>& calcs,
+                                                   const std::string& today) {
+    if (calcs.empty()) return {};
+    core::CalcLookup look = [&](const std::string& name) -> std::optional<core::CalcValue> {
+        for (std::size_t i = 0; i < t.columns.size() && i < row.size(); ++i)
+            if (t.columns[i].name == name) return calc_value(row[i], t.columns[i].type);
+        return std::nullopt;
+    };
+    return core::evaluate_all(calcs, look, today);
 }
 
 std::string cell_text(const Value& v, FieldType t) {

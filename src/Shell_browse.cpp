@@ -314,6 +314,7 @@ void Shell::load_browse_page(bool keep_panel) {  // browse: read the page, repai
     // found set): its boxes would edit a record no longer shown.
     if (keep_panel && (m_browse_view == BrowseView::Form || m_browse_view == BrowseView::List) &&
         (m_browse_sel_index >= 0 || m_browse_sel.empty()) && !m_finding) {   // s012c: + List
+        refresh_calc_labels();   // s014a: the values under the boxes are fresh -- so are the calculations
         sync_undo();
         return;
     }
@@ -325,6 +326,7 @@ void Shell::load_browse_page(bool keep_panel) {  // browse: read the page, repai
 
 void Shell::paint_browse() {  // browse: cards or grid
     ++m_view_gen;   // the old cards / grid say nothing from here on
+    m_calc_shown.clear();   // s014a: their calculation labels go with them
     m_browse_range.set_text(browse_info() ? db::page_range(m_browse_data) : "");
     m_browse_prev.set_sensitive(m_browse_req.offset > 0);
     m_browse_next.set_sensitive(m_browse_req.offset + static_cast<std::int64_t>(m_browse_data.rows.size()) <
@@ -410,6 +412,18 @@ void Shell::paint_cards() {  // browse: one calm card per record
             v->set_hexpand(true);
             g->attach(*v, 1, static_cast<int>(c));
         }
+        // s014a: the table's calculations, after its fields -- worked out, never typed in.
+        int at = static_cast<int>(t->columns.size());
+        for (const auto& [cname, oc] : calcs_of_row(r)) {
+            auto name = text(cname, "acorn-field-name");
+            name->add_css_class("acorn-calc-name");
+            name->set_valign(Gtk::Align::START);
+            name->set_tooltip_text("Worked out: " + m_solution.calc(t->name, cname)->expr);
+            g->attach(*name, 0, at);
+            auto v = calc_label(oc, 28);
+            v->set_hexpand(true);
+            g->attach(*v, 1, at++);
+        }
         card->append(*g);
         flow->append(*card);
     }
@@ -464,6 +478,21 @@ void Shell::paint_grid() {  // browse: the dense grid, sortable headers
         cols[c]->add_widget(*b);
         header->append(*b);
     }
+    // s014a: the calculations after the fields -- a heading that doesn't sort
+    // (Acorn works them out a page at a time; the database can't order by them).
+    const auto& calcs = m_solution.calcs_of(t->name);
+    for (const auto& [cname, calc] : calcs) {
+        cols.push_back(Gtk::SizeGroup::create(Gtk::SizeGroup::Mode::HORIZONTAL));
+        auto hl = text(cname);
+        hl->set_ellipsize(Pango::EllipsizeMode::END);
+        hl->set_max_width_chars(24);
+        hl->set_width_chars(std::min<int>(static_cast<int>(g_utf8_strlen(cname.c_str(), -1)), 24));
+        hl->add_css_class("acorn-grid-heading");
+        hl->add_css_class("acorn-calc-name");
+        hl->set_tooltip_text("Worked out: " + calc.expr + " -- not sortable");
+        cols.back()->add_widget(*hl);
+        header->append(*hl);
+    }
     outer->append(*header);
 
     auto list = Gtk::make_managed<Gtk::ListBox>();
@@ -488,6 +517,16 @@ void Shell::paint_grid() {  // browse: the dense grid, sortable headers
             const auto ft = t->columns[c].type;
             if (ft == db::FieldType::Integer || ft == db::FieldType::Number) v->set_xalign(1.0f);
             cols[c]->add_widget(*v);
+            line->append(*v);
+        }
+        std::size_t ci = t->columns.size();
+        for (const auto& [cname, oc] : calcs_of_row(r)) {   // s014a
+            auto v = calc_label(oc, 24);
+            const std::string shown = core::calc_text(oc);
+            v->set_width_chars(std::min<int>(static_cast<int>(g_utf8_strlen(shown.c_str(), -1)), 24));
+            v->add_css_class("acorn-grid-cell");
+            if (oc.ok() && std::holds_alternative<double>(oc.value)) v->set_xalign(1.0f);
+            if (ci < cols.size()) cols[ci++]->add_widget(*v);
             line->append(*v);
         }
         list->append(*line);

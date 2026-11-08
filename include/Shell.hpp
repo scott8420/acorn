@@ -68,6 +68,7 @@
 //   "Where is a table's detail drawn?"  -> Shell_tables.cpp   (show_table)
 //   "Where does a write go / undo run?" -> Shell_journal.cpp  (on_new_table / on_undo)
 //   "Where are records shown?"          -> Shell_browse.cpp   (paint_browse)
+//   "Where are calculations made?"      -> Shell_calcs.cpp    (calc_section / keep_calc)
 //   "Where are links drawn / made?"     -> Shell_graph.cpp    (paint_graph / on_graph_drop)
 //   "Where are layouts edited?"         -> Shell_layouts.cpp  (paint_layouts / keep_layout)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -222,6 +223,16 @@ private:
     std::vector<std::string> layout_names(const std::string& table) const;  // category: layouts: the default first, then the kept ones
     std::string picked_layout(const std::string& table) const;  // category: layouts: the name last picked for the table (else the default)
     core::Layout layout_of(const std::string& table, const std::string& name, bool* kept = nullptr) const;  // category: layouts: kept, else the computed default
+    // ── calculation fields (s014a) -- src/Shell_calcs.cpp ────────────────────
+    void calc_section(const db::Table& t);       // category: calcs: the Tables area's Calculations section (list or editor)
+    void keep_calc(const core::Calc& c, const std::string& was);   // category: calcs: verbs::save_calc, the note, a repaint
+    void drop_calc(const std::string& table, const std::string& name);  // category: calcs: verbs::delete_calc
+    void calcs_changed(const std::string& table);  // category: calcs: Tables, Browse and Layouts follow a calc step
+    std::map<std::string, core::CalcOutcome> calcs_of_row(std::size_t r) const;  // category: calcs: a page row's calculations
+    std::optional<core::CalcOutcome> browse_calc(const std::string& name) const;  // category: calcs: the painted record's calculation (as browse_value)
+    Gtk::Label* calc_label(const core::CalcOutcome& o, int max_chars);  // category: calcs: a value shown, "?" with its words
+    std::vector<std::string> fields_and_calcs(const std::string& table) const;
+    void refresh_calc_labels();                  // category: calcs: a field saved in place -- the Form's / List's calculations worked out again  // category: calcs: the fields, then the calculations -- what a layout may show
     std::vector<std::string> fields_of(const std::string& table) const;  // category: layouts: the live table's fields, in order
     std::vector<core::PortalLink> portal_links(const std::string& table) const;  // category: layouts: s011a -- one-field links INTO the table
     std::vector<core::RelatedLink> related_links(const std::string& table) const;  // category: layouts: s011d -- one-field links OUT of the table
@@ -443,6 +454,16 @@ private:
     Glib::RefPtr<Gio::SimpleAction> m_ground_action;
     Glib::RefPtr<Gtk::CssProvider>  m_ground_css;
     std::string                     m_table_sel;     // the shown table ("" = none)
+    // s014a: the Calculations section's editor -- the table, the calculation
+    // being changed ("" with m_calc_new: a new one), and what is typed so far.
+    std::string                     m_calc_table, m_calc_editing;
+    bool                            m_calc_new = false;
+    std::string                     m_calc_typed_name, m_calc_typed_expr;
+    // s014a: the calculations the Form / List shows now, so a field saved in
+    // place (the boxes kept) updates them. Only this view generation's.
+    struct CalcShown { Gtk::Label* label; int row; std::string name; unsigned gen; };
+    std::vector<CalcShown>          m_calc_shown;
+    Gtk::Box*                       m_calc_box = nullptr;   // the section's body, repainted alone
     bool                            m_table_painting = false;
 
     // The About window: a hide-on-close singleton, built lazily on first open.

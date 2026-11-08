@@ -162,6 +162,7 @@ void Shell::open_table(const std::string& name) {  // tables: go there, that tab
 }
 
 void Shell::show_table(const std::string& name) {  // tables: paint one table's detail
+    m_calc_box = nullptr;   // s014a: the section goes with the rest
     while (auto* c = m_table_detail.get_first_child()) m_table_detail.remove(*c);
     m_table_sel.clear();
     const db::Table* t = m_schema.table(name);
@@ -252,6 +253,14 @@ void Shell::show_table(const std::string& name) {  // tables: paint one table's 
     }
     m_table_detail.append(*section(std::to_string(t->columns.size()) + " column" +
                                    (t->columns.size() == 1 ? "" : "s"), *grid));
+
+    // s014a: calculations -- the solution's, worked out by Acorn (views too).
+    {
+        auto placeholder = Gtk::make_managed<Gtk::Box>();
+        m_calc_box = section("Calculations", *placeholder);
+        m_table_detail.append(*m_calc_box);
+        calc_section(*t);
+    }
 
     if (t->kind == db::Table::Kind::View) return;   // views carry no keys, indexes or links
 

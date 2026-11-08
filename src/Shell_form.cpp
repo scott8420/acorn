@@ -372,6 +372,15 @@ Gtk::Fixed* Shell::layout_part(const core::Layout& L, core::Part part, bool edit
             l->set_xalign(o.align == core::Align::Left ? 0.0f : o.align == core::Align::Center ? 0.5f : 1.0f);
             l->set_tooltip_text(o.text);
             w = l;
+        } else if (!t->column(o.field) && m_solution.calc(t->name, o.field)) {   // s014a: worked out, never typed in
+            const auto oc = browse_calc(o.field).value_or(core::CalcOutcome{});
+            auto l = calc_label(oc, 200);
+            l->add_css_class("acorn-form-static");
+            l->set_selectable(true);
+            l->set_name("form.calc." + o.field);
+            m_calc_shown.push_back({l, m_paint_row >= 0 ? m_paint_row : m_browse_sel_index, o.field, m_view_gen});
+            if (oc.ok()) l->set_tooltip_text("“" + o.field + "” = " + m_solution.calc(t->name, o.field)->expr);
+            w = l;
         } else if (core::missing_field(o, fields)) {
             auto l = form_label("missing field “" + o.field + "”", "acorn-missing");
             l->set_tooltip_text("This layout shows “" + o.field + "”, which “" + t->name +

@@ -1,4 +1,5 @@
 #pragma once
+#include "core/Calc.hpp"
 #include "core/Connections.hpp"
 #include "core/Layout.hpp"
 
@@ -39,6 +40,11 @@ struct Solution {
     // s010: by table, then by name. A layout's own table / name match its keys.
     std::map<std::string, std::map<std::string, Layout>> layouts;
     const Layout* layout(const std::string& table, const std::string& name) const;
+    // s014a: calculation fields, by table then name (core/Calc). On disk:
+    // "calcs": { "<table>": { "<name>": {"expr": ".."} } } -- absent reads as none.
+    std::map<std::string, std::map<std::string, Calc>> calcs;
+    const Calc* calc(const std::string& table, const std::string& name) const;
+    const std::map<std::string, Calc>& calcs_of(const std::string& table) const;
     bool operator==(const Solution&) const = default;
 };
 

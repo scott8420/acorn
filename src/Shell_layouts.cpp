@@ -152,7 +152,7 @@ core::Layout Shell::layout_of(const std::string& table, const std::string& name,
         if (kept) *kept = true;
         return *l;
     }
-    if (name == core::default_layout_name(table)) return core::default_layout(table, fields_of(table));
+    if (name == core::default_layout_name(table)) return core::default_layout(table, fields_and_calcs(table));
     return {};
 }
 
@@ -516,7 +516,7 @@ void Shell::draw_layout(const Cairo::RefPtr<Cairo::Context>& cr, int w, int h) {
     GdkRGBA ink{};
     gtk_widget_get_color(GTK_WIDGET(m_lay_canvas.gobj()), &ink);
     auto set = [&](double a) { cr->set_source_rgba(ink.red, ink.green, ink.blue, a); };
-    const auto fields = fields_of(m_lay_table);
+    const auto fields = fields_and_calcs(m_lay_table);   // s014a: a calculation is not missing
     const auto links = portal_links(m_lay_table);
     const auto outs = related_links(m_lay_table);   // s011d
     const db::Table* t = m_schema.table(m_lay_table);
@@ -676,7 +676,9 @@ void Shell::draw_layout(const Cairo::RefPtr<Cairo::Context>& cr, int w, int h) {
             cr->rectangle(x, y, ow, oh);
             cr->stroke();
             const db::Column* col = t ? t->column(o.field) : nullptr;
-            text_in(o.field + (col ? std::string("  ·  ") + db::to_string(col->type) : std::string{}), o, Pango::Alignment::LEFT, 0.9);
+            text_in(o.field + (col ? std::string("  ·  ") + db::to_string(col->type)
+                                   : m_solution.calc(m_lay_table, o.field) ? std::string("  ·  Calculation") : std::string{}),
+                    o, Pango::Alignment::LEFT, 0.9);
         }
     }
 
@@ -762,7 +764,7 @@ void Shell::paint_inspector() {  // layouts: the picked object's field / words /
         auto add_head = side_label("Add", "acorn-field-name");
         add_head->set_margin_top(10);
         m_lay_inspector.append(*add_head);
-        const auto missing = core::fields_not_on(m_lay, fields_of(m_lay_table));
+        const auto missing = core::fields_not_on(m_lay, fields_and_calcs(m_lay_table));   // s014a: + calculations
         auto names = std::make_shared<std::vector<std::string>>(missing);
         std::vector<Glib::ustring> shown(missing.begin(), missing.end());
         auto dd = Gtk::make_managed<Gtk::DropDown>(Gtk::StringList::create(shown));
@@ -901,7 +903,7 @@ void Shell::paint_inspector() {  // layouts: the picked object's field / words /
     if (o.kind == core::ObjectKind::Field) {
         // The field it shows -- a missing one listed first, so it can be
         // pointed at a real one.
-        const auto fields = fields_of(m_lay_table);
+        const auto fields = fields_and_calcs(m_lay_table);   // s014a: + calculations
         auto names = std::make_shared<std::vector<std::string>>();
         std::vector<Glib::ustring> shown;
         if (core::missing_field(o, fields)) { names->push_back(o.field); shown.push_back(o.field + " (missing)"); }
@@ -1202,7 +1204,7 @@ void Shell::layout_pick_all() {  // layouts: s010e -- Ctrl+A: every object in th
 
 void Shell::on_layout_new() {  // layouts: the default, under a new name
     if (!m_journal || m_lay_table.empty()) return;
-    auto l = core::default_layout(m_lay_table, fields_of(m_lay_table));
+    auto l = core::default_layout(m_lay_table, fields_and_calcs(m_lay_table));
     l.name = core::unique_layout_name(l.name, layout_names(m_lay_table));
     m_lay_picks.clear();
     keep_layout(l, "Made the layout " + curly(l.name));

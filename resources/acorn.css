@@ -262,3 +262,11 @@ popover.acorn-graph-pop > arrow { background: @acorn_panel; color: @acorn_ink; b
 popover.acorn-graph-pop checkbutton { color: @acorn_ink; }
 popover.acorn-graph-pop .acorn-status.error,
 popover.acorn-graph-pop label.error { color: #ff9a8a; }
+
+/* s014a: calculations -- worked out by Acorn, never typed in: their names
+   and values lean (italic), a value that can't be worked out is "?" in red. */
+.acorn-calc-name   { font-style: italic; }
+.acorn-calc-value  { font-style: italic; }
+.acorn-calc-error  { color: #ff9a8a; }
+label.acorn-grid-heading { padding: 4px 10px; font-weight: 700; color: @acorn_amber_dim; }
+.acorn-calc-editor { padding-top: 4px; }

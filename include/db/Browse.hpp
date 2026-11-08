@@ -12,11 +12,13 @@
 // shut.
 #pragma once
 
+#include "core/Calc.hpp"
 #include "db/Engine.hpp"
 #include "db/Journal.hpp"
 
 #include <cstdint>
 #include <expected>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -107,6 +109,18 @@ std::string card_title(const Table& t, const Row& row);
 // (the engine judges a date). A blob is not typed here. Refused -> the
 // reason in words ("“age” needs a whole number").
 std::expected<Value, std::string> parse_field(const std::string& typed, const Column& c);
+
+// s014a -- calculation fields over a record. A field's value as the
+// calculation language sees it: NULL -> empty; a whole number / real -> a
+// number; a number field the engine gave as text ("12.50") -> a number; a
+// Yes-No field -> 1 / 0 (also "t" / "f"); dates, times, text -> text; a blob ->
+// empty.
+core::CalcValue calc_value(const Value& v, FieldType t);
+// Every calculation of `t` for one of its records (`row` in the table's column
+// order), by name.
+std::map<std::string, core::CalcOutcome> row_calcs(const Table& t, const Row& row,
+                                                   const std::map<std::string, core::Calc>& calcs,
+                                                   const std::string& today);
 
 // "51–100 of 312" (en dash); "No records" when empty.
 std::string page_range(const Page& p);

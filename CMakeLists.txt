@@ -92,6 +92,7 @@ add_library(acorn_core STATIC
     # s009: the .acorn solution document -- where it lives, its JSON pump.
     src/core/Solution.cpp
     src/core/Layout.cpp
+    src/core/Calc.cpp     # s014a: calculation fields -- the language, parsed and worked out
     # s005c: the skin's base colour -- presets, the recipe, the saved choice.
     src/core/Ground.cpp
     src/core/Startup.cpp  # s010f: what Acorn opens at startup (the sample Address Book)
@@ -186,6 +187,7 @@ add_executable(acorn
     src/Shell_connect.cpp
     # s004c: the Tables area -- the read-only schema browser.
     src/Shell_tables.cpp
+    src/Shell_calcs.cpp      # s014a: calculation fields -- the Tables section, the values per record
     src/Shell_browse.cpp
     src/Shell_form.cpp
     src/Shell_find.cpp
