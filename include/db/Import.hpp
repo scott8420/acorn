@@ -32,6 +32,7 @@
 #include <cstdint>
 #include <expected>
 #include <functional>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -41,10 +42,26 @@ namespace acorn::db {
 // The file, read: its records (each a list of cells) and the line each starts on.
 struct Delimited {
     char                                  sep = ',';
+    bool                                  latin1 = false;   // s024b: the file wasn't UTF-8 -- read as Windows-1252
     std::vector<std::vector<std::string>> rows;
     std::vector<std::size_t>              lines;   // 1-based, per row
     std::size_t width() const;                     // the most cells in any row
 };
+
+// s024b -- the file's bytes as UTF-8: valid UTF-8 as it is (a BOM is left for
+// read_delimited); anything else read as Windows-1252 (Latin-1 plus the
+// curly quotes, dashes and € old spreadsheets write) -- `converted` says so.
+bool is_utf8(std::string_view s);
+std::string to_utf8(std::string_view bytes, bool& converted);
+
+// s024b -- how the file writes a date. ISO (1990-07-14, as Export writes) is
+// always taken; DayFirst also takes 14/07/1990, MonthFirst 07/14/1990 --
+// '/', '-' or '.' between, a one- or two-digit day and month, a four-digit
+// year. A timestamp is the date then a time.
+enum class DateOrder { ISO, DayFirst, MonthFirst };
+// ISO "YYYY-MM-DD" for `s`, or nullopt (not a real day in that order).
+std::optional<std::string> iso_date(std::string_view s, DateOrder o);
+const char* date_order_says(DateOrder o);   // "1990-07-14" / "14/07/1990 (day first)" / "07/14/1990 (month first)"
 
 // ',' or '\t': by the file's ending (.tsv / .tab, .csv), else by its first line.
 char guess_separator(std::string_view text, const std::string& file_name);
@@ -62,7 +79,7 @@ bool looks_like_header(const std::vector<std::string>& first, const Table& t);
 // One cell for one field: parse_field's rules (s006c), and a date, a time or a
 // timestamp must look like one -- ISO, as Export writes it ("“birthday” needs a
 // date like 1990-07-14"), whatever the engine would let by.
-std::expected<Value, std::string> import_value(const std::string& cell, const Column& c);
+std::expected<Value, std::string> import_value(const std::string& cell, const Column& c, DateOrder o = DateOrder::ISO);
 
 // What the person chose: a field (or "" to skip) per column of the file, and
 // whether the first line is names (not a record).
@@ -76,7 +93,12 @@ struct ImportPlan {
     // counted, not added). An empty match value matches nothing.
     std::string              match;
     bool                     add_rest = true;
+    DateOrder                dates = DateOrder::ISO;   // s024b
 };
+// s024b: the order the plan's date / timestamp columns are written in --
+// a first number over 12 says day first, a second over 12 month first; all
+// ISO (or no dates) ISO; slashed but never telling: month first.
+DateOrder guess_date_order(const Table& t, const Delimited& d, const ImportPlan& p);
 // "" when the plan can go; else why not, in words ("“email” is picked for two
 // columns", "Pick a field for at least one column").
 std::string check_import(const Table& t, const ImportPlan& p);

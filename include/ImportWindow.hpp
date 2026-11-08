@@ -48,6 +48,7 @@ public:
 private:
     void build_grid();
     db::ImportPlan plan() const;
+    db::ImportPlan plan_fields_only() const;   // s024b
     void refresh();   // the header row's look, the live line, Import's sensitivity
     void on_import();
     void finish(const std::expected<db::ImportResult, db::Error>& r);   // s020c: back from the worker
@@ -65,6 +66,8 @@ private:
     Gtk::Box*                   m_match_row = nullptr;   // s024a: Match by ... / add the rest
     Gtk::DropDown*              m_match = nullptr;       // "-- add every row --" then the fields
     Gtk::CheckButton*           m_add_rest = nullptr;
+    Gtk::Box*                   m_dates_row = nullptr;   // s024b: Dates like ...
+    Gtk::DropDown*              m_dates = nullptr;       // ISO, day first, month first
     std::int64_t                m_rows = 0;         // rows Import will look at (the live line's count)
     bool                        m_running = false;  // s020c: the worker has it
     std::function<std::int64_t()> m_count;

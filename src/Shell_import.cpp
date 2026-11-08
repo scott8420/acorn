@@ -68,7 +68,10 @@ void Shell::import_records_from_file() {  // import: the open dialog, then the f
             if (!in) { browse_note("Not imported: can't read " + name + ".", "error"); return; }
             text.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
         }
+        bool latin1 = false;   // s024b: not UTF-8 -> read as Windows-1252
+        text = db::to_utf8(text, latin1);
         auto d = db::read_delimited(text, db::guess_separator(text, name));
+        if (d) d->latin1 = latin1;
         if (auto lg = log::get(log::Area::Shell))
             lg->info("import: '{}' <- {}: {}", table, path, d ? std::to_string(d->rows.size()) + " rows" : d.error());
         if (!d) { browse_note("Not imported: " + name + ", " + d.error() + ".", "error"); return; }

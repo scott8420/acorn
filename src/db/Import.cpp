@@ -2,6 +2,7 @@
 #include "db/Browse.hpp"
 
 #include <algorithm>
+#include <cstdio>
 #include <cctype>
 
 // db/Import.cpp -- records in from CSV / tab-separated text (s018b).
@@ -83,6 +84,85 @@ bool is_timestamp(std::string_view s) {
     return is_time(s.substr(11));
 }
 }  // namespace
+
+bool is_utf8(std::string_view s) {
+    std::size_t i = 0;
+    while (i < s.size()) {
+        const unsigned c = static_cast<unsigned char>(s[i]);
+        if (c < 0x80) { ++i; continue; }
+        std::size_t n;
+        unsigned least;
+        if ((c & 0xE0) == 0xC0) { n = 1; least = 0x80; }
+        else if ((c & 0xF0) == 0xE0) { n = 2; least = 0x800; }
+        else if ((c & 0xF8) == 0xF0 && c <= 0xF4) { n = 3; least = 0x10000; }
+        else return false;
+        if (i + n >= s.size()) return false;
+        unsigned cp = c & (0x3Fu >> n);
+        for (std::size_t k = 1; k <= n; ++k) {
+            const unsigned b = static_cast<unsigned char>(s[i + k]);
+            if ((b & 0xC0) != 0x80) return false;
+            cp = (cp << 6) | (b & 0x3F);
+        }
+        if (cp < least || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) return false;   // overlong, too big, a surrogate
+        i += n + 1;
+    }
+    return true;
+}
+
+std::string to_utf8(std::string_view bytes, bool& converted) {
+    converted = false;
+    if (is_utf8(bytes)) return std::string(bytes);
+    converted = true;
+    // Windows-1252's 0x80..0x9F; the rest of the high half is Latin-1 (= U+00A0..U+00FF).
+    static const char16_t cp[32] = {0x20AC, 0xFFFD, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021, 0x02C6, 0x2030, 0x0160,
+                                    0x2039, 0x0152, 0xFFFD, 0x017D, 0xFFFD, 0xFFFD, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022,
+                                    0x2013, 0x2014, 0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0xFFFD, 0x017E, 0x0178};
+    std::string out;
+    out.reserve(bytes.size() + bytes.size() / 8);
+    for (unsigned char c : bytes) {
+        const unsigned u = c < 0x80 ? c : c < 0xA0 ? cp[c - 0x80] : c;
+        if (u < 0x80) out += static_cast<char>(u);
+        else if (u < 0x800) { out += static_cast<char>(0xC0 | (u >> 6)); out += static_cast<char>(0x80 | (u & 0x3F)); }
+        else { out += static_cast<char>(0xE0 | (u >> 12)); out += static_cast<char>(0x80 | ((u >> 6) & 0x3F));
+               out += static_cast<char>(0x80 | (u & 0x3F)); }
+    }
+    return out;
+}
+
+std::optional<std::string> iso_date(std::string_view s, DateOrder o) {
+    if (is_date(s)) return std::string(s);
+    if (o == DateOrder::ISO) return std::nullopt;
+    // a<sep>b<sep>yyyy -- one or two digits each, the same separator twice
+    std::size_t i = 0;
+    auto num = [&](std::size_t most) -> int {
+        std::size_t k = i;
+        int v = 0;
+        while (k < s.size() && k - i < most && std::isdigit(static_cast<unsigned char>(s[k]))) v = v * 10 + (s[k++] - '0');
+        if (k == i) return -1;
+        i = k;
+        return v;
+    };
+    const int a = num(2);
+    if (a < 0 || i >= s.size()) return std::nullopt;
+    const char sep = s[i];
+    if (sep != '/' && sep != '-' && sep != '.') return std::nullopt;
+    ++i;
+    const int b = num(2);
+    if (b < 0 || i >= s.size() || s[i] != sep) return std::nullopt;
+    ++i;
+    const std::size_t ys = i;
+    const int y = num(4);
+    if (y < 0 || i != s.size() || i - ys != 4) return std::nullopt;
+    const int d = o == DateOrder::DayFirst ? a : b, m = o == DateOrder::DayFirst ? b : a;
+    char buf[16];
+    std::snprintf(buf, sizeof buf, "%04d-%02d-%02d", y, m, d);
+    if (!is_date(buf)) return std::nullopt;
+    return std::string(buf);
+}
+
+const char* date_order_says(DateOrder o) {
+    return o == DateOrder::DayFirst ? "14/07/1990 (day first)" : o == DateOrder::MonthFirst ? "07/14/1990 (month first)" : "1990-07-14";
+}
 
 std::size_t Delimited::width() const {
     std::size_t w = 0;
@@ -181,13 +261,24 @@ bool looks_like_header(const std::vector<std::string>& first, const Table& t) {
     return false;
 }
 
-std::expected<Value, std::string> import_value(const std::string& cell, const Column& c) {
+std::expected<Value, std::string> import_value(const std::string& cell, const Column& c, DateOrder o) {
     const bool when = c.type == FieldType::Date || c.type == FieldType::Time || c.type == FieldType::Timestamp;
     if (!when) return parse_field(cell, c);
-    const std::string t = trim(cell);
+    std::string t = trim(cell);
     if (t.empty()) return parse_field(t, c);
     const std::string q = curly(c.name);
-    if (c.type == FieldType::Date && !is_date(t)) return std::unexpected(q + " needs a date like 1990-07-14");
+    // s024b: the date written the file's way -> ISO.
+    if (c.type == FieldType::Date) {
+        auto iso = iso_date(t, o);
+        if (!iso) return std::unexpected(q + " needs a date like " + date_order_says(o));
+        return Value(*iso);
+    }
+    if (c.type == FieldType::Timestamp && o != DateOrder::ISO) {
+        const auto sp = t.find_first_of(" T");
+        auto iso = iso_date(std::string_view(t).substr(0, sp), o);
+        if (!iso) return std::unexpected(q + " needs a date and time like " + date_order_says(o) + " 09:30:00");
+        t = *iso + (sp == std::string::npos ? std::string{} : " " + trim(t.substr(sp + 1)));
+    }
     if (c.type == FieldType::Time && !is_time(t)) return std::unexpected(q + " needs a time like 09:30 or 09:30:15");
     if (c.type == FieldType::Timestamp && !is_timestamp(t))
         return std::unexpected(q + " needs a date and time like 1990-07-14 09:30:00");
@@ -228,7 +319,7 @@ row_values(const Table& t, const std::vector<std::string>& row, const ImportPlan
         if (!c) return std::unexpected(curly(t.name) + " has no field " + curly(p.fields[i]));
         const std::string cell = i < row.size() ? row[i] : std::string{};
         if (trim(cell).empty() && c->default_sql) continue;   // the database's default
-        auto v = import_value(cell, *c);
+        auto v = import_value(cell, *c, p.dates);
         if (!v) return std::unexpected(v.error());
         out.first.push_back(c->name);
         out.second.push_back(std::move(*v));
@@ -236,6 +327,25 @@ row_values(const Table& t, const std::vector<std::string>& row, const ImportPlan
     return out;
 }
 }  // namespace
+
+DateOrder guess_date_order(const Table& t, const Delimited& d, const ImportPlan& p) {
+    bool slashed = false;
+    for (std::size_t col = 0; col < p.fields.size(); ++col) {
+        const Column* c = p.fields[col].empty() ? nullptr : t.column(p.fields[col]);
+        if (!c || (c->type != FieldType::Date && c->type != FieldType::Timestamp)) continue;
+        for (std::size_t i = p.header ? 1 : 0; i < d.rows.size(); ++i) {
+            if (col >= d.rows[i].size()) continue;
+            const std::string cell = trim(d.rows[i][col]);
+            const std::string day = cell.substr(0, cell.find_first_of(" T"));
+            if (day.empty() || is_date(day)) continue;
+            if (!iso_date(day, DateOrder::DayFirst) && !iso_date(day, DateOrder::MonthFirst)) continue;
+            slashed = true;
+            if (!iso_date(day, DateOrder::MonthFirst)) return DateOrder::DayFirst;    // 14/07: no 14th month
+            if (!iso_date(day, DateOrder::DayFirst)) return DateOrder::MonthFirst;   // 07/14
+        }
+    }
+    return slashed ? DateOrder::MonthFirst : DateOrder::ISO;
+}
 
 ImportResult import_preview(const Table& t, const Delimited& d, const ImportPlan& p) {
     ImportResult r;

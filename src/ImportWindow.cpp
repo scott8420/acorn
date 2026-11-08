@@ -101,6 +101,19 @@ ImportWindow::ImportWindow(Gtk::Window& parent)
     m_match_row->append(*m_add_rest);
     page->append(*m_match_row);
 
+    // s024b: how the file writes its dates (guessed; the person may change it).
+    m_dates_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+    m_dates_row->set_name("import.dates_row");
+    m_dates_row->append(*Gtk::make_managed<Gtk::Label>("Dates like"));
+    m_dates = Gtk::make_managed<Gtk::DropDown>(Gtk::StringList::create(
+        {db::date_order_says(db::DateOrder::ISO), db::date_order_says(db::DateOrder::DayFirst),
+         db::date_order_says(db::DateOrder::MonthFirst)}));
+    m_dates->set_name("import.dates");
+    m_dates->set_tooltip_text("How the file writes a date -- 1990-07-14 is always read; guessed from the file");
+    m_dates->property_selected().signal_changed().connect([this] { if (!m_resetting) refresh(); });
+    m_dates_row->append(*m_dates);
+    page->append(*m_dates_row);
+
     auto* hint = m_hint = Gtk::make_managed<Gtk::Label>("Pick the field each column goes to -- or “-- skip --”. "
                                                "A field left out gets its default.");
     hint->set_xalign(0.0f);
@@ -205,11 +218,19 @@ void ImportWindow::start(const db::Table& t, const std::string& file_name, db::D
     for (const auto& r : m_data.rows) if (!r.empty()) ++lines;
     m_head.set_text(m_file + " -- " + std::to_string(lines) + (lines == 1 ? " line, " : " lines, ") +
                     std::to_string(m_data.width()) + (m_data.width() == 1 ? " column" : " columns") + ", " +
-                    (m_data.sep == '\t' ? "tab-separated" : "comma-separated") + " -- into " + curly(t.name));
+                    (m_data.sep == '\t' ? "tab-separated" : "comma-separated") +
+                    (m_data.latin1 ? ", read as Windows-1252 / Latin-1 (it isn't UTF-8)" : "") + " -- into " + curly(t.name));
     build_grid();
+    {   // s024b: the dates' order, guessed from the matched columns
+        const auto o = db::guess_date_order(t, m_data, plan_fields_only());
+        m_resetting = true;
+        m_dates->set_selected(o == db::DateOrder::DayFirst ? 1 : o == db::DateOrder::MonthFirst ? 2 : 0);
+        m_resetting = false;
+    }
     // Plan mode.
     m_header.set_visible(true);
     m_match_row->set_visible(true);
+    m_dates_row->set_visible(true);
     m_hint->set_visible(true);
     m_scroll.set_visible(true);
     m_says.set_visible(true);
@@ -265,11 +286,23 @@ void ImportWindow::build_grid() {
     }
 }
 
+db::ImportPlan ImportWindow::plan_fields_only() const {   // s024b: the columns' fields and the names line, as picked
+    db::ImportPlan p;
+    p.header = m_header.get_active();
+    for (auto* dd : m_picks) {
+        const guint k = dd->get_selected();
+        p.fields.push_back(k < m_choices.size() ? m_choices[k] : std::string{});
+    }
+    return p;
+}
+
 db::ImportPlan ImportWindow::plan() const {
     db::ImportPlan p;
     p.header = m_header.get_active();
     if (const guint k = m_match->get_selected(); k > 0 && k < m_choices.size()) p.match = m_choices[k];   // s024a
     p.add_rest = m_add_rest->get_active();
+    const guint dk = m_dates->get_selected();   // s024b
+    p.dates = dk == 1 ? db::DateOrder::DayFirst : dk == 2 ? db::DateOrder::MonthFirst : db::DateOrder::ISO;
     for (auto* dd : m_picks) {
         const guint k = dd->get_selected();
         p.fields.push_back(k < m_choices.size() ? m_choices[k] : std::string{});
@@ -283,6 +316,13 @@ void ImportWindow::refresh() {
         else w->remove_css_class("acorn-field-name");
     }
     const auto p = plan();
+    {   // s024b: Dates like ... only when a column goes to a date
+        bool dated = false;
+        for (const auto& f : p.fields)
+            if (const db::Column* c = f.empty() ? nullptr : m_table.column(f))
+                dated = dated || c->type == db::FieldType::Date || c->type == db::FieldType::Timestamp;
+        m_dates_row->set_visible(dated);
+    }
     const std::string why = db::check_import(m_table, p);
     m_reason.set_text(why.empty() ? "" : why + ".");
     if (!why.empty()) {
@@ -332,6 +372,7 @@ void ImportWindow::set_running(bool on) {
     set_deletable(!on);
     m_header.set_sensitive(!on);
     m_match_row->set_sensitive(!on);
+    m_dates_row->set_sensitive(!on);
     m_scroll.set_sensitive(!on);
     m_cancel.set_label(on ? "Stop" : "Cancel");
     m_cancel.set_tooltip_text(on ? "Stop after the row going in -- what went in is kept as one step (Esc)" : "");
@@ -353,6 +394,7 @@ void ImportWindow::finish(const std::expected<db::ImportResult, db::Error>& r) {
     // The report.
     m_header.set_visible(false);
     m_match_row->set_visible(false);
+    m_dates_row->set_visible(false);
     m_hint->set_visible(false);
     m_scroll.set_visible(false);
     m_says.set_visible(false);

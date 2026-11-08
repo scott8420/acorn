@@ -3442,7 +3442,52 @@ void test_export_book(Gate& g, const std::string& P) {
 }
 
 // ── s018b: import ──────────────────────────────────────────────────────────
+void test_import_pure_s024b() {   // dates in other shapes, Windows-1252
+    using O = DateOrder;
+    check("import: dates -- ISO always; 14/07/1990 day first, 07/14/1990 month first, -, . and one digit too; not a real "
+          "day (31/02, 13th month) or a two-digit year refused",
+          iso_date("1990-07-14", O::ISO) == "1990-07-14" && iso_date("1990-07-14", O::DayFirst) == "1990-07-14" &&
+              iso_date("14/07/1990", O::DayFirst) == "1990-07-14" && iso_date("07/14/1990", O::MonthFirst) == "1990-07-14" &&
+              iso_date("4.7.1990", O::DayFirst) == "1990-07-04" && iso_date("7-4-1990", O::MonthFirst) == "1990-07-04" &&
+              !iso_date("14/07/1990", O::MonthFirst) && !iso_date("14/07/1990", O::ISO) && !iso_date("31/02/1990", O::DayFirst) &&
+              !iso_date("14/07/90", O::DayFirst) && !iso_date("14/07-1990", O::DayFirst) && !iso_date("29/02/1900", O::DayFirst) &&
+              iso_date("29/02/2000", O::DayFirst) == "2000-02-29",
+          iso_date("4.7.1990", O::DayFirst).value_or("none"));
+    Table t;
+    t.name = "people";
+    for (auto [n, ty] : {std::pair{"name", FieldType::Text}, std::pair{"born", FieldType::Date}, std::pair{"seen", FieldType::Timestamp}}) {
+        Column c;
+        c.name = n;
+        c.type = ty;
+        t.columns.push_back(c);
+    }
+    auto rd = [](const char* s) { return *read_delimited(s, ','); };
+    ImportPlan p{{"name", "born", "seen"}, true};
+    const auto dm = guess_date_order(t, rd("name,born,seen\na,03/04/1990,\nb,25/12/1990,\n"), p);
+    const auto md = guess_date_order(t, rd("name,born,seen\na,03/04/1990,\nb,12/25/1990,\n"), p);
+    const auto un = guess_date_order(t, rd("name,born,seen\na,03/04/1990,\n"), p);
+    const auto is = guess_date_order(t, rd("name,born,seen\na,1990-04-03,\n"), p);
+    check("import: the date order guessed -- a day over 12 first: day first; second: month first; never telling: month "
+          "first; ISO: ISO",
+          dm == O::DayFirst && md == O::MonthFirst && un == O::MonthFirst && is == O::ISO, "");
+    auto v1 = import_value("25/12/1990", t.columns[1], O::DayFirst);
+    auto v2 = import_value("12/25/1990 09:30", t.columns[2], O::MonthFirst);
+    auto v3 = import_value("25/12/1990", t.columns[1], O::MonthFirst);
+    check("import: a date / timestamp cell becomes ISO; one not in the chosen order is refused naming the shape",
+          v1 && v1->as_text() && *v1->as_text() == "1990-12-25" && v2 && v2->as_text() && *v2->as_text() == "1990-12-25 09:30" &&
+              !v3 && v3.error().find("07/14/1990 (month first)") != std::string::npos,
+          v3 ? "taken!" : v3.error());
+    bool c1 = true, c2 = false;
+    const std::string u = to_utf8("plain \xC3\xA9t\xC3\xA9", c1);
+    const std::string w = to_utf8("caf\xE9 \x93quoted\x94 \x80" "5 na\xEFve", c2);
+    check("import: UTF-8 kept as it is; anything else read as Windows-1252 -- e-acute, curly quotes, euro -- and said",
+          !c1 && u == "plain \xC3\xA9t\xC3\xA9" && c2 && w == "caf\xC3\xA9 \xE2\x80\x9Cquoted\xE2\x80\x9D \xE2\x82\xAC" "5 na\xC3\xAFve" &&
+              is_utf8(w) && !is_utf8("\xC0\x80") && !is_utf8("\xED\xA0\x80") && !is_utf8("\xE2\x82") && is_utf8(""),
+          w);
+}
+
 void test_import_pure() {
+    test_import_pure_s024b();
     // What Export writes reads back exactly: the separator, quotes, line breaks, end spaces, empties.
     const std::vector<std::string> tricky{"plain", "a,b", "say \"hi\"", "two\r\nlines", " pad ", "", "a\tb", "\"", "x\ny"};
     bool same = true;
@@ -3655,6 +3700,22 @@ void test_import_book(Journal& j, Gate& g, const std::string& P) {
               ix && ix->updated == 0 && ix->refused.size() == 1 && ix->refused[0].line == 2 &&
                   ix->refused[0].why.find("key") != std::string::npos && j.undo_label() == top && val("id", "email", em) == id3,
               ix && !ix->refused.empty() ? refusal_says(ix->refused[0]) : "");
+        {   // s024b: a day-first date and a Windows-1252 name, into the sample
+            bool conv = false;
+            const std::string text = to_utf8("first_name,last_name,birthday\nZo\xEB,D\xFCrr,25/12/1990\n", conv);
+            auto dd = read_delimited(text, ',');
+            ImportPlan pd{{"first_name", "last_name", "birthday"}, true};
+            const auto guessed = dd ? guess_date_order(*ct, *dd, pd) : DateOrder::ISO;
+            pd.dates = guessed;
+            auto id = dd ? import_records(j, *ct, *dd, pd) : std::unexpected(Error{Error::Code::Internal, ""});
+            const std::string born = val("birthday", "last_name", "D\xC3\xBCrr");
+            const std::string first = val("first_name", "last_name", "D\xC3\xBCrr");
+            check(P + "import: a Windows-1252 file and a day-first date -- read, guessed, stored as UTF-8 and ISO",
+                  conv && guessed == DateOrder::DayFirst && id && id->records == 1 && id->refused.empty() &&
+                      born.rfind("1990-12-25", 0) == 0 && first == "Zo\xC3\xAB",
+                  (id && !id->refused.empty() ? refusal_says(id->refused[0]) : "") + " " + born + " " + first);
+            if (id && id->records == 1) (void)j.undo();
+        }
         ImportPlan pn{{"email", "company"}, true, "notes", true};
         check(P + "import: matching by a field no column goes to -- refused in words",
               check_import(*ct, pn).find("needs a column going to it") != std::string::npos, check_import(*ct, pn));
