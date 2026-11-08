@@ -38,6 +38,11 @@ inline constexpr int kLayoutGrid = 8;
 // (contacts), `shows` that table's field (last_name). Shown, not edited.
 enum class ObjectKind { Field, Text, Line, Box, Portal, Related };
 
+// s012b: how words sit in their place. Right is the default -- toward the
+// box beside them, as the default layout's labels; in the .acorn only when
+// not Right ("align": "left" / "center"), so older files read the same.
+enum class Align { Right, Left, Center };
+
 struct LayoutObject {
     ObjectKind  kind = ObjectKind::Field;
     std::string field;   // Field: the field it shows. Portal: the link field in `from`
@@ -46,6 +51,7 @@ struct LayoutObject {
     std::string from;                  // Portal: the table whose records it lists
     std::vector<std::string> columns;  // Portal: the fields of `from` it shows, in order
     std::string shows;                 // Related: the field of `from` it shows
+    Align align = Align::Right;        // s012b: Text -- how the words sit
     bool operator==(const LayoutObject&) const = default;
 };
 
@@ -199,6 +205,13 @@ std::vector<std::string> related_not_on(const Layout& l, const RelatedLink& link
 // the left, the related value on the right (as Add Field lays a row). The
 // body is fitted. Returns 2 (the words and the value).
 int add_related(Layout& l, const RelatedLink& link, const std::string& shows);
+
+// ── s012b: words alignment ──────────────────────────────────────────────────
+// "left" / "center" / "right" -- the .acorn's words; parse: anything else is Right.
+const char* align_name(Align a);
+Align parse_align(const std::string& s);
+// How the inspector and the notes say it: "left" / "centred" / "right".
+const char* align_label(Align a);
 
 // ── s012a: the list view ────────────────────────────────────────────────────
 // Browse -> List draws a layout as rows: the header once at the top, the body

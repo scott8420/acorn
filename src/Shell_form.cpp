@@ -304,7 +304,8 @@ Gtk::Fixed* Shell::layout_part(const core::Layout& L, core::Part part, bool edit
             w = form_related(o, *t);
         } else if (o.kind == core::ObjectKind::Text) {
             auto l = form_label(o.text, "acorn-field-name");
-            l->set_xalign(1.0f);   // toward its box
+            // s012b: as the layout says -- right (toward its box) unless told otherwise
+            l->set_xalign(o.align == core::Align::Left ? 0.0f : o.align == core::Align::Center ? 0.5f : 1.0f);
             l->set_tooltip_text(o.text);
             w = l;
         } else if (core::missing_field(o, fields)) {

@@ -104,6 +104,7 @@ std::optional<Solution> load_solution(const std::string& file) {
                             else continue;   // a kind this Acorn doesn't know: not drawn, not invented
                             o.field = str_or_empty(oj, "field");
                             o.text = str_or_empty(oj, "text");
+                            o.align = parse_align(str_or_empty(oj, "align"));   // s012b: missing -> right
                             o.x = num_or_0(oj, "x");
                             o.y = num_or_0(oj, "y");
                             o.w = num_or_0(oj, "w");
@@ -153,7 +154,10 @@ bool save_solution(const std::string& file, const Solution& s) {
             for (const auto& o : l.objects) {
                 nlohmann::json oj;
                 if (o.kind == ObjectKind::Field)     { oj["kind"] = "field"; oj["field"] = o.field; }
-                else if (o.kind == ObjectKind::Text) { oj["kind"] = "text";  oj["text"] = o.text; }
+                else if (o.kind == ObjectKind::Text) {
+                    oj["kind"] = "text";  oj["text"] = o.text;
+                    if (o.align != Align::Right) oj["align"] = align_name(o.align);   // s012b: only when not the default
+                }
                 else if (o.kind == ObjectKind::Portal) {   // s011a
                     oj["kind"] = "portal"; oj["from"] = o.from; oj["field"] = o.field; oj["columns"] = o.columns;
                 }

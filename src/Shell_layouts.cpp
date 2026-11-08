@@ -553,11 +553,11 @@ void Shell::draw_layout(const Cairo::RefPtr<Cairo::Context>& cr, int w, int h) {
     if (m_lay.header > 0) { band(0, m_lay.header, "header"); rule(m_lay.header); }
     if (m_lay.footer > 0) { band(core::footer_top(m_lay), m_lay.height, "footer"); rule(core::footer_top(m_lay)); }
 
-    auto text_in = [&](const std::string& s, const core::LayoutObject& o, bool right, double alpha) {
+    auto text_in = [&](const std::string& s, const core::LayoutObject& o, Pango::Alignment how, double alpha) {
         auto pl = m_lay_canvas.create_pango_layout(s);
         pl->set_width(std::max(0, o.w - 12) * PANGO_SCALE);
         pl->set_ellipsize(Pango::EllipsizeMode::END);
-        pl->set_alignment(right ? Pango::Alignment::RIGHT : Pango::Alignment::LEFT);
+        pl->set_alignment(how);
         int tw = 0, th = 0;
         pl->get_pixel_size(tw, th);
         cr->save();
@@ -591,7 +591,7 @@ void Shell::draw_layout(const Cairo::RefPtr<Cairo::Context>& cr, int w, int h) {
                 cr->rectangle(x, y, ow, oh);
                 cr->stroke();
                 cr->unset_dash();
-                text_in("missing link " + curly(o.from + "." + o.field), o, false, 0.55);
+                text_in("missing link " + curly(o.from + "." + o.field), o, Pango::Alignment::LEFT, 0.55);
                 continue;
             }
             set(0.04);
@@ -618,13 +618,13 @@ void Shell::draw_layout(const Cairo::RefPtr<Cairo::Context>& cr, int w, int h) {
                 cell.w = o.x + (o.w * (c + 1)) / n - cell.x;
                 cell.h = std::min(rh, o.h);
                 const bool col_gone = !ft || !ft->column(o.columns[static_cast<std::size_t>(c)]);
-                text_in(o.columns[static_cast<std::size_t>(c)] + (col_gone ? " ?" : ""), cell, false, col_gone ? 0.45 : 0.85);
+                text_in(o.columns[static_cast<std::size_t>(c)] + (col_gone ? " ?" : ""), cell, Pango::Alignment::LEFT, col_gone ? 0.45 : 0.85);
             }
             if (o.h > rh) {   // what it lists, under the names
                 core::LayoutObject cap = o;
                 cap.y = o.y + rh;
                 cap.h = std::min(rh, o.h - rh);
-                text_in(o.from + " that point here (by " + o.field + ")", cap, false, 0.45);
+                text_in(o.from + " that point here (by " + o.field + ")", cap, Pango::Alignment::LEFT, 0.45);
             }
         } else if (o.kind == core::ObjectKind::Related) {   // s011d: a parent's field -- shaded lighter, dotted, "via"
             const db::Table* pt = m_schema.table(o.from);
@@ -638,7 +638,7 @@ void Shell::draw_layout(const Cairo::RefPtr<Cairo::Context>& cr, int w, int h) {
                 cr->stroke();
                 cr->unset_dash();
                 text_in(gone ? "missing link " + curly(m_lay_table + "." + o.field)
-                             : "missing field " + curly(o.from + "." + o.shows), o, false, 0.55);
+                             : "missing field " + curly(o.from + "." + o.shows), o, Pango::Alignment::LEFT, 0.55);
                 continue;
             }
             set(0.03);
@@ -649,7 +649,7 @@ void Shell::draw_layout(const Cairo::RefPtr<Cairo::Context>& cr, int w, int h) {
             cr->rectangle(x, y, ow, oh);
             cr->stroke();
             cr->unset_dash();
-            text_in(o.from + "." + o.shows + "  ·  via " + o.field, o, false, 0.80);
+            text_in(o.from + "." + o.shows + "  ·  via " + o.field, o, Pango::Alignment::LEFT, 0.80);
         } else if (o.kind == core::ObjectKind::Text) {
             cr->set_line_width(1);
             set(0.18);
@@ -657,7 +657,8 @@ void Shell::draw_layout(const Cairo::RefPtr<Cairo::Context>& cr, int w, int h) {
             cr->rectangle(x, y, ow, oh);
             cr->stroke();
             cr->unset_dash();
-            text_in(o.text, o, true, 0.75);
+            text_in(o.text, o, o.align == core::Align::Left ? Pango::Alignment::LEFT
+                             : o.align == core::Align::Center ? Pango::Alignment::CENTER : Pango::Alignment::RIGHT, 0.75);
         } else if (core::missing_field(o, fields)) {
             cr->set_line_width(1);
             set(0.50);
@@ -665,7 +666,7 @@ void Shell::draw_layout(const Cairo::RefPtr<Cairo::Context>& cr, int w, int h) {
             cr->rectangle(x, y, ow, oh);
             cr->stroke();
             cr->unset_dash();
-            text_in("missing field " + curly(o.field), o, false, 0.55);
+            text_in("missing field " + curly(o.field), o, Pango::Alignment::LEFT, 0.55);
         } else {
             set(0.06);
             cr->rectangle(x, y, ow, oh);
@@ -675,7 +676,7 @@ void Shell::draw_layout(const Cairo::RefPtr<Cairo::Context>& cr, int w, int h) {
             cr->rectangle(x, y, ow, oh);
             cr->stroke();
             const db::Column* col = t ? t->column(o.field) : nullptr;
-            text_in(o.field + (col ? std::string("  ·  ") + db::to_string(col->type) : std::string{}), o, false, 0.9);
+            text_in(o.field + (col ? std::string("  ·  ") + db::to_string(col->type) : std::string{}), o, Pango::Alignment::LEFT, 0.9);
         }
     }
 
@@ -756,7 +757,7 @@ void Shell::paint_inspector() {  // layouts: the picked object's field / words /
             "Parts: header " + std::to_string(m_lay.header) + " · body " +
             std::to_string(m_lay.height - m_lay.header - m_lay.footer) + " · footer " + std::to_string(m_lay.footer) +
             " px. Drag the top edge down for a header, the bottom edge for a footer; drag a line back to remove an empty one. "
-            "The Form shows the body.", "acorn-status"));
+            "The Form shows the body; Browse -> List draws all three.", "acorn-status"));
         // s010c: Add -- each lands under everything, picked; one step.
         auto add_head = side_label("Add", "acorn-field-name");
         add_head->set_margin_top(10);
@@ -1068,6 +1069,25 @@ void Shell::paint_inspector() {  // layouts: the picked object's field / words /
         m_lay_inspector.append(*side_label("Says", "acorn-status"));
         m_lay_inspector.append(*e);
         if (m_lay_focus == "layouts.words") focus_back = e;
+        // s012b: how they sit in their place -- one step each.
+        static const core::Align kinds[] = {core::Align::Left, core::Align::Center, core::Align::Right};
+        auto ad = Gtk::make_managed<Gtk::DropDown>(Gtk::StringList::create({"Left", "Centred", "Right"}));
+        for (guint k = 0; k < 3; ++k) if (kinds[k] == o.align) ad->set_selected(k);
+        ad->set_sensitive(can);
+        ad->set_tooltip_text("Where the words sit in their place -- right (toward a box beside them) is the default");
+        remember(*ad, "layouts.align");
+        ad->property_selected().signal_changed().connect([this, ad, idx, gen] {
+            if (gen != m_lay_gen || idx >= m_lay.objects.size()) return;
+            const auto k = ad->get_selected();
+            if (k >= 3 || kinds[k] == m_lay.objects[idx].align) return;
+            auto l = m_lay;
+            l.objects[idx].align = kinds[k];
+            const std::string what = "Aligned the words " + curly(l.objects[idx].text) + " " + core::align_label(kinds[k]);
+            Glib::signal_idle().connect_once([this, l, what] { keep_layout(l, what); });
+        });
+        m_lay_inspector.append(*side_label("Aligned", "acorn-status"));
+        m_lay_inspector.append(*ad);
+        if (m_lay_focus == "layouts.align") focus_back = ad;
     }
 
     // Its place and size, in pixels.

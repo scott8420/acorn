@@ -422,4 +422,24 @@ std::vector<int> part_objects(const Layout& l, Part p) {
     return out;
 }
 
+// ── s012b: words alignment ──────────────────────────────────────────────────
+const char* align_name(Align a) {
+    switch (a) {
+        case Align::Left:   return "left";
+        case Align::Center: return "center";
+        case Align::Right:  return "right";
+    }
+    return "right";
+}
+
+Align parse_align(const std::string& s) {
+    if (s == "left") return Align::Left;
+    if (s == "center") return Align::Center;
+    return Align::Right;
+}
+
+const char* align_label(Align a) {
+    return a == Align::Left ? "left" : a == Align::Center ? "centred" : "right";
+}
+
 }  // namespace acorn::core

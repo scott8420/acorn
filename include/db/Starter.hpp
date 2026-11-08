@@ -28,5 +28,10 @@ std::expected<void, Error> make_sample(Journal& j);
 // Shows what the layout editor can do; passes core::check_layout.
 core::Layout sample_layout();
 inline constexpr const char* kSampleLayoutName = "Contact Card";
+// s012b: and "Contact List" -- a list-shaped layout for Browse -> List: column
+// titles (left-aligned words) in the header, one row of fields per person,
+// a footer. Passes core::check_layout.
+core::Layout sample_list_layout();
+inline constexpr const char* kSampleListName = "Contact List";
 
 }  // namespace acorn::db

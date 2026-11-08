@@ -2186,6 +2186,39 @@ void test_layouts_pure(const fs::path& dir) {
               core::part_height(plain, core::Part::Body) == plain.height &&
               core::part_objects(plain, core::Part::Body).size() == plain.objects.size(), "");
     }
+    // s012b: words alignment.
+    {
+        check("align: names round-trip; anything else reads as right (the default)",
+              core::parse_align(core::align_name(core::Align::Left)) == core::Align::Left &&
+              core::parse_align(core::align_name(core::Align::Center)) == core::Align::Center &&
+              core::parse_align("right") == core::Align::Right && core::parse_align("") == core::Align::Right &&
+              core::parse_align("justify") == core::Align::Right && core::LayoutObject{}.align == core::Align::Right, "");
+        core::Solution as;
+        as.points_at.engine = "sqlite";
+        as.points_at.path = (dir / "align.sqlite").string();
+        auto al = sample_list_layout();
+        al.objects.push_back({core::ObjectKind::Text, "", "Centre", 24, 88, 96, 24});
+        al.objects.back().align = core::Align::Center;
+        al.objects.push_back({core::ObjectKind::Text, "", "Plain", 128, 88, 96, 24});   // right: the default
+        as.layouts["contacts"][al.name] = al;
+        const auto af = (dir / "align.acorn").string();
+        auto ab = core::save_solution(af, as) ? core::load_solution(af) : std::nullopt;
+        std::ifstream ain(af);
+        const std::string atext((std::istreambuf_iterator<char>(ain)), std::istreambuf_iterator<char>());
+        std::size_t rights = 0;
+        for (std::size_t at = atext.find("\"right\""); at != std::string::npos; at = atext.find("\"right\"", at + 1)) ++rights;
+        check("align: round-trip in the .acorn -- \"align\" written for left / center, never for right",
+              ab && *ab == as && atext.find("\"left\"") != std::string::npos && atext.find("\"center\"") != std::string::npos &&
+              rights == 0, std::to_string(rights));
+        const auto sl = sample_list_layout();
+        std::size_t lefts = 0;
+        for (const auto& o : sl.objects) if (o.kind == core::ObjectKind::Text && o.align == core::Align::Left) ++lefts;
+        check("align: the sample's Contact List -- a valid layout, titles in the header, one row of fields, left-aligned words",
+              core::check_layout(sl).empty() && core::part_objects(sl, core::Part::Header).size() == 4 &&
+              core::part_objects(sl, core::Part::Body).size() == 4 && core::part_objects(sl, core::Part::Footer).size() == 1 &&
+              lefts == 4 && core::missing_field(sl.objects[4], {"id", "first_name"}) == false,
+              core::check_layout(sl));
+    }
     // s010e: several picked.
     {
         std::vector<int> pk;
@@ -2367,6 +2400,8 @@ void test_sample(Journal& j, Gate& g, const std::string& P) {
           made ? std::to_string(count("contacts")) + " / " + std::to_string(count("phones")) : made.error().message);
     const auto* card = sol.layout("contacts", kSampleLayoutName);
     check(P + "sample: the Contact Card kept in the solution (saved once)", card && *card == sample_layout() && saves >= 1, "");
+    const auto* lst = sol.layout("contacts", kSampleListName);   // s012b
+    check(P + "sample: the Contact List kept beside it", lst && *lst == sample_list_layout(), "");
     // s011a: a portal's rows -- each contact's phones, read by the link.
     if (auto sc = g.introspect(); sc && sc->table("phones") && sc->table("contacts")) {
         const Table& ph = *sc->table("phones");

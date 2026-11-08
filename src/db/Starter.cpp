@@ -109,7 +109,8 @@ std::expected<void, Error> make_address_book(Journal& j) {
 std::expected<void, Error> make_sample(Journal& j) {  // s010f
     if (auto r = make_address_book(j); !r) return r;
     if (auto r = add_people(j, 3, 12); !r) return r;
-    return verbs::save_layout(j, sample_layout());
+    if (auto r = verbs::save_layout(j, sample_layout()); !r) return r;
+    return verbs::save_layout(j, sample_list_layout());   // s012b
 }
 
 core::Layout sample_layout() {  // s010f: "Contact Card" -- on the 8 px grid
@@ -143,6 +144,35 @@ core::Layout sample_layout() {  // s010f: "Contact Card" -- on the 8 px grid
     l.footer = 40;                                           // the footer, with words of its own
     l.height = 384 + l.footer;
     words("Acorn's sample", 392, 200);
+    return l;
+}
+
+core::Layout sample_list_layout() {  // s012b: "Contact List" -- a row per person
+    using K = core::ObjectKind;
+    core::Layout l;
+    l.table = "contacts";
+    l.name = kSampleListName;
+    l.width = 664;
+    l.header = 40;
+    auto title = [&](const char* s, int x, int w) {   // column titles: left, over their boxes' text
+        core::LayoutObject o{K::Text, "", s, x, 8, w, 24};
+        o.align = core::Align::Left;
+        l.objects.push_back(std::move(o));
+    };
+    auto box = [&](const char* f, int x, int w) { l.objects.push_back({K::Field, f, "", x, 48, w, 24}); };
+    title("Name", 24, 216);
+    title("Company", 256, 168);
+    title("Email", 440, 208);
+    l.objects.push_back({K::Line, "", "", 16, 32, 632, 8});   // a rule under the titles
+    box("first_name", 16, 96);
+    box("last_name", 120, 120);
+    box("company", 248, 176);
+    box("email", 432, 216);
+    l.footer = 40;
+    l.height = 80 + l.footer;
+    core::LayoutObject foot{K::Text, "", "Acorn's sample", 24, 88, 200, 24};
+    foot.align = core::Align::Left;
+    l.objects.push_back(std::move(foot));
     return l;
 }
 
