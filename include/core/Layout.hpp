@@ -56,6 +56,18 @@ struct LayoutObject {
     bool operator==(const LayoutObject&) const = default;
 };
 
+// s015b: a SUB-SUMMARY part -- FileMaker's "sub-summary when sorted by
+// <field>". Preview sorts the records by `by` and prints the part once per
+// group: LEADING above the group's records (with the group's first record's
+// values), TRAILING below them (its last record's). A summary field in it is
+// worked out over that group. Browse (Form / List / Find) never shows it.
+struct SubSummary {
+    std::string by;        // the field the records are grouped by
+    bool leading = true;   // above its group (else below)
+    int height = 0;
+    bool operator==(const SubSummary&) const = default;
+};
+
 struct Layout {
     std::string table;                  // the table it shows
     std::string name;                   // unique within the table
@@ -64,6 +76,10 @@ struct Layout {
     // body is what is between: [header, height - footer). An object belongs
     // to the part its top sits in.
     int header = 0, footer = 0;
+    // s015b: the sub-summaries. Top-down the layout is: the header, the
+    // LEADING subs (in this order), the body, the TRAILING subs (in this
+    // order), the footer -- so the body is what the rest leave.
+    std::vector<SubSummary> subs;
     std::vector<LayoutObject> objects;  // drawn in order (later on top)
     bool operator==(const Layout&) const = default;
 };
@@ -111,7 +127,8 @@ std::string unique_layout_name(const std::string& base, const std::vector<std::s
 std::string object_label(const LayoutObject& o);
 
 // ── s010d: parts ────────────────────────────────────────────────────────────
-enum class Part { Header, Body, Footer };
+// s015b: + Sub -- an object in a sub-summary (sub_of says which).
+enum class Part { Header, Body, Footer, Sub };
 inline int footer_top(const Layout& l) { return l.height - l.footer; }
 Part part_of(const Layout& l, const LayoutObject& o);
 // Drag the line between two parts to `y` (snapped to the grid, clamped so no
@@ -224,5 +241,60 @@ int part_height(const Layout& l, Part p);
 // The objects of one part, in drawing order: lines and boxes first (behind),
 // then the rest -- each group in the layout's own order.
 std::vector<int> part_objects(const Layout& l, Part p);
+
+// ── s015b: sub-summary parts ────────────────────────────────────────────────
+inline constexpr int kSubH = 40;   // a new sub-summary's height
+// One band of the layout, top-down: the header (when it has one), the
+// leading subs, the body (always), the trailing subs, the footer (when it
+// has one). `sub` is the index into Layout::subs (-1 for the rest).
+struct Band {
+    Part part = Part::Body;
+    int sub = -1;
+    int top = 0, height = 0;
+    bool operator==(const Band&) const = default;
+};
+std::vector<Band> bands(const Layout& l);
+int body_top(const Layout& l);      // under the header and the leading subs
+int body_bottom(const Layout& l);   // over the trailing subs and the footer
+int sub_top(const Layout& l, int i);
+// The sub-summary an object sits in (its top), or -1.
+int sub_of(const Layout& l, const LayoutObject& o);
+// A band's objects in drawing order (lines and boxes first), as part_objects.
+std::vector<int> band_objects(const Layout& l, const Band& b);
+// The fields a report groups by, outermost first: the leading subs' fields
+// top-down, then the trailing subs' bottom-up (the last trailing is the
+// outermost), each once.
+std::vector<std::string> group_fields(const Layout& l);
+// Sub `i`'s place in group_fields (its group is the records alike in that
+// field and every one before it); -1 if there's no such sub.
+int group_level(const Layout& l, int i);
+// "leading sub-summary by “city”"
+std::string sub_label(const SubSummary& s);
+// A sub-summary by `by` added kSubH tall: a leading one just above the body
+// (under the leading ones there are), a trailing one just under it (over the
+// trailing ones there are) -- everything under it moves down. It gets `by`'s
+// box, so the part shows which group it is. Returns its index.
+int add_sub(Layout& l, const std::string& by, bool leading);
+// Sub `i` gone, with its objects; everything under it moves up. False when
+// there's no such sub.
+bool remove_sub(Layout& l, int i);
+// Drag the bottom line of band `b` (an index into bands(l): the body or a
+// sub) to `y`: that band grows or shrinks and everything under it moves with
+// the line (FileMaker's part lines). Snapped; never cuts the band's objects;
+// a band keeps one grid row. False when nothing changed.
+bool move_band_line(Layout& l, int b, int y);
+
+// What a report prints, in order: per record its body, with each sub-summary
+// where its group starts (leading) or ends (trailing). `keys[r]` are record
+// r's values of group_fields(l), in that order, as text; a group is a run of
+// records alike in its field and every field before it. A sub prints the
+// values of `record` -- the group's first (leading) or last (trailing).
+struct ReportBlock {
+    Part part = Part::Body;   // Body or Sub
+    int sub = -1;
+    int record = 0;
+    bool operator==(const ReportBlock&) const = default;
+};
+std::vector<ReportBlock> report_blocks(const Layout& l, const std::vector<std::vector<std::string>>& keys);
 
 }  // namespace acorn::core

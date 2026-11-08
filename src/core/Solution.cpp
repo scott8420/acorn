@@ -128,6 +128,15 @@ std::optional<Solution> load_solution(const std::string& file) {
                     if (auto pj = lj.find("parts"); pj != lj.end() && pj->is_object()) {   // s010d
                         l.header = num_or_0(*pj, "header");
                         l.footer = num_or_0(*pj, "footer");
+                        if (auto sj = pj->find("subs"); sj != pj->end() && sj->is_array())   // s015b
+                            for (const auto& x : *sj) {
+                                if (!x.is_object()) continue;
+                                SubSummary sub;
+                                sub.by = str_or_empty(x, "by");
+                                sub.leading = str_or_empty(x, "when") != "trailing";
+                                sub.height = num_or_0(x, "height");
+                                l.subs.push_back(std::move(sub));
+                            }
                     }
                     if (auto ob = lj.find("objects"); ob != lj.end() && ob->is_array())
                         for (const auto& oj : *ob) {
@@ -245,8 +254,15 @@ bool save_solution(const std::string& file, const Solution& s) {
                 objects.push_back(std::move(oj));
             }
             layouts[table][name] = {{"width", l.width}, {"height", l.height}, {"objects", std::move(objects)}};
-            if (l.header || l.footer)   // s010d: only when there are parts (an older Acorn reads it as all body)
+            if (l.header || l.footer || !l.subs.empty()) {   // s010d: only when there are parts (an older Acorn reads it as all body)
                 layouts[table][name]["parts"] = {{"header", l.header}, {"footer", l.footer}};
+                if (!l.subs.empty()) {   // s015b: only when there are some
+                    nlohmann::json subs = nlohmann::json::array();
+                    for (const auto& x : l.subs)
+                        subs.push_back({{"by", x.by}, {"when", x.leading ? "leading" : "trailing"}, {"height", x.height}});
+                    layouts[table][name]["parts"]["subs"] = std::move(subs);
+                }
+            }
         }
     j["layouts"] = std::move(layouts);
     if (!s.calcs.empty()) {   // s014a: only when there are some (an older Acorn never sees the key)

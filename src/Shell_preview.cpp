@@ -27,6 +27,10 @@
 // surface -- one drawing function for all three, so what is previewed is
 // what prints. The records are the ones Browse shows: every record, or the
 // found ones after a Find, in Browse's order (at most db::kPrintMax).
+// s015b: a layout with SUB-SUMMARY parts is a report -- the records sorted by
+// its groups' fields first, each sub printed where its group starts (leading)
+// or ends (trailing), its summaries worked out over that group (one GROUP BY
+// SELECT per level).
 
 namespace acorn {
 
@@ -35,7 +39,13 @@ struct PreviewDoc {
     core::Paper paper;
     double scale = 1.0;
     double room = 0;                          // the page's height in layout units, the folio line left out
-    std::vector<db::PrintedRecord> records;
+    std::vector<db::PrintedRecord> records;   // each record as its body prints it
+    struct Block {
+        core::ReportBlock at;
+        db::PrintedRecord sub;                // a sub-summary: its record with its group's summaries
+        int height = 0;
+    };
+    std::vector<Block> blocks;                // s015b: what prints, in order (pages are over these)
     std::vector<core::PrintPage> pages;
     std::string title;                        // "contacts -- Contact List"
     int total = 0;                            // records there were (more than shown when capped)
@@ -81,13 +91,19 @@ void text_in(const Cairo::RefPtr<Cairo::Context>& cr, const std::string& s, doub
     cr->restore();
 }
 
-// One part of the layout for one record, its top at `y0` (layout units).
-void draw_part(const Cairo::RefPtr<Cairo::Context>& cr, const PreviewDoc& d, core::Part part, const db::PrintedRecord& rec,
+core::Band band_of(const core::Layout& L, core::Part part, int sub = -1) {
+    for (const auto& b : core::bands(L)) if (b.part == part && b.sub == sub) return b;
+    return {part, sub, core::part_top(L, part), 0};
+}
+
+// One band of the layout for one record, its top at `y0` (layout units).
+void draw_part(const Cairo::RefPtr<Cairo::Context>& cr, const PreviewDoc& d, const core::Band& band, const db::PrintedRecord& rec,
                double y0) {
     const auto& L = d.layout;
-    const int top = core::part_top(L, part);
-    for (int oi : core::part_objects(L, part)) {
+    const int top = band.top;
+    for (int oi : core::band_objects(L, band)) {
         const auto& o = L.objects[static_cast<std::size_t>(oi)];
+        if (static_cast<std::size_t>(oi) >= rec.size()) continue;
         const auto& p = rec[static_cast<std::size_t>(oi)];
         const double x = o.x, y = y0 + o.y - top, w = o.w, h = o.h;
         cr->set_line_width(0.6);
@@ -161,16 +177,20 @@ void draw_page(const Cairo::RefPtr<Cairo::Context>& cr, const PreviewDoc& d, int
     cr->scale(d.scale, d.scale);
     const auto& L = d.layout;
     const int header = core::part_height(L, core::Part::Header);
-    const int body = core::part_height(L, core::Part::Body);
     const int footer = core::part_height(L, core::Part::Footer);
     static const db::PrintedRecord kNone;
-    const db::PrintedRecord& lead = pg.count > 0 ? d.records[static_cast<std::size_t>(pg.first)]
+    const db::PrintedRecord& lead = pg.count > 0 ? d.records[static_cast<std::size_t>(d.blocks[static_cast<std::size_t>(pg.first)].at.record)]
                                     : d.records.empty() ? kNone : d.records.front();
     const bool any = !lead.empty() || L.objects.empty();
-    if (header > 0 && any) draw_part(cr, d, core::Part::Header, lead, 0);
-    for (int k = 0; k < pg.count; ++k)
-        draw_part(cr, d, core::Part::Body, d.records[static_cast<std::size_t>(pg.first + k)], header + static_cast<double>(k) * body);
-    if (footer > 0 && any) draw_part(cr, d, core::Part::Footer, lead, d.room - footer);
+    if (header > 0 && any) draw_part(cr, d, band_of(L, core::Part::Header), lead, 0);
+    double y = header;
+    for (int k = 0; k < pg.count; ++k) {
+        const auto& b = d.blocks[static_cast<std::size_t>(pg.first + k)];
+        if (b.at.part == core::Part::Sub) draw_part(cr, d, band_of(L, core::Part::Sub, b.at.sub), b.sub, y);
+        else draw_part(cr, d, band_of(L, core::Part::Body), d.records[static_cast<std::size_t>(b.at.record)], y);
+        y += b.height;
+    }
+    if (footer > 0 && any) draw_part(cr, d, band_of(L, core::Part::Footer), lead, d.room - footer);
     cr->restore();
     // The folio, under the content, in the bottom margin's top.
     const double fy = P.height - P.margin - kFolio + 4;
@@ -196,10 +216,22 @@ void Shell::paint_preview() {  // preview: the List's layout on pages, read-only
     doc->room = (doc->paper.height - 2 * doc->paper.margin - kFolio) / doc->scale;
     doc->title = t->name + " — " + doc->layout.name;
 
-    // The records Browse shows -- every one, or the found ones -- in its order.
+    // s015b: a sub-summary by a field the table no longer has is left out
+    // (the line above the pages says so).
+    std::string gone;
+    for (int i = static_cast<int>(doc->layout.subs.size()) - 1; i >= 0; --i)
+        if (!t->column(doc->layout.subs[static_cast<std::size_t>(i)].by)) {
+            gone = doc->layout.subs[static_cast<std::size_t>(i)].by;
+            core::remove_sub(doc->layout, i);
+        }
+    const auto groups = core::group_fields(doc->layout);
+
+    // The records Browse shows -- every one, or the found ones -- in its order
+    // (s015b: grouped first, when the layout has sub-summaries).
     db::PageRequest all = m_browse_req;
     all.offset = 0;
     all.limit = db::kPrintMax;
+    all.group = groups;
     auto page = found_here() ? db::read_found(*m_conn, *t, m_found, all, &m_schema) : db::read_page(*m_conn, *t, all);
     std::string why;
     if (!page) why = page.error().message;
@@ -209,11 +241,53 @@ void Shell::paint_preview() {  // preview: the List's layout on pages, read-only
         const auto& calcs = m_solution.calcs_of(t->name);
         for (const auto& row : page->rows)
             doc->records.push_back(db::print_record(*m_conn, m_schema, *t, doc->layout, row, calcs, m_browse_sums, today));
+        // s015b: each record's group values, the groups' summaries (one
+        // SELECT per level), then what prints in order.
+        std::vector<std::vector<std::string>> keys(page->rows.size());
+        std::vector<int> at;
+        for (const auto& g : groups)
+            for (std::size_t k = 0; k < t->columns.size(); ++k) if (t->columns[k].name == g) at.push_back(static_cast<int>(k));
+        for (std::size_t r = 0; r < page->rows.size(); ++r)
+            for (std::size_t k = 0; k < at.size(); ++k)
+                keys[r].push_back(db::cell_text(page->rows[r][static_cast<std::size_t>(at[k])], t->columns[static_cast<std::size_t>(at[k])].type));
+        const auto& sums = m_solution.summaries_of(t->name);
+        std::vector<db::GroupSums> level(groups.size());
+        if (!sums.empty())
+            for (std::size_t k = 0; k < groups.size() && why.empty(); ++k) {
+                auto gs = db::read_group_summaries(*m_conn, *t, sums, std::vector<std::string>(groups.begin(), groups.begin() + static_cast<std::ptrdiff_t>(k) + 1),
+                                                   found_here() ? m_found : std::vector<db::Criterion>{}, &m_schema);
+                if (gs) level[k] = std::move(*gs);
+                else why = gs.error().message;
+            }
+        for (const auto& b : core::report_blocks(doc->layout, keys)) {
+            PreviewDoc::Block blk;
+            blk.at = b;
+            if (b.part == core::Part::Sub) {
+                blk.height = doc->layout.subs[static_cast<std::size_t>(b.sub)].height;
+                const int lv = core::group_level(doc->layout, b.sub);
+                const auto& key = keys[static_cast<std::size_t>(b.record)];
+                std::map<std::string, core::CalcValue> gsum;   // every summary: the group's, else empty
+                for (const auto& [n, x] : sums) gsum[n] = core::CalcValue{};
+                if (lv >= 0 && static_cast<std::size_t>(lv) < level.size()) {
+                    const std::vector<std::string> prefix(key.begin(), key.begin() + std::min<std::ptrdiff_t>(lv + 1, static_cast<std::ptrdiff_t>(key.size())));
+                    if (auto it = level[static_cast<std::size_t>(lv)].find(prefix); it != level[static_cast<std::size_t>(lv)].end())
+                        for (const auto& [n, v] : it->second) gsum[n] = v;
+                }
+                blk.sub = db::print_record(*m_conn, m_schema, *t, doc->layout, page->rows[static_cast<std::size_t>(b.record)], calcs, gsum, today);
+            } else {
+                blk.height = core::part_height(doc->layout, core::Part::Body);
+            }
+            doc->blocks.push_back(std::move(blk));
+        }
     }
-    doc->pages = core::paginate(core::part_height(doc->layout, core::Part::Header),
-                                core::part_height(doc->layout, core::Part::Body),
-                                core::part_height(doc->layout, core::Part::Footer),
-                                static_cast<int>(doc->records.size()), doc->room);
+    std::vector<int> heights;
+    std::vector<bool> keep;
+    for (const auto& b : doc->blocks) {
+        heights.push_back(b.height);
+        keep.push_back(b.at.part == core::Part::Sub && doc->layout.subs[static_cast<std::size_t>(b.at.sub)].leading);
+    }
+    doc->pages = core::paginate_blocks(core::part_height(doc->layout, core::Part::Header),
+                                       core::part_height(doc->layout, core::Part::Footer), heights, keep, doc->room);
     m_preview = doc;
     if (auto lg = log::get(log::Area::Shell))
         lg->info("preview: '{}' {} records -> {} pages ({}, scale {:.3f}){}", doc->title, doc->records.size(), doc->pages.size(),
@@ -228,6 +302,11 @@ void Shell::paint_preview() {  // preview: the List's layout on pages, read-only
                        std::to_string(doc->pages.size()) + (doc->pages.size() == 1 ? " page" : " pages") + " · " +
                        doc->paper.name;
     if (doc->total > n) says += " · the first " + std::to_string(n) + " of " + std::to_string(doc->total);
+    if (!groups.empty()) {   // s015b
+        says += " · grouped by ";
+        for (std::size_t k = 0; k < groups.size(); ++k) says += (k ? ", " : "") + curly(groups[k]);
+    }
+    if (!gone.empty()) says += " · there's no " + curly(gone) + " now -- its sub-summary is left out";
     if (doc->scale < 1.0) says += " · scaled to " + std::to_string(static_cast<int>(std::lround(doc->scale * 100))) + "%";
     auto cap = Gtk::make_managed<Gtk::Label>(why.empty() ? says : "Could not read the records: " + why);
     cap->set_xalign(0.0f);

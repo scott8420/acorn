@@ -110,7 +110,10 @@ std::expected<void, Error> make_sample(Journal& j) {  // s010f
     if (auto r = make_address_book(j); !r) return r;
     if (auto r = add_people(j, 3, 12); !r) return r;
     if (auto r = verbs::save_layout(j, sample_layout()); !r) return r;
-    return verbs::save_layout(j, sample_list_layout());   // s012b
+    if (auto r = verbs::save_layout(j, sample_list_layout()); !r) return r;   // s012b
+    // s015b: a report -- addresses by state, each state's count.
+    if (auto r = verbs::save_summary(j, core::Summary{"addresses", kSampleCountName, core::SummaryOp::Count, "id"}); !r) return r;
+    return verbs::save_layout(j, sample_report_layout());
 }
 
 core::Layout sample_layout() {  // s010f: "Contact Card" -- on the 8 px grid
@@ -173,6 +176,38 @@ core::Layout sample_list_layout() {  // s012b: "Contact List" -- a row per perso
     core::LayoutObject foot{K::Text, "", "Acorn's sample", 24, 88, 200, 24};
     foot.align = core::Align::Left;
     l.objects.push_back(std::move(foot));
+    return l;
+}
+
+core::Layout sample_report_layout() {  // s015b: "Addresses by State" -- a leading and a trailing sub-summary
+    using K = core::ObjectKind;
+    core::Layout l;
+    l.table = "addresses";
+    l.name = kSampleReportName;
+    l.width = 520;   // fits Letter and A4 unscaled
+    auto left = [&](const char* s, int x, int y, int w) {
+        core::LayoutObject o{K::Text, "", s, x, y, w, 24};
+        o.align = core::Align::Left;
+        l.objects.push_back(std::move(o));
+    };
+    auto box = [&](const char* f, int x, int y, int w) { l.objects.push_back({K::Field, f, "", x, y, w, 24}); };
+    l.header = 40;                                            // [0, 40) the title
+    left("Addresses by State", 16, 8, 280);
+    l.subs.push_back({"region", true, 40});                   // [40, 80) the state, above its addresses
+    left("State", 16, 48, 64);
+    box("region", 88, 48, 64);
+    core::LayoutObject who{K::Related, "contact_id", "", 32, 80, 136, 24};   // [80, 112) one address
+    who.from = "contacts";
+    who.shows = "last_name";
+    l.objects.push_back(std::move(who));
+    box("city", 176, 80, 144);
+    box("street", 328, 80, 176);
+    l.subs.push_back({"region", false, 40});                  // [112, 152) the state's count, under them
+    left("Addresses in the state", 32, 120, 200);
+    box(kSampleCountName, 240, 120, 64);
+    l.footer = 40;                                            // [152, 192)
+    left("Acorn's sample", 16, 160, 200);
+    l.height = 192;
     return l;
 }
 

@@ -29,6 +29,13 @@ struct PrintPage {
 // page's height to fill (already scaled into layout units). A body taller
 // than the room still gets a page each.
 std::vector<PrintPage> paginate(int header, int body, int footer, int records, double room);
+// s015b: a report's run of parts (core::report_blocks) on pages: `heights` --
+// each block's, in order; `first` / `count` on a page are BLOCK indexes. A
+// block marked `keep` (a leading sub-summary) is never the last thing on a
+// page while something follows it -- it moves over with what it heads.
+// No blocks: one page.
+std::vector<PrintPage> paginate_blocks(int header, int footer, const std::vector<int>& heights,
+                                       const std::vector<bool>& keep, double room);
 
 // How much a layout `width` wide is scaled to fit `paper`'s printable width
 // (1 when it fits).

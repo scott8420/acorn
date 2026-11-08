@@ -25,10 +25,16 @@ std::string select_sql(const Connection& c, const Table& t, const PageRequest& r
     s += " FROM " + c.quote_ident(t.name) + where;
     std::vector<std::string> order;
     const auto pk = t.primary_key();
-    if (!r.sort.empty() && t.column(r.sort))
+    std::vector<std::string> used;   // s015b: the report's groups first
+    for (const auto& g : r.group)
+        if (t.column(g) && std::find(used.begin(), used.end(), g) == used.end()) {
+            order.push_back(c.quote_ident(g) + " ASC");
+            used.push_back(g);
+        }
+    if (!r.sort.empty() && t.column(r.sort) && std::find(used.begin(), used.end(), r.sort) == used.end())
         order.push_back(c.quote_ident(r.sort) + (r.descending ? " DESC" : " ASC"));
     for (const auto& k : pk)
-        if (k != r.sort) order.push_back(c.quote_ident(k) + (r.descending && r.sort.empty() ? " DESC" : " ASC"));
+        if (k != r.sort && std::find(used.begin(), used.end(), k) == used.end()) order.push_back(c.quote_ident(k) + (r.descending && r.sort.empty() ? " DESC" : " ASC"));
     if (!order.empty()) {
         s += " ORDER BY ";
         for (std::size_t i = 0; i < order.size(); ++i) s += (i ? ", " : "") + order[i];
@@ -274,6 +280,54 @@ read_summaries(Connection& c, const Table& t, const std::map<std::string, core::
                              x.op == core::SummaryOp::Average;
         // A server's SUM / AVG of an exact number comes as text ("12.50"): a number.
         out[x.name] = calc_value(row[i], counted ? FieldType::Number : t.column(x.field)->type);
+    }
+    return out;
+}
+
+std::string group_summary_sql(const Connection& c, const Table& t, const std::vector<core::Summary>& sums,
+                              const std::vector<std::string>& by, const std::string& where) {
+    std::string g;
+    for (std::size_t i = 0; i < by.size(); ++i) g += (i ? ", " : "") + c.quote_ident(by[i]);
+    // summary_sql's aggregates, after the group's fields: "SELECT <by>, COUNT(..) ... FROM t <where> GROUP BY <by>"
+    std::string aggs = summary_sql(c, t, sums, where);
+    aggs = aggs.substr(std::string("SELECT ").size());
+    return "SELECT " + g + (sums.empty() ? "" : ", ") + aggs + " GROUP BY " + g;
+}
+
+std::expected<GroupSums, Error>
+read_group_summaries(Connection& c, const Table& t, const std::map<std::string, core::Summary>& sums,
+                     const std::vector<std::string>& by, const std::vector<Criterion>& crit, const Schema* sch) {
+    GroupSums out;
+    std::vector<core::Summary> asked;
+    for (const auto& [n, x] : sums) {
+        const Column* col = t.column(x.field);
+        if (col && col->type != FieldType::Container) asked.push_back(x);
+    }
+    std::vector<const Column*> cols;
+    for (const auto& f : by) {
+        const Column* col = t.column(f);
+        if (!col) return std::unexpected(Error{Error::Code::NotFound, "\u201c" + t.name + "\u201d has no field \u201c" + f + "\u201d"});
+        cols.push_back(col);
+    }
+    if (asked.empty() || by.empty()) return out;
+    FindQuery q;
+    if (!crit.empty()) {
+        auto fq = find_query(c, t, crit, sch);
+        if (!fq) return std::unexpected(Error{Error::Code::Unsupported, fq.error()});
+        q = std::move(*fq);
+    }
+    auto r = c.query(group_summary_sql(c, t, asked, by, q.where), q.values);
+    if (!r) return std::unexpected(r.error());
+    for (const auto& row : r->rows) {
+        std::vector<std::string> key;
+        for (std::size_t k = 0; k < cols.size() && k < row.size(); ++k) key.push_back(cell_text(row[k], cols[k]->type));
+        auto& m = out[key];
+        for (std::size_t i = 0; i < asked.size() && by.size() + i < row.size(); ++i) {
+            const auto& x = asked[i];
+            const bool counted = x.op == core::SummaryOp::Count || x.op == core::SummaryOp::Total ||
+                                 x.op == core::SummaryOp::Average;
+            m[x.name] = calc_value(row[by.size() + i], counted ? FieldType::Number : t.column(x.field)->type);
+        }
     }
     return out;
 }

@@ -30,6 +30,9 @@ struct PageRequest {
     std::int64_t limit  = 50;
     std::string  sort;            // a column name; "" = the key order
     bool         descending = false;
+    // s015b: a report's groups -- ordered by these first (each ascending),
+    // then by `sort`, then the key.
+    std::vector<std::string> group = {};
 };
 
 struct Page {
@@ -138,6 +141,19 @@ std::string summary_sql(const Connection& c, const Table& t, const std::vector<c
 std::expected<std::map<std::string, core::CalcValue>, Error>
 read_summaries(Connection& c, const Table& t, const std::map<std::string, core::Summary>& sums,
                const std::vector<Criterion>& crit = {}, const Schema* s = nullptr);
+
+// s015b -- SUMMARIES BY GROUP, for a report's sub-summaries: ONE SELECT per
+// group level -- `by` (the group's fields, outermost first), then each
+// summary, "GROUP BY" `by` -- over the records the criteria find. Each group
+// keyed by its fields' values as Browse shows them (cell_text), in `by`'s
+// order. A summary whose field is gone is left out (as read_summaries).
+std::string group_summary_sql(const Connection& c, const Table& t, const std::vector<core::Summary>& sums,
+                              const std::vector<std::string>& by, const std::string& where);
+using GroupSums = std::map<std::vector<std::string>, std::map<std::string, core::CalcValue>>;
+std::expected<GroupSums, Error>
+read_group_summaries(Connection& c, const Table& t, const std::map<std::string, core::Summary>& sums,
+                     const std::vector<std::string>& by, const std::vector<Criterion>& crit = {},
+                     const Schema* s = nullptr);
 
 // s014c -- what a value list offers. Typed: its values. From a field: ONE
 // SELECT DISTINCT of the field (and the shown field) of `from`, empties left

@@ -3028,6 +3028,162 @@ void test_print_book(Gate& g, const std::string& P) {
     check(P + "print: a related field prints the last name of the contact its link points at", related, why);
 }
 
+// ── s015b: sub-summary parts ─────────────────────────────────────────────────
+void test_report_pure(const fs::path& dir) {
+    using core::Part;
+    // A list with a header and a footer, then a sub by city each way.
+    core::Layout l = core::default_layout("addresses", {"city"});
+    l.header = 40;
+    for (auto& o : l.objects) o.y += 40;
+    l.height += 40;
+    core::move_part_line(l, Part::Footer, l.height + 40);   // a footer under the body
+    const int h0 = l.height, body0 = core::part_height(l, Part::Body);
+    const int lead = core::add_sub(l, "city", true);
+    const int trail = core::add_sub(l, "city", false);
+    const auto bs = core::bands(l);
+    check("report: add a leading and a trailing sub -- header, leading, body, trailing, footer, each 40 tall, the body as it was",
+          lead == 0 && trail == 1 && bs.size() == 5 && bs[1].part == Part::Sub && bs[1].sub == 0 && bs[2].part == Part::Body &&
+          bs[3].part == Part::Sub && bs[3].sub == 1 && bs[1].height == core::kSubH && bs[3].height == core::kSubH &&
+          l.height == h0 + 2 * core::kSubH && core::part_height(l, Part::Body) == body0 && core::check_layout(l).empty(),
+          std::to_string(bs.size()) + " bands, " + core::check_layout(l));
+    // Each got its field's box, in its band.
+    const auto& lb = l.objects[l.objects.size() - 2];
+    const auto& tb = l.objects.back();
+    check("report: each sub holds its field's box (part_of Sub, sub_of its index); the body's objects stay the body's",
+          core::part_of(l, lb) == Part::Sub && core::sub_of(l, lb) == 0 && core::sub_of(l, tb) == 1 &&
+          core::part_of(l, l.objects[0]) == Part::Body && core::part_objects(l, Part::Body).size() == 2 &&
+          core::band_objects(l, bs[1]) == std::vector<int>{static_cast<int>(l.objects.size()) - 2} &&
+          core::body_top(l) == 80 && core::sub_top(l, 1) == core::body_bottom(l), "");
+    // Add Field goes in the body, not into a sub; the trailing sub and the footer make room.
+    auto added = l;
+    core::add_object(added, core::ObjectKind::Field, "street");
+    check("report: Add Field lands in the body -- the trailing sub and the footer move down for it",
+          core::part_of(added, added.objects.back()) == Part::Body && core::sub_of(added, added.objects[added.objects.size() - 3]) == 1 &&
+          added.subs == l.subs && core::check_layout(added).empty(), "");
+    // Size a sub by its line: everything under it moves; it never cuts its box.
+    auto sized = l;
+    const bool grew = core::move_band_line(sized, 1, bs[1].top + bs[1].height + 24);
+    auto shrunk = l;
+    const bool cut = core::move_band_line(shrunk, 1, bs[1].top + 8);
+    check("report: a sub's line -- dragged down it grows (what's under moves); up, it stops at its box",
+          grew && sized.subs[0].height == 64 && sized.height == l.height + 24 && sized.objects[0].y == l.objects[0].y + 24 &&
+          cut && shrunk.subs[0].height == 32 && shrunk.height == l.height - 8, std::to_string(shrunk.subs[0].height));
+    auto foot = l;   // the footer line over a trailing sub sizes that sub
+    core::move_part_line(foot, Part::Footer, core::footer_top(l) + 16);
+    check("report: the footer line over a trailing sub sizes the sub, the footer moving with it",
+          foot.subs[1].height == 56 && foot.footer == l.footer && foot.height == l.height + 16, std::to_string(foot.subs[1].height));
+    // Remove: its objects go, what's under moves up.
+    auto gone = l;
+    const bool rm = core::remove_sub(gone, 0);
+    check("report: remove a sub -- its box goes, everything under it moves up 40",
+          rm && gone.subs.size() == 1 && !gone.subs[0].leading && gone.objects.size() == l.objects.size() - 1 &&
+          gone.objects[0].y == l.objects[0].y - 40 && gone.height == l.height - 40 && !core::remove_sub(gone, 5), "");
+    // Groups: leading top-down, then trailing bottom-up, each once.
+    core::Layout g2;
+    g2.subs = {{"region", true, 40}, {"city", true, 40}, {"city", false, 40}, {"region", false, 40}};
+    check("report: groups -- outermost first: region, city; each sub's level",
+          core::group_fields(g2) == std::vector<std::string>{"region", "city"} && core::group_level(g2, 0) == 0 &&
+          core::group_level(g2, 1) == 1 && core::group_level(g2, 2) == 1 && core::group_level(g2, 3) == 0 &&
+          core::group_level(g2, 9) == -1 && core::sub_label(g2.subs[2]) == "trailing sub-summary by “city”", "");
+    // Blocks: TN/Harrowgate x2, TN/Millbrook, OR/Port Ellis.
+    g2.table = "addresses"; g2.name = "r"; g2.width = 100; g2.height = 400;
+    const std::vector<std::vector<std::string>> keys = {{"TN", "Harrowgate"}, {"TN", "Harrowgate"}, {"TN", "Millbrook"}, {"OR", "Port Ellis"}};
+    using B = core::ReportBlock;
+    const std::vector<B> want = {
+        {Part::Sub, 0, 0}, {Part::Sub, 1, 0}, {Part::Body, -1, 0}, {Part::Body, -1, 1}, {Part::Sub, 2, 1},
+        {Part::Sub, 1, 2}, {Part::Body, -1, 2}, {Part::Sub, 2, 2}, {Part::Sub, 3, 2},
+        {Part::Sub, 0, 3}, {Part::Sub, 1, 3}, {Part::Body, -1, 3}, {Part::Sub, 2, 3}, {Part::Sub, 3, 3}};
+    const auto got = core::report_blocks(g2, keys);
+    check("report: blocks -- a state's heading, a town's, the town's records, the town's foot, the state's foot (two levels)",
+          got == want, std::to_string(got.size()) + " blocks");
+    core::Layout plain = core::default_layout("t", {"a"});
+    check("report: no subs -- one body per record; no records -- nothing",
+          core::report_blocks(plain, {{}, {}, {}}) == std::vector<B>{{Part::Body, -1, 0}, {Part::Body, -1, 1}, {Part::Body, -1, 2}} &&
+          core::report_blocks(g2, {}).empty(), "");
+    // Pages over blocks: a heading at a page's foot goes over with its records.
+    using core::PrintPage;
+    const auto p1 = core::paginate_blocks(40, 40, {40, 32, 32, 40, 32}, {true, false, false, true, false}, 230);
+    const auto p2 = core::paginate_blocks(0, 0, {}, {}, 600);
+    const auto p3 = core::paginate_blocks(0, 0, {40, 900}, {true, false}, 600);   // a heading over a too-tall body: kept together
+    check("report: pages over blocks -- a heading never ends a page; no blocks, one page; too tall, still placed",
+          p1 == std::vector<PrintPage>{{0, 3}, {3, 2}} && p2 == std::vector<PrintPage>{{0, 0}} &&
+          p3 == std::vector<PrintPage>{{0, 1}, {1, 1}}, std::to_string(p1.size()));
+    // Kept in the .acorn and read back; a trailing one says so; an older file reads none.
+    core::Solution sol;
+    sol.layouts["addresses"]["by town"] = l;
+    sol.layouts["addresses"]["by town"].name = "by town";
+    const auto file = (dir / "report.acorn").string();
+    const bool saved = core::save_solution(file, sol);
+    auto back = core::load_solution(file);
+    const std::string text = slurp(file);
+    check("report: subs kept in the .acorn and read back the same (\"when\": \"trailing\")",
+          saved && back && *back == sol && text.find("\"subs\"") != std::string::npos && text.find("\"trailing\"") != std::string::npos, "");
+    core::Layout bad = l;
+    bad.subs[0].by.clear();
+    core::Layout tall = l;
+    tall.subs[0].height = 2000;
+    check("report: check_layout -- a sub needs its field, and the parts leave the body room",
+          !core::check_layout(bad).empty() && !core::check_layout(tall).empty(), "");
+}
+
+// s015b: the sample's "Addresses by State" -- grouped, summed by group.
+void test_report_book(Gate& g, const core::Solution& sol, const std::string& P) {
+    auto sch = g.introspect();
+    const Table* at = sch ? sch->table("addresses") : nullptr;
+    const auto* rep = sol.layout("addresses", kSampleReportName);
+    if (!at || !rep) { check(P + "report: the sample's addresses and its report", false, ""); return; }
+    const auto strays0 = g.strays();
+    check(P + "report: the sample's Addresses by State kept (a leading and a trailing sub by region)",
+          *rep == sample_report_layout() && core::check_layout(*rep).empty() &&
+          core::group_fields(*rep) == std::vector<std::string>{"region"}, core::check_layout(*rep));
+    PageRequest r{0, 1000};
+    r.group = core::group_fields(*rep);
+    auto page = read_page(g, *at, r);
+    std::size_t rk = 0;
+    for (std::size_t i = 0; i < at->columns.size(); ++i) if (at->columns[i].name == "region") rk = i;
+    std::vector<std::vector<std::string>> keys;
+    for (const auto& row : page ? page->rows : std::vector<Row>{}) keys.push_back({cell_text(row[rk], FieldType::Text)});
+    bool sorted = page && keys.size() == 12;
+    for (std::size_t i = 1; i < keys.size(); ++i) if (keys[i] < keys[i - 1]) sorted = false;
+    check(P + "report: the records ordered by the group's field first (KY, OR, TN)", sorted && keys.front()[0] == "KY" && keys.back()[0] == "TN",
+          page ? std::to_string(keys.size()) : page.error().message);
+    const auto& sums = sol.summaries_of("addresses");
+    auto gs = read_group_summaries(g, *at, sums, {"region"});
+    const auto sql = group_summary_sql(g, *at, {sums.begin()->second}, {"region"}, "");
+    auto n = [&](const std::string& st) {
+        if (!gs) return -1.0;
+        auto it = gs->find({st});
+        if (it == gs->end()) return -2.0;
+        auto v = it->second.find(kSampleCountName);
+        return v == it->second.end() ? -3.0 : std::get<double>(v->second);
+    };
+    check(P + "report: one GROUP BY SELECT -- TN 8, OR 3, KY 1",
+          gs && gs->size() == 3 && n("TN") == 8 && n("OR") == 3 && n("KY") == 1 && sql.find("GROUP BY") != std::string::npos,
+          gs ? std::to_string(n("TN")) + " " + sql : gs.error().message);
+    auto found = read_group_summaries(g, *at, sums, {"region"}, {{"city", "Millbrook"}}, &*sch);
+    check(P + "report: ... over the found set (Millbrook -- TN 3, no other state)",
+          found && found->size() == 1 && found->begin()->first == std::vector<std::string>{"TN"} &&
+          std::get<double>(found->begin()->second.at(kSampleCountName)) == 3, found ? std::to_string(found->size()) : found.error().message);
+    // What prints: three states, each heading, its records, its count.
+    const auto blocks = core::report_blocks(*rep, keys);
+    int heads = 0, feet = 0, bodies = 0;
+    std::string tn;
+    for (const auto& b : blocks) {
+        if (b.part == core::Part::Body) { ++bodies; continue; }
+        const bool leading = rep->subs[static_cast<std::size_t>(b.sub)].leading;
+        (leading ? heads : feet)++;
+        if (!leading && keys[static_cast<std::size_t>(b.record)][0] == "TN" && gs) {
+            const auto pr = print_record(g, *sch, *at, *rep, page->rows[static_cast<std::size_t>(b.record)], {}, gs->at({"TN"}), "2026-11-08");
+            for (std::size_t i = 0; i < rep->objects.size(); ++i)
+                if (rep->objects[i].field == kSampleCountName) tn = pr[i].text;
+        }
+    }
+    check(P + "report: prints 3 headings, 12 addresses, 3 counts -- TN's foot says 8",
+          heads == 3 && feet == 3 && bodies == 12 && blocks.size() == 18 && blocks.front().part == core::Part::Sub && tn == "8",
+          std::to_string(blocks.size()) + " / " + tn);
+    check(P + "report: reading is not a write (no strays)", g.strays() == strays0, std::to_string(g.strays()));
+}
+
 // ── s009b: the Address Book starter ──────────────────────────────────────────
 void test_starter(Journal& j, Gate& g, const std::string& P) {
     auto count = [&](const std::string& t) {
@@ -3268,6 +3424,7 @@ void test_sample(Journal& j, Gate& g, const std::string& P) {
     }
     j.clear();
     check(P + "sample: arrives with nothing to undo (the caller clears the journal)", !j.can_undo() && !j.can_redo(), "");
+    test_report_book(g, sol, P);   // s015b
     j.store().set_solution(nullptr, {});
     for (const char* t : {"phones", "addresses", "contacts"})
         (void)g.inner().query("DROP TABLE IF EXISTS " + g.quote_ident(t));
@@ -3567,6 +3724,7 @@ void db_tests(CheckFn fn, int& skip_count) {
         test_value_lists(e, T.ro, "sqlite: ");  // s014c: value lists kept read-only, read from a field
         test_print_pure();                    // s015a
         test_print(e, T.ro, "sqlite: ");      // s015a: a record's layout resolved to what it prints
+        test_report_pure(tmp.p);              // s015b: sub-summary parts
         {   // s005b: the door, on its own fresh fixture file
             Target J = T;
             J.rw.path = (tmp.p / "journal.sqlite").string();

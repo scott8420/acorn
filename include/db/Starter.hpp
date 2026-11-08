@@ -33,5 +33,12 @@ inline constexpr const char* kSampleLayoutName = "Contact Card";
 // a footer. Passes core::check_layout.
 core::Layout sample_list_layout();
 inline constexpr const char* kSampleListName = "Contact List";
+// s015b: and "Addresses by State" -- a report on addresses: a leading
+// sub-summary by region (the state), each address a row (the contact's last
+// name through the link, city, street), a trailing one with the state's
+// count (the summary "how_many", which make_sample adds). Passes check_layout.
+core::Layout sample_report_layout();
+inline constexpr const char* kSampleReportName = "Addresses by State";
+inline constexpr const char* kSampleCountName = "how_many";
 
 }  // namespace acorn::db

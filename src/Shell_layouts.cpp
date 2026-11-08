@@ -81,11 +81,18 @@ const char* cursor_for(core::Grab g) {
 // s010d: the part line near (px, py): 1 the header line (the top edge when
 // there's no header), 2 the footer line (the bottom edge when there's no
 // footer), 3 the bottom edge under a footer; 0 none.
+// s015b: 10 + k -- the bottom line of band k (core::bands: the body or a
+// sub-summary) when it isn't the footer line.
 int line_at(const core::Layout& l, double px, double py) {
     if (px < 0 || px > l.width) return 0;
     auto near = [py](int y) { return std::abs(py - y) <= 4.0; };
     if (l.footer > 0 && near(l.height)) return 3;
     if (near(core::footer_top(l))) return 2;
+    const auto bs = core::bands(l);
+    for (std::size_t k = 0; k < bs.size(); ++k)
+        if ((bs[k].part == core::Part::Body || bs[k].part == core::Part::Sub) && bs[k].top + bs[k].height != core::footer_top(l) &&
+            near(bs[k].top + bs[k].height))
+            return 10 + static_cast<int>(k);
     if (near(l.header)) return 1;
     return 0;
 }
@@ -307,6 +314,11 @@ void Shell::build_layouts_page() {  // layouts: the Layouts area
             const int dyi = static_cast<int>(std::lround(dy));
             if (m_lay_line == 1) core::move_part_line(m_lay, core::Part::Header, m_lay_line_from.header + dyi);
             else if (m_lay_line == 2) core::move_part_line(m_lay, core::Part::Footer, core::footer_top(m_lay_line_from) + dyi);
+            else if (m_lay_line >= 10) {   // s015b: a sub-summary's line, or the body's over one
+                const auto bs = core::bands(m_lay_line_from);
+                const auto k = static_cast<std::size_t>(m_lay_line - 10);
+                if (k < bs.size()) core::move_band_line(m_lay, m_lay_line - 10, bs[k].top + bs[k].height + dyi);
+            }
             else core::move_layout_bottom(m_lay, m_lay_line_from.height + dyi);
             m_lay_paper.set_size_request(std::max(1, m_lay.width), std::max(1, m_lay.height));
             m_lay_fixed.set_size_request(m_lay.width + kRoom, m_lay.height + kRoom);
@@ -328,8 +340,12 @@ void Shell::build_layouts_page() {  // layouts: the Layouts area
     drag->signal_drag_end().connect([this](double, double) {
         if (const int line = std::exchange(m_lay_line, 0); line) {
             if (m_lay == m_lay_line_from) return;
-            const std::string what = line == 1 ? (m_lay.header == 0 ? "Removed the header" : m_lay_line_from.header == 0 ? "Made a header" : "Moved the header line")
-                                   : (m_lay.footer == 0 ? "Removed the footer" : m_lay_line_from.footer == 0 ? "Made a footer" : "Sized the footer");
+            std::string what = line == 1 ? (m_lay.header == 0 ? "Removed the header" : m_lay_line_from.header == 0 ? "Made a header" : "Moved the header line")
+                             : (m_lay.footer == 0 ? "Removed the footer" : m_lay_line_from.footer == 0 ? "Made a footer" : "Sized the footer");
+            if (m_lay.subs != m_lay_line_from.subs && m_lay.footer == m_lay_line_from.footer) {   // s015b: a sub-summary sized
+                for (std::size_t i = 0; i < m_lay.subs.size() && i < m_lay_line_from.subs.size(); ++i)
+                    if (m_lay.subs[i].height != m_lay_line_from.subs[i].height) what = "Sized the " + core::sub_label(m_lay.subs[i]);
+            } else if (line >= 10) what = "Sized the body";
             Glib::signal_idle().connect_once([this, what] { keep_layout(m_lay, what); });
             return;
         }
@@ -552,6 +568,14 @@ void Shell::draw_layout(const Cairo::RefPtr<Cairo::Context>& cr, int w, int h) {
     };
     if (m_lay.header > 0) { band(0, m_lay.header, "header"); rule(m_lay.header); }
     if (m_lay.footer > 0) { band(core::footer_top(m_lay), m_lay.height, "footer"); rule(core::footer_top(m_lay)); }
+    for (const auto& b : core::bands(m_lay)) {   // s015b: each sub-summary shaded, named, a line under it
+        if (b.part == core::Part::Body && !m_lay.subs.empty()) rule(b.top + b.height);
+        if (b.part != core::Part::Sub) continue;
+        const auto& x = m_lay.subs[static_cast<std::size_t>(b.sub)];
+        const std::string name = std::string(x.leading ? "leading" : "trailing") + " · " + x.by;
+        band(b.top, b.top + b.height, name.c_str());
+        rule(b.top + b.height);
+    }
 
     auto text_in = [&](const std::string& s, const core::LayoutObject& o, Pango::Alignment how, double alpha) {
         auto pl = m_lay_canvas.create_pango_layout(s);
@@ -761,8 +785,9 @@ void Shell::paint_inspector() {  // layouts: the picked object's field / words /
         // s010d: the parts, and how to change them.
         m_lay_inspector.append(*side_label(
             "Parts: header " + std::to_string(m_lay.header) + " · body " +
-            std::to_string(m_lay.height - m_lay.header - m_lay.footer) + " · footer " + std::to_string(m_lay.footer) +
-            " px. Drag the top edge down for a header, the bottom edge for a footer; drag a line back to remove an empty one. "
+            std::to_string(core::part_height(m_lay, core::Part::Body)) + " · footer " + std::to_string(m_lay.footer) + " px" +
+            (m_lay.subs.empty() ? std::string{} : " · " + std::to_string(m_lay.subs.size()) + (m_lay.subs.size() == 1 ? " sub-summary" : " sub-summaries")) +
+            ". Drag the top edge down for a header, the bottom edge for a footer; drag a line back to remove an empty one. "
             "The Form shows the body; Browse -> List draws all three.", "acorn-status"));
         // s010c: Add -- each lands under everything, picked; one step.
         auto add_head = side_label("Add", "acorn-field-name");
@@ -886,6 +911,68 @@ void Shell::paint_inspector() {  // layouts: the picked object's field / words /
             if (!picks->empty()) m_lay_inspector.append(*rdd);
             m_lay_inspector.append(*addr);
         }
+        // s015b: sub-summaries -- a report's parts, printed once per group in
+        // Preview. Each with its remove; Add from a field and where it goes.
+        auto sub_head = side_label("Sub-summaries", "acorn-field-name");
+        sub_head->set_margin_top(10);
+        m_lay_inspector.append(*sub_head);
+        m_lay_inspector.append(*side_label(m_lay.subs.empty()
+            ? "None. A sub-summary prints once per group of records alike in its field -- leading above the group, "
+              "trailing below it. Put summary fields in it for the group's count or total. Browse -> Preview shows it."
+            : "Each prints once per group in Browse -> Preview (the records grouped by its field first); "
+              "a summary field in it counts that group. Drag the line under one to size it.", "acorn-status"));
+        const auto live = fields_of(m_lay_table);
+        for (std::size_t i = 0; i < m_lay.subs.size(); ++i) {
+            const auto x = m_lay.subs[i];
+            auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 4);
+            const bool here = std::find(live.begin(), live.end(), x.by) != live.end();
+            auto lb = side_label((x.leading ? "Leading by " : "Trailing by ") + curly(x.by) +
+                                 (here ? "" : " (there's no such field now -- Preview leaves it out)"), here ? nullptr : "acorn-missing");
+            lb->set_hexpand(true);
+            row->append(*lb);
+            auto rm = Gtk::make_managed<Gtk::Button>();
+            rm->set_icon_name("list-remove-symbolic");
+            rm->add_css_class("flat");
+            rm->set_tooltip_text("Take this sub-summary and what's in it off the layout -- Ctrl+Z puts it back");
+            rm->set_name("layouts.sub.remove." + std::to_string(i));
+            rm->set_sensitive(can);
+            rm->signal_clicked().connect([this, i, x, gen] {
+                if (gen != m_lay_gen) return;
+                auto l = m_lay;
+                if (!core::remove_sub(l, static_cast<int>(i))) return;
+                m_lay_picks.clear();
+                const std::string what = "Removed the " + core::sub_label(x);
+                Glib::signal_idle().connect_once([this, l, what] { m_lay_focus.clear(); keep_layout(l, what); });
+            });
+            row->append(*rm);
+            m_lay_inspector.append(*row);
+        }
+        auto byf = std::make_shared<std::vector<std::string>>(live);
+        std::vector<Glib::ustring> byshown(live.begin(), live.end());
+        auto sdd = Gtk::make_managed<Gtk::DropDown>(Gtk::StringList::create(byshown));
+        sdd->set_name("layouts.sub.by");
+        sdd->set_tooltip_text("The field the records are grouped by");
+        sdd->set_sensitive(can && !live.empty());
+        auto wdd = Gtk::make_managed<Gtk::DropDown>(Gtk::StringList::create({"Leading -- above the group", "Trailing -- below the group"}));
+        wdd->set_name("layouts.sub.when");
+        wdd->set_sensitive(can && !live.empty());
+        auto addsub = Gtk::make_managed<Gtk::Button>("Add Sub-summary");
+        addsub->set_name("layouts.sub.add");
+        addsub->set_sensitive(can && !live.empty());
+        addsub->set_tooltip_text("A part printed once per group of records alike in the field, with the field's box in it");
+        addsub->signal_clicked().connect([this, sdd, wdd, byf, gen] {
+            if (gen != m_lay_gen) return;
+            const auto i = sdd->get_selected();
+            if (i == GTK_INVALID_LIST_POSITION || i >= byf->size()) return;
+            const bool leading = wdd->get_selected() != 1;
+            auto l = m_lay;
+            const int k = core::add_sub(l, (*byf)[i], leading);
+            m_lay_picks = {static_cast<int>(l.objects.size()) - 1};   // its box, picked
+            const std::string what = "Added a " + core::sub_label(l.subs[static_cast<std::size_t>(k)]);
+            Glib::signal_idle().connect_once([this, l, what] { m_lay_focus.clear(); keep_layout(l, what); m_lay_canvas.grab_focus(); });
+        });
+        if (!live.empty()) { m_lay_inspector.append(*sdd); m_lay_inspector.append(*wdd); }
+        m_lay_inspector.append(*addsub);
         return;
     }
     const auto idx = static_cast<std::size_t>(lay_one());
