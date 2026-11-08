@@ -63,6 +63,7 @@ std::expected<Page, Error> read_related(Connection& c, const Table& t, const std
 //   "=" alone        the field is empty (NULL; for text, also "")
 //   "=x"             exactly x
 //   "<x" "<=x" ">x" ">=x"   less / greater, as the engine orders the field
+//   "a..b" ("a...b") a RANGE, a to b inclusive (s022); text any case
 //   anything else    text: CONTAINS x, any case (ASCII letters); the rest: = x
 // Values are bound (never written into the SQL); a value the field can't
 // hold is refused in words ("“id” needs a whole number"), as is a field the
@@ -81,6 +82,13 @@ struct Criterion {
     std::string table = {};
     std::string outer = {};
     std::string inner = {};
+    // s022: which REQUEST of the find the box belongs to, and whether that
+    // request OMITS. Boxes of one request must all match (AND); a record found
+    // by ANY non-omit request is in (OR) -- unless any omit request matches it.
+    // Only omit requests: every record but those. The script / export /
+    // summary paths pass these along untouched.
+    int  request = 0;
+    bool omit = false;
     bool operator==(const Criterion&) const = default;
 };
 struct FindQuery {

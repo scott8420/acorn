@@ -183,6 +183,8 @@ private:
     void paint_find();                           // category: find: the layout's boxes, empty -- type what to look for (s013a)
     void start_find();                           // category: find: win.find -> the Find screen
     void do_find();                              // category: find: the typed boxes -> the found set
+    void find_request(int to);                   // category: find: s022 -- show request `to` (-1: a new one)
+    void delete_find_request();                  // category: find: s022 -- the shown request goes
     void cancel_find();                          // category: find: back to the records as they were
     void show_all();                             // category: find: win.show-all -> every record again
     bool found_here() const;                     // category: find: a found set for the shown table
@@ -454,10 +456,18 @@ private:
     bool                            m_browse_painting = false;
     // s013a -- Find: the Find screen, what is typed in it, and the found set.
     bool                            m_finding = false;
-    std::map<std::string, std::string> m_find_typed;  // field -> what is typed in its box (kept across a repaint)
+    // s022: a find is REQUESTS -- each its boxes as typed (key -> text) and
+    // whether it omits; the one on screen is m_find_at.
+    struct FindRequest {
+        std::map<std::string, std::string> typed;
+        bool omit = false;
+    };
+    std::vector<FindRequest>        m_find_reqs{1};
+    std::size_t                     m_find_at = 0;
+    std::map<std::string, std::string>& find_typed() { return m_find_reqs[m_find_at].typed; }
     std::string                     m_found_table;    // the found set's table ("" = none: every record)
     std::vector<db::Criterion>      m_found;          // ...and what it asked
-    std::map<std::string, std::string> m_found_typed; // s013b: its boxes as typed (Find again shows them)
+    std::vector<FindRequest>        m_found_reqs;     // s013b / s022: its requests as typed (Find again shows them)
     std::int64_t                    m_found_of = 0;   // every record in the table, for "found 5 of 12"
     widgets::Button                 m_browse_find, m_browse_show_all;
     widgets::MenuButton             m_browse_scripts;       // s017a: the shown table's scripts

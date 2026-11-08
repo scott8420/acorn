@@ -102,9 +102,26 @@ std::pair<std::string, std::string> split_op(const std::string& typed) {
 
 }  // namespace
 
+// s022: a range "a..b" / "a...b" -> {a, b}; nullopt when it isn't one.
+std::optional<std::pair<std::string, std::string>> split_range(const std::string& s) {
+    for (const char* dots : {"...", ".."}) {
+        const auto at = s.find(dots);
+        if (at == std::string::npos) continue;
+        return std::pair{trimmed(s.substr(0, at)), trimmed(s.substr(at + std::string(dots).size()))};
+    }
+    return std::nullopt;
+}
+
 std::expected<FindQuery, std::string> find_query(const Connection& c, const Table& t, const std::vector<Criterion>& crit,
                                                  const Schema* sch) {
-    FindQuery q;
+    // s022: each request's conditions and values, in the order requests come.
+    struct Req { bool omit = false; std::vector<std::string> conds; std::vector<Value> values; };
+    std::vector<std::pair<int, Req>> reqs;
+    auto req_of = [&](const Criterion& k) -> Req& {
+        for (auto& [n, r] : reqs) if (n == k.request) return r;
+        reqs.push_back({k.request, Req{k.omit, {}, {}}});
+        return reqs.back().second;
+    };
     for (const auto& k : crit) {
         if (trimmed(k.typed).empty()) continue;
         // s013b: whose field -- this table's, or another's through a link.
@@ -121,8 +138,30 @@ std::expected<FindQuery, std::string> find_query(const Connection& c, const Tabl
         if (col->type == FieldType::Container) return std::unexpected(name + " holds binary data -- it can't be searched");
         const std::string f = c.quote_ident(col->name);
         auto [op, rest] = split_op(k.typed);
+        Req& rq = req_of(k);
         std::string cond;
-        if (op == "=" && rest.empty()) {
+        const auto range = op.empty() ? split_range(rest) : std::nullopt;
+        if (range) {   // s022: a to b, inclusive
+            const std::string what = "\u201C" + col->name + "\u201D";
+            if (range->first.empty() || range->second.empty())
+                return std::unexpected(what + ": a range needs both ends, like 1..5 (or use <= / >=)");
+            if (col->type == FieldType::Text) {   // any case, as contains is
+                std::string lo = range->first, hi = range->second;
+                for (auto& ch : lo) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+                for (auto& ch : hi) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+                cond = "LOWER(" + f + ") BETWEEN ? AND ?";
+                rq.values.emplace_back(lo);
+                rq.values.emplace_back(hi);
+            } else {
+                auto lo = parse_field(range->first, *col);
+                if (!lo) return std::unexpected(lo.error());
+                auto hi = parse_field(range->second, *col);
+                if (!hi) return std::unexpected(hi.error());
+                cond = f + " BETWEEN ? AND ?";
+                rq.values.push_back(std::move(*lo));
+                rq.values.push_back(std::move(*hi));
+            }
+        } else if (op == "=" && rest.empty()) {
             cond = col->type == FieldType::Text ? "(" + f + " IS NULL OR " + f + " = '')" : f + " IS NULL";
         } else if (op.empty() && col->type == FieldType::Text) {
             // Contains, any case: the field lowered by the engine, the words here
@@ -134,20 +173,47 @@ std::expected<FindQuery, std::string> find_query(const Connection& c, const Tabl
             }
             pat += "%";
             cond = "LOWER(" + f + ") LIKE ? ESCAPE '!'";
-            q.values.emplace_back(pat);
+            rq.values.emplace_back(pat);
         } else {
             if (rest.empty()) return std::unexpected(name + ": “" + op + "” needs something after it");
             auto v = parse_field(rest, *col);
             if (!v) return std::unexpected(v.error());
             cond = f + " " + (op.empty() ? std::string("=") : op) + " ?";
-            q.values.push_back(std::move(*v));
+            rq.values.push_back(std::move(*v));
         }
         if (in != &t)   // the link: this record's outer among the matching records' inner
             cond = c.quote_ident(k.outer) + " IN (SELECT " + c.quote_ident(k.inner) + " FROM " + c.quote_ident(in->name) +
                    " WHERE " + cond + ")";
-        q.where += (q.where.empty() ? " WHERE " : " AND ") + cond;
+        rq.conds.push_back(cond);
     }
-    if (q.where.empty()) return std::unexpected("Type what to look for in at least one box");
+    // Found: any finding request (OR) of all its boxes (AND); then NOT any
+    // omitting one. An omit test that is NULL (an empty field) omits nothing.
+    FindQuery q;
+    std::vector<const Req*> in, out;
+    for (const auto& [n, r] : reqs)
+        if (!r.conds.empty()) (r.omit ? out : in).push_back(&r);
+    if (in.empty() && out.empty()) return std::unexpected("Type what to look for in at least one box");
+    auto all_of = [](const Req& r) {
+        std::string s;
+        for (const auto& c : r.conds) s += (s.empty() ? "" : " AND ") + c;
+        return s;
+    };
+    auto any_of = [&](const std::vector<const Req*>& rs, bool wrap) {
+        std::string s;
+        for (const Req* r : rs) {
+            const bool paren = wrap && rs.size() > 1 && r->conds.size() > 1;
+            s += (s.empty() ? "" : " OR ") + (paren ? "(" + all_of(*r) + ")" : all_of(*r));
+            q.values.insert(q.values.end(), r->values.begin(), r->values.end());
+        }
+        return s;
+    };
+    if (!in.empty()) q.where = in.size() == 1 ? all_of(*in[0]) : "(" + any_of(in, true) + ")";
+    if (in.size() == 1) q.values = in[0]->values;
+    if (!out.empty()) {
+        const std::string o = "NOT COALESCE((" + any_of(out, true) + "), FALSE)";
+        q.where = q.where.empty() ? o : q.where + " AND " + o;
+    }
+    q.where = " WHERE " + q.where;
     return q;
 }
 
@@ -159,18 +225,38 @@ std::expected<Page, Error> read_found(Connection& c, const Table& t, const std::
 }
 
 std::string find_summary(const std::vector<Criterion>& crit) {
-    std::string out;
+    // s022: per request, in order; several are "or"-ed, omits said last.
+    std::vector<std::pair<int, std::pair<bool, std::vector<std::string>>>> reqs;
     for (const auto& k : crit) {
         if (trimmed(k.typed).empty()) continue;
         auto [op, rest] = split_op(k.typed);
         const std::string who = k.table.empty() ? k.field : k.table + "." + k.field;   // s013b
         std::string said;
-        if (op == "=" && rest.empty()) said = who + " is empty";
+        const auto range = op.empty() ? split_range(rest) : std::nullopt;
+        if (range)                     said = who + " from " + range->first + " to " + range->second;
+        else if (op == "=" && rest.empty()) said = who + " is empty";
         else if (op.empty())           said = who + " has “" + rest + "”";
         else                           said = who + " " + op + " " + rest;
-        out += (out.empty() ? "" : " · ") + said;
+        auto it = std::find_if(reqs.begin(), reqs.end(), [&](const auto& r) { return r.first == k.request; });
+        if (it == reqs.end()) { reqs.push_back({k.request, {k.omit, {}}}); it = reqs.end() - 1; }
+        it->second.second.push_back(said);
     }
-    return out;
+    auto words = [&](bool omit) {
+        std::vector<std::string> each;
+        for (const auto& [n, r] : reqs) {
+            if (r.first != omit) continue;
+            std::string s;
+            for (const auto& w : r.second) s += (s.empty() ? "" : " · ") + w;
+            each.push_back(s);
+        }
+        std::string out;
+        for (const auto& s : each)
+            out += (out.empty() ? "" : " or ") + (each.size() > 1 && s.find(" · ") != std::string::npos ? "(" + s + ")" : s);
+        return out;
+    };
+    const std::string in = words(false), out = words(true);
+    if (out.empty()) return in;
+    return in.empty() ? "every record but " + out : in + " · omitting " + out;
 }
 
 std::string page_sql(const Connection& c, const Table& t, const PageRequest& r) { return select_sql(c, t, r, {}); }

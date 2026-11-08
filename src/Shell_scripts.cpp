@@ -475,13 +475,18 @@ void Shell::script_apply() {  // scripts: the run's state -> Browse
     }
     if (st.found.empty()) {
         m_found.clear();
-        m_found_typed.clear();
+        m_found_reqs.clear();
         m_found_table.clear();
     } else {
         m_found = st.found;
         m_found_table = st.table;
-        m_found_typed.clear();
-        for (const auto& c : st.found) m_found_typed["field|" + c.field] = c.typed;
+        m_found_reqs.clear();   // s022: back into requests, as typed
+        for (const auto& c : st.found) {
+            const auto r = static_cast<std::size_t>(std::max(c.request, 0));
+            if (m_found_reqs.size() <= r) m_found_reqs.resize(r + 1);
+            m_found_reqs[r].omit = c.omit;
+            if (c.table.empty()) m_found_reqs[r].typed["field|" + c.field] = c.typed;
+        }
     }
     m_browse_req.sort = st.sort;
     m_browse_req.descending = st.descending;

@@ -247,7 +247,7 @@ void Shell::browse_table(const std::string& name) {  // browse: this table's fir
     m_form_focus.clear();
     m_finding = false;   // s013a: a find belongs to its table
     m_found.clear();
-    m_found_typed.clear();
+    m_found_reqs.clear();
     m_found_table.clear();
     m_browse_req = {0, kPage};
     m_browse_sel.clear();

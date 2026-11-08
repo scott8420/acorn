@@ -493,6 +493,19 @@ int main() {
         check("find: the summary says each non-blank box in words",
               s == "last_name has \u201CTh\u201D · company is empty · birthday < 1960-01-01", s);
         check("find: no boxes -> an empty summary", acorn::db::find_summary({{"a", ""}}).empty(), "");
+        // s022: requests, omit, ranges in words.
+        auto rq = [](std::string f, std::string t, int r, bool o = false) {
+            Criterion k{std::move(f), std::move(t)};
+            k.request = r;
+            k.omit = o;
+            return k;
+        };
+        const auto s2 = acorn::db::find_summary({rq("last_name", "Th", 0), rq("age", "1..5", 0), rq("city", "Paris", 1),
+                                                 rq("state", "=TX", 2, true)});
+        check("find: requests in words -- (a · b) or c · omitting d; a range says from .. to",
+              s2 == "(last_name has \u201CTh\u201D · age from 1 to 5) or city has \u201CParis\u201D · omitting state = TX", s2);
+        const auto s3 = acorn::db::find_summary({rq("state", "TX", 0, true), rq("state", "OK", 1, true)});
+        check("find: only omits -- every record but ...", s3 == "every record but state has \u201CTX\u201D or state has \u201COK\u201D", s3);
     }
 
     // -- Shortcuts: the registry paradigm, exercised ---------------------------

@@ -4477,6 +4477,53 @@ void test_sample(Journal& j, Gate& g, const std::string& P, Dialect d, Engine* e
         auto pg = found({{"last_name", "a"}}, {0, 2});
         check(P + "find: a page of the found set -- two rows, the total counts all",
               pg && pg->rows.size() == std::min<std::size_t>(2, static_cast<std::size_t>(a_n)) && pg->total == a_n, "");
+        // s022: requests (OR), Omit, ranges.
+        auto req = [](std::string f, std::string t, int r, bool o = false) {
+            Criterion c{std::move(f), std::move(t)};
+            c.request = r;
+            c.omit = o;
+            return c;
+        };
+        auto empty_co = [&](const Row& r) { return r[col("company")].is_null() || text_of(r, "company").empty(); };
+        auto kv = [&](const Row& r) { return num(r[col(key)]).value_or(-1); };
+        const auto or_n = expect([&](const Row& r) { return has("last_name", "a")(r) || empty_co(r); });
+        auto f_or = found({req("last_name", "a", 0), req("company", "=", 1)});
+        check(P + "find: two requests -- a record matching EITHER is found (last_name has a, or company empty)",
+              f_or && f_or->total == or_n && or_n > a_n, f_or ? std::to_string(f_or->total) + " / " + std::to_string(or_n) : f_or.error().message);
+        const auto om_n = expect([&](const Row& r) { return has("last_name", "a")(r) && !empty_co(r); });
+        auto f_om = found({req("last_name", "a", 0), req("company", "=", 1, true)});
+        check(P + "find: an Omit request -- last_name has a, less those with no company",
+              f_om && f_om->total == om_n && om_n < a_n, f_om ? std::to_string(f_om->total) + " / " + std::to_string(om_n) : f_om.error().message);
+        const auto only_n = expect([&](const Row& r) { return !has("last_name", "a")(r); });
+        auto f_only = found({req("last_name", "a", 0, true)});
+        check(P + "find: only an Omit request -- every record but those (an empty last name isn't omitted)",
+              f_only && f_only->total == only_n && only_n + a_n == expect([](const Row&) { return true; }),
+              f_only ? std::to_string(f_only->total) + " / " + std::to_string(only_n) : f_only.error().message);
+        const auto mix_n = expect([&](const Row& r) {
+            return ((has("last_name", "a")(r) && kv(r) > 2) || kv(r) == 1) && !empty_co(r) && !has("first_name", "zz")(r);
+        });
+        auto f_mix = found({req("last_name", "a", 0), req(key, ">2", 0), req(key, "1", 1), req("company", "=", 2, true),
+                            req("first_name", "zz", 3, true)});
+        check(P + "find: (a AND >2) OR id 1, omitting no company OR first name zz -- the values bound in order",
+              f_mix && f_mix->total == mix_n, f_mix ? std::to_string(f_mix->total) + " / " + std::to_string(mix_n) : f_mix.error().message);
+        const auto r_n = expect([&](const Row& r) { return kv(r) >= 2 && kv(r) <= 4; });
+        auto f_r = found({{key, "2..4"}});
+        auto f_r3 = found({{key, " 2 ... 4 "}});
+        check(P + "find: a range on a number -- 2..4 (and 2 ... 4) is 2, 3, 4", f_r && f_r3 && f_r->total == r_n && r_n == 3 &&
+              f_r3->total == r_n, f_r ? std::to_string(f_r->total) : f_r.error().message);
+        const auto d_n = expect([&](const Row& r) { auto b = text_of(r, "birthday"); return !b.empty() && b >= "1950-01-01" && b <= "1969-12-31"; });
+        auto f_d = found({{"birthday", "1950-01-01..1969-12-31"}});
+        check(P + "find: a range on a date -- born in the fifties and sixties", f_d && f_d->total == d_n && d_n > 0,
+              f_d ? std::to_string(f_d->total) + " / " + std::to_string(d_n) : f_d.error().message);
+        const auto t_n = expect([&](const Row& r) { auto l = lower(text_of(r, "last_name")); return !l.empty() && l >= "a" && l <= "m"; });
+        auto f_t = found({{"last_name", "A..m"}});
+        check(P + "find: a range on text, any case -- last names a to m", f_t && f_t->total == t_n && t_n > 0,
+              f_t ? std::to_string(f_t->total) + " / " + std::to_string(t_n) : f_t.error().message);
+        auto half = found({{key, "..5"}});
+        auto badr = found({{key, "1..x"}});
+        check(P + "find: a range missing an end, or with an end the field can't hold -- refused in words",
+              !half && half.error().message.find("both ends") != std::string::npos && !badr,
+              half ? "found!" : half.error().message);
         // s013b: through a link -- a portal's column, a related field.
         if (sc->table("phones") && sc->table("addresses")) {
             const Table& ph = *sc->table("phones");

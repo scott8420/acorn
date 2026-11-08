@@ -2,6 +2,7 @@
 #include "Log.hpp"
 
 #include <gtkmm/button.h>
+#include <gtkmm/checkbutton.h>
 #include <gtkmm/drawingarea.h>
 #include <gtkmm/entry.h>
 #include <gtkmm/eventcontrollerkey.h>
@@ -23,8 +24,13 @@
 // a box ("addresses whose contact's last name has th"): each asks through
 // the link (db::Criterion's table / outer / inner).
 //
-// Boxes are keyed in m_find_typed as "field|f", "portal|<table>|<column>",
+// Boxes are keyed in each request's `typed` as "field|f", "portal|<table>|<column>",
 // "related|<link>|<field>".
+//
+// s022: REQUESTS (FileMaker's): New Request adds an empty set of boxes; a
+// record is found when it matches EVERY box of ANY request; a request ticked
+// Omit takes out what it matches instead. "Request 2 of 3" with ◀ ▶ walks
+// them; Delete Request drops the shown one. A box may hold a range: 1..5.
 //
 // Find writes nothing: it is SELECTs through the Gate, so it works on a
 // read-only connection. The found set is the find run again on each read --
@@ -74,8 +80,9 @@ void Shell::start_find() {  // find: win.find -> the Find screen
     if (!m_conn || !browse_info()) return;
     if (m_stack.get_visible_child_name() != "browse") m_stack.set_visible_child("browse");
     // A find already standing: its boxes come back as typed, to refine it.
-    m_find_typed.clear();
-    if (found_here()) m_find_typed = m_found_typed;
+    m_find_reqs.assign(1, FindRequest{});
+    m_find_at = 0;
+    if (found_here() && !m_found_reqs.empty()) m_find_reqs = m_found_reqs;
     m_finding = true;
     m_record_new = false;
     browse_note("Find: type what to look for in any box, then Enter. Esc goes back.", "ok");
@@ -98,19 +105,28 @@ void Shell::do_find() {  // find: the typed boxes -> the found set
     if (!m_finding || !m_conn || !t) return;
     // The table's own fields in its order, then the layout's portals and
     // related fields in its order -- so the line reads as the boxes do.
+    // s022: every request in turn, numbered as they're shown.
     std::vector<db::Criterion> crit;
-    for (const auto& c : t->columns)
-        if (auto it = m_find_typed.find("field|" + c.name); it != m_find_typed.end()) crit.push_back({c.name, it->second});
     const core::Layout L = form_layout();
-    for (int oi : core::part_objects(L, core::Part::Body)) {
-        const auto& o = L.objects[static_cast<std::size_t>(oi)];
-        const bool portal = o.kind == core::ObjectKind::Portal;
-        if (!portal && o.kind != core::ObjectKind::Related) continue;
-        for (const auto& col : portal ? o.columns : std::vector<std::string>{o.shows}) {
-            const std::string key = portal ? "portal|" + o.from + "|" + col : "related|" + o.field + "|" + o.shows;
-            auto it = m_find_typed.find(key);
-            if (it == m_find_typed.end()) continue;
-            if (auto c = find_box(o, col)) { c->typed = it->second; crit.push_back(*c); }
+    for (std::size_t ri = 0; ri < m_find_reqs.size(); ++ri) {
+        const auto& typed = m_find_reqs[ri].typed;
+        const auto at = crit.size();
+        for (const auto& c : t->columns)
+            if (auto it = typed.find("field|" + c.name); it != typed.end()) crit.push_back({c.name, it->second});
+        for (int oi : core::part_objects(L, core::Part::Body)) {
+            const auto& o = L.objects[static_cast<std::size_t>(oi)];
+            const bool portal = o.kind == core::ObjectKind::Portal;
+            if (!portal && o.kind != core::ObjectKind::Related) continue;
+            for (const auto& col : portal ? o.columns : std::vector<std::string>{o.shows}) {
+                const std::string key = portal ? "portal|" + o.from + "|" + col : "related|" + o.field + "|" + o.shows;
+                auto it = typed.find(key);
+                if (it == typed.end()) continue;
+                if (auto c = find_box(o, col)) { c->typed = it->second; crit.push_back(*c); }
+            }
+        }
+        for (auto i = at; i < crit.size(); ++i) {
+            crit[i].request = static_cast<int>(ri);
+            crit[i].omit = m_find_reqs[ri].omit;
         }
     }
     auto q = db::find_query(*m_conn, *t, crit, &m_schema);
@@ -131,7 +147,7 @@ void Shell::do_find() {  // find: the typed boxes -> the found set
     }
     std::erase_if(crit, [](const db::Criterion& c) { return c.typed.find_first_not_of(" \t") == std::string::npos; });
     m_found = crit;
-    m_found_typed = m_find_typed;
+    m_found_reqs = m_find_reqs;
     m_found_table = t->name;
     m_finding = false;
     m_browse_req.offset = 0;
@@ -146,7 +162,7 @@ void Shell::do_find() {  // find: the typed boxes -> the found set
 void Shell::show_all() {  // find: win.show-all -> every record again
     if (!found_here() && !m_finding) return;
     m_found.clear();
-    m_found_typed.clear();
+    m_found_reqs.clear();
     m_found_table.clear();
     m_finding = false;
     m_browse_req.offset = 0;
@@ -169,13 +185,60 @@ void Shell::paint_find() {  // find: the layout's boxes, empty
     form_caption(*outer, *t, L, kept, {});
 
     auto how = find_label("Text finds what contains it (any case) · “=” alone: empty · “=x” exactly x · "
-                          "< > <= >= compare · blank boxes ask nothing · a portal's boxes find records with any matching row",
+                          "< > <= >= compare · 1..5 a range · blank boxes ask nothing · a portal's boxes find records with "
+                          "any matching row · New Request: records matching EITHER request · Omit: leave out what it matches",
                           "acorn-status");
     how->set_ellipsize(Pango::EllipsizeMode::NONE);
     how->set_wrap(true);
     how->set_single_line_mode(false);
     how->set_max_width_chars(70);
     outer->append(*how);
+
+    // s022: the requests -- which one is shown, ◀ ▶, New / Delete, Omit.
+    {
+        auto bar = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
+        bar->set_name("shell.browse.find_requests");
+        const auto n = m_find_reqs.size();
+        auto prev = Gtk::make_managed<Gtk::Button>();
+        prev->set_icon_name("go-previous-symbolic");
+        prev->add_css_class("flat");
+        prev->set_name("shell.browse.find_prev");
+        prev->set_tooltip_text("The request before");
+        prev->set_sensitive(m_find_at > 0);
+        prev->signal_clicked().connect([this, gen] { if (gen == m_view_gen) find_request(static_cast<int>(m_find_at) - 1); });
+        auto which = find_label("Request " + std::to_string(m_find_at + 1) + " of " + std::to_string(n), "acorn-field-name");
+        which->set_name("shell.browse.find_which");
+        auto next = Gtk::make_managed<Gtk::Button>();
+        next->set_icon_name("go-next-symbolic");
+        next->add_css_class("flat");
+        next->set_name("shell.browse.find_next");
+        next->set_tooltip_text("The request after");
+        next->set_sensitive(m_find_at + 1 < n);
+        next->signal_clicked().connect([this, gen] { if (gen == m_view_gen) find_request(static_cast<int>(m_find_at) + 1); });
+        auto add = Gtk::make_managed<Gtk::Button>("New Request");
+        add->set_name("shell.browse.find_new_request");
+        add->set_tooltip_text("Another set of empty boxes -- a record matching EITHER request is found");
+        add->signal_clicked().connect([this, gen] { if (gen == m_view_gen) find_request(-1); });
+        auto del = Gtk::make_managed<Gtk::Button>("Delete Request");
+        del->set_name("shell.browse.find_delete_request");
+        del->set_sensitive(n > 1);
+        del->set_tooltip_text(n > 1 ? "Drop this request (its boxes)" : "The only request -- clear its boxes instead");
+        del->signal_clicked().connect([this, gen] { if (gen == m_view_gen) delete_find_request(); });
+        auto omit = Gtk::make_managed<Gtk::CheckButton>("Omit");
+        omit->set_name("shell.browse.find_omit");
+        omit->set_active(m_find_reqs[m_find_at].omit);
+        omit->set_tooltip_text("Leave out the records this request matches, instead of finding them");
+        omit->signal_toggled().connect([this, gen, omit] {
+            if (gen == m_view_gen) m_find_reqs[m_find_at].omit = omit->get_active();
+        });
+        bar->append(*prev);
+        bar->append(*which);
+        bar->append(*next);
+        bar->append(*add);
+        bar->append(*del);
+        bar->append(*omit);
+        outer->append(*bar);
+    }
 
     std::vector<std::string> fields;
     for (const auto& c : t->columns) fields.push_back(c.name);
@@ -196,9 +259,9 @@ void Shell::paint_find() {  // find: the layout's boxes, empty
         e->set_hexpand(true);
         e->set_width_chars(4);
         if (hint) e->set_placeholder_text(hint);
-        if (auto it = m_find_typed.find(key); it != m_find_typed.end()) e->set_text(it->second);
+        if (auto it = find_typed().find(key); it != find_typed().end()) e->set_text(it->second);
         e->signal_changed().connect([this, e, key, gen] {
-            if (gen == m_view_gen) m_find_typed[key] = e->get_text();
+            if (gen == m_view_gen) find_typed()[key] = e->get_text();
         });
         e->signal_activate().connect([this, gen] { if (gen == m_view_gen) do_find(); });
         auto keys = Gtk::EventControllerKey::create();
@@ -212,7 +275,7 @@ void Shell::paint_find() {  // find: the layout's boxes, empty
         keys->set_propagation_phase(Gtk::PropagationPhase::CAPTURE);
         e->add_controller(keys);
         if (!first) first = e;
-        if (!focus_back) if (auto it = m_find_typed.find(key); it != m_find_typed.end() && !it->second.empty()) focus_back = e;
+        if (!focus_back) if (auto it = find_typed().find(key); it != find_typed().end() && !it->second.empty()) focus_back = e;
         return e;
     };
     for (int oi : core::part_objects(L, core::Part::Body)) {
@@ -322,7 +385,7 @@ void Shell::paint_find() {  // find: the layout's boxes, empty
     auto go = Gtk::make_managed<Gtk::Button>("Find");
     go->add_css_class("acorn-primary");
     go->set_name("shell.browse.find_go");
-    go->set_tooltip_text("Find the records that match every box (Enter)");
+    go->set_tooltip_text("Find the records that match every box of any request -- less what an Omit request matches (Enter)");
     go->signal_clicked().connect([this, gen] { if (gen == m_view_gen) do_find(); });
     buttons->append(*cancel);
     buttons->append(*go);
@@ -335,6 +398,29 @@ void Shell::paint_find() {  // find: the layout's boxes, empty
         e->grab_focus();
         e->set_position(-1);
     }
+}
+
+void Shell::find_request(int to) {  // find: s022 -- show request `to` (-1: a new, empty one at the end)
+    if (!m_finding) return;
+    if (to < 0) {
+        m_find_reqs.emplace_back();
+        m_find_at = m_find_reqs.size() - 1;
+    } else if (static_cast<std::size_t>(to) < m_find_reqs.size()) {
+        m_find_at = static_cast<std::size_t>(to);
+    } else {
+        return;
+    }
+    browse_note("Request " + std::to_string(m_find_at + 1) + " of " + std::to_string(m_find_reqs.size()) +
+                " -- a record matching every box of ANY request is found; Omit leaves out what it matches.", "ok");
+    paint_browse();
+}
+
+void Shell::delete_find_request() {  // find: s022 -- the shown request goes (never the last one)
+    if (!m_finding || m_find_reqs.size() < 2) return;
+    m_find_reqs.erase(m_find_reqs.begin() + static_cast<std::ptrdiff_t>(m_find_at));
+    if (m_find_at >= m_find_reqs.size()) m_find_at = m_find_reqs.size() - 1;
+    browse_note("Request deleted -- " + std::to_string(m_find_reqs.size()) + " left.", "ok");
+    paint_browse();
 }
 
 }  // namespace acorn
