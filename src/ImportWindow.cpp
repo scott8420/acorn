@@ -72,7 +72,7 @@ ImportWindow::ImportWindow(Gtk::Window& parent)
     });
     page->append(m_header);
 
-    auto* hint = Gtk::make_managed<Gtk::Label>("Pick the field each column goes to -- or “-- skip --”. "
+    auto* hint = m_hint = Gtk::make_managed<Gtk::Label>("Pick the field each column goes to -- or “-- skip --”. "
                                                "A field left out gets its default.");
     hint->set_xalign(0.0f);
     hint->set_wrap(true);
@@ -155,6 +155,7 @@ void ImportWindow::start(const db::Table& t, const std::string& file_name, db::D
     build_grid();
     // Plan mode.
     m_header.set_visible(true);
+    m_hint->set_visible(true);
     m_scroll.set_visible(true);
     m_says.set_visible(true);
     m_reason.set_visible(true);
@@ -253,6 +254,7 @@ void ImportWindow::on_import() {
     }
     // The report.
     m_header.set_visible(false);
+    m_hint->set_visible(false);
     m_scroll.set_visible(false);
     m_says.set_visible(false);
     m_reason.set_visible(false);

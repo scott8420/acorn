@@ -49,6 +49,7 @@ private:
     std::vector<Gtk::DropDown*> m_picks;     // per column
     std::vector<Gtk::Widget*>   m_first;     // the first line's cells (names when the box is ticked)
     bool                        m_resetting = false;
+    Gtk::Label*                 m_hint = nullptr;   // the plan's how-to line (hidden in the report)
 
     widgets::Label          m_head;
     widgets::CheckButton    m_header;

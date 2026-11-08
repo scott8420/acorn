@@ -13,6 +13,7 @@
 #include "db/Script.hpp"
 #include "db/Export.hpp"
 #include "db/Import.hpp"
+#include "db/Accounts.hpp"
 #include <sstream>
 #include "core/Print.hpp"
 #include "db/Convert.hpp"
@@ -3509,6 +3510,86 @@ void test_import_book(Journal& j, Gate& g, const std::string& P) {
           std::to_string(j.strays()));
 }
 
+// ── s019a: accounts ────────────────────────────────────────────────────────
+void test_accounts_pure() {
+    check("accounts: the four rights in words, in order; SQL's words to rights",
+          privs_says(kRead | kDelete) == "read · delete" && privs_says(kAllPrivs) == "read · add · change · delete" &&
+              privs_says(0) == "nothing" && priv_of("select") == kRead && priv_of("DELETE") == kDelete &&
+              priv_of("DELETE HISTORY") == 0 && priv_of("CREATE") == 0, privs_says(kRead | kDelete));
+    check("accounts: a grantee read -- 'u'@'h', u@h, a role with no host",
+          parse_grantee("'acorn'@'localhost'") == std::pair<std::string, std::string>{"acorn", "localhost"} &&
+              parse_grantee("acorn@%") == std::pair<std::string, std::string>{"acorn", "%"} &&
+              parse_grantee("reader") == std::pair<std::string, std::string>{"reader", ""}, "");
+    Account a;
+    a.name = "clerk"; a.host = "%"; a.you = true; a.admin = true; a.login = false;
+    a.tables = {{"contacts", kRead | kAdd}, {"phones", kRead}};
+    Account b;
+    b.name = "boss"; b.every = kAllPrivs; b.super = true;
+    Account c;
+    c.name = "nobody"; c.reaches = false;
+    const std::vector<std::string> ts{"contacts", "phones", "addresses"};
+    check("accounts: what one may do in lines -- per table when they differ, one line when alike, nothing said so",
+          account_lines(a, ts) == std::vector<std::string>{"contacts: read · add", "phones: read", "addresses: nothing"} &&
+              account_lines(b, ts) == std::vector<std::string>{"Every table: read · add · change · delete"} &&
+              account_lines(c, ts) == std::vector<std::string>{"Nothing in this database"} &&
+              account_name(a) == "clerk@%" && account_name(b) == "boss" &&
+              account_tags(a) == "you · makes accounts · can't log in" && account_tags(b) == "may do everything" &&
+              account_tags(c) == "can't connect here",
+          account_lines(a, ts).empty() ? "" : account_lines(a, ts)[0]);
+}
+
+// On the sample Address Book: this connection's account, and a throwaway one
+// given read on contacts only. Accounts live at SERVER level, outside the
+// throwaway database, so only acorn_selftest_<pid>_* names are ever made or
+// dropped (fixture setup, behind the door, as the sample's DROP TABLEs are).
+void test_accounts(Gate& g, Dialect d, const std::string& P) {
+    auto sch = g.introspect();
+    if (!sch) { check(P + "accounts: the schema", false, ""); return; }
+    const int strays0 = g.strays();
+    if (d == Dialect::SQLite) {
+        auto r = read_accounts(g, d, *sch);
+        check(P + "accounts: a SQLite file has none -- said in words", r && !r->supported && r->accounts.empty() &&
+              r->why.find("no accounts") != std::string::npos, r ? r->why : r.error().message);
+        return;
+    }
+    const std::string who = "acorn_selftest_" + std::to_string(::getpid()) + "_reader";
+    if (who.rfind("acorn_selftest_", 0) != 0) return;   // never any other name
+    const bool my = d == Dialect::MariaDB;
+    const std::string acct = my ? "'" + who + "'@'localhost'" : g.quote_ident(who);
+    auto dbname = g.query(my ? "SELECT DATABASE()" : "SELECT current_database()");
+    const std::string db = dbname && !dbname->rows.empty() && dbname->rows[0][0].as_text() ? *dbname->rows[0][0].as_text() : "";
+    auto made = g.inner().query(my ? "CREATE USER " + acct : "CREATE ROLE " + acct);
+    auto granted = g.inner().query("GRANT SELECT ON " + (my ? g.quote_ident(db) + "." : std::string{}) +
+                                   g.quote_ident("contacts") + " TO " + acct);
+    check(P + "accounts: a throwaway account made for the test, read on contacts given (fixture)", made && granted,
+          made ? (granted ? "" : granted.error().message) : made.error().message);
+    auto r = read_accounts(g, d, *sch);
+    const Account* me = nullptr;
+    const Account* reader = nullptr;
+    if (r) for (const auto& a : r->accounts) { if (a.you) me = &a; if (a.name == who) reader = &a; }
+    std::vector<std::string> ts;
+    for (const auto& t : sch->tables) ts.push_back(t.name);
+    const auto lr = reader ? account_lines(*reader, ts) : std::vector<std::string>{};
+    check(P + "accounts: the list read (not only you); this connection's account is marked you -- every table, all four, "
+              "makes accounts",
+          r && r->supported && !r->only_you && me && me->name == "acorn" && (me->every & kAllPrivs) == kAllPrivs &&
+              me->admin && me->tables.size() >= ts.size(),
+          r ? (me ? account_name(*me) + " " + privs_says(me->every) + " " + account_tags(*me) : "no 'you'") : r.error().message);
+    bool only_contacts = reader != nullptr && reader->every == 0;
+    if (reader) for (const auto& t : ts) only_contacts = only_contacts && (reader->tables.at(t) == (t == "contacts" ? kRead : 0u));
+    check(P + "accounts: the throwaway one -- read on contacts, nothing on the rest, said per table",
+          only_contacts && std::find(lr.begin(), lr.end(), "contacts: read") != lr.end() &&
+              std::find(lr.begin(), lr.end(), "phones: nothing") != lr.end(),
+          lr.empty() ? "not found" : lr[0] + (lr.size() > 1 ? " | " + lr[1] : ""));
+    if (!my) (void)g.inner().query("REVOKE ALL ON " + g.quote_ident("contacts") + " FROM " + acct);
+    auto dropped = g.inner().query(my ? "DROP USER " + acct : "DROP ROLE " + acct);
+    auto again = read_accounts(g, d, *sch);
+    bool gone = again.has_value();
+    if (again) for (const auto& a : again->accounts) gone = gone && a.name != who;
+    check(P + "accounts: the throwaway account dropped; reading wrote nothing (no strays)",
+          dropped && gone && g.strays() == strays0, dropped ? std::to_string(g.strays()) : dropped.error().message);
+}
+
 // On the sample Address Book, writable: whole runs through ScriptRun.
 void test_scripts(Journal& j, Gate& g, core::Solution& sol, const std::string& P) {
     using core::Script; using K = core::StepKind;
@@ -3802,7 +3883,7 @@ void test_starter(Journal& j, Gate& g, const std::string& P) {
 }
 
 // ── s010f: the sample Address Book ───────────────────────────────────────────
-void test_sample(Journal& j, Gate& g, const std::string& P) {
+void test_sample(Journal& j, Gate& g, const std::string& P, Dialect d) {
     for (const char* t : {"phones", "addresses", "contacts"})   // test_starter's tables
         (void)g.inner().query("DROP TABLE IF EXISTS " + g.quote_ident(t));
     auto count = [&](const std::string& t) {
@@ -4011,6 +4092,7 @@ void test_sample(Journal& j, Gate& g, const std::string& P) {
     test_scripts(j, g, sol, P);    // s017a
     test_export_book(g, P);        // s018a
     test_import_book(j, g, P);     // s018b
+    test_accounts(g, d, P);        // s019a
     {   // s016
         const auto* lab = sol.layout("addresses", kSampleLabelsName);
         check(P + "labels: the sample's Mailing Labels kept beside the report", lab && *lab == sample_labels_layout(), "");
@@ -4175,7 +4257,7 @@ void test_journal(Engine* e, const ConnectParams& rw, const ConnectParams& ro, c
     test_key(j, g, e, P);
     test_links(j, g, e, P);
     test_starter(j, g, P);
-    test_sample(j, g, P);
+    test_sample(j, g, P, d);
 }
 
 // SQLite-only behaviour: files.
@@ -4320,6 +4402,7 @@ void db_tests(CheckFn fn, int& skip_count) {
         test_button_pure(tmp.p);              // s017b: buttons
         test_export_pure();                   // s018a: export
         test_import_pure();                   // s018b: import
+        test_accounts_pure();                 // s019a: accounts
         {   // s005b: the door, on its own fresh fixture file
             Target J = T;
             J.rw.path = (tmp.p / "journal.sqlite").string();

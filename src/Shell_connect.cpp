@@ -539,6 +539,7 @@ void Shell::on_connect_done() {  // connect: back on the UI thread
 void Shell::show_schema() {  // connect: paint the table list
     paint_graph();   // s008b: the graph follows the schema
     paint_layouts(); // s010b: and the layouts
+    if (m_stack.get_visible_child_name() == "accounts") paint_accounts();   // s019a
     while (auto* child = m_tables.get_first_child()) m_tables.remove(*child);
     if (m_schema.tables.empty()) {
         auto empty = Gtk::make_managed<Gtk::Label>(

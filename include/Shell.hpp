@@ -74,6 +74,7 @@
 //   "Where are layouts edited?"         -> Shell_layouts.cpp  (paint_layouts / keep_layout)
 //   "Where do records go out to a file?" -> Shell_export.cpp  (fill_export_menu / export_records_to_file)
 //   "Where do records come in from one?" -> Shell_import.cpp  (import_records_from_file; ImportWindow)
+//   "Where are the server's accounts?"   -> Shell_accounts.cpp (paint_accounts)
 // ─────────────────────────────────────────────────────────────────────────────
 namespace acorn {
 
@@ -192,6 +193,8 @@ private:
     // Tables as boxes, links as lines; a drag makes a link, a line's handle
     // changes or unlinks it. Every change is a verb through m_journal.
     void build_graph_page();                     // category: graph: the Graph area
+    void build_accounts_page();                  // category: accounts: s019a -- the Accounts area
+    void paint_accounts();                       // category: accounts: one card per account, its rights per table (reads only)
     void paint_graph();                          // category: graph: boxes laid out by depth, lines drawn
     void graph_note(const std::string& text, const char* kind);  // category: graph: under the Graph title
     void on_graph_drop(const std::string& st, const std::string& sf, const std::string& dt, const std::string& df,
@@ -443,6 +446,9 @@ private:
         std::vector<std::string> fields;
         std::string why;
     };
+    widgets::Box                    m_accounts_page;        // s019a
+    widgets::Label                  m_accounts_where;
+    widgets::ScrolledWindow         m_accounts_scroll;
     widgets::Box                    m_graph_page;
     widgets::Label                  m_graph_where, m_graph_note;
     widgets::ScrolledWindow         m_graph_scroll;
