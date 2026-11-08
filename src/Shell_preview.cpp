@@ -1,0 +1,335 @@
+#include "Shell.hpp"
+#include "Log.hpp"
+#include "core/Print.hpp"
+#include "db/Print.hpp"
+
+#include <cairomm/context.h>
+#include <cairomm/surface.h>
+#include <giomm/liststore.h>
+#include <gtkmm/button.h>
+#include <gtkmm/drawingarea.h>
+#include <gtkmm/filedialog.h>
+#include <gtkmm/filefilter.h>
+#include <gtkmm/label.h>
+#include <gtkmm/pagesetup.h>
+#include <gtkmm/papersize.h>
+#include <gtkmm/printoperation.h>
+#include <pangomm/layout.h>
+
+#include <cmath>
+#include <filesystem>
+
+// Shell_preview.cpp -- PREVIEW, PRINT, PDF (s015a). Browse -> Preview lays the
+// List's layout on paper: the header at the top and the footer at the foot
+// of EVERY page, the body once per record between them, never a record cut
+// in two, "Page 2 of 5" under each. It is read-only. Print... hands the same
+// pages to GtkPrintOperation; Save as PDF... draws them on Cairo's PDF
+// surface -- one drawing function for all three, so what is previewed is
+// what prints. The records are the ones Browse shows: every record, or the
+// found ones after a Find, in Browse's order (at most db::kPrintMax).
+
+namespace acorn {
+
+struct PreviewDoc {
+    core::Layout layout;
+    core::Paper paper;
+    double scale = 1.0;
+    double room = 0;                          // the page's height in layout units, the folio line left out
+    std::vector<db::PrintedRecord> records;
+    std::vector<core::PrintPage> pages;
+    std::string title;                        // "contacts -- Contact List"
+    int total = 0;                            // records there were (more than shown when capped)
+};
+
+namespace {
+
+constexpr double kFolio = 18;   // the "Page 2 of 5" line under the page's content, points
+
+std::string curly(const std::string& s) { return "“" + s + "”"; }
+
+core::Paper default_paper() {
+    const std::string n = Gtk::PaperSize::get_default();   // the desktop's (the locale's) paper: "na_letter", "iso_a4" ...
+    const Gtk::PaperSize ps(n);
+    if (n.find("letter") != std::string::npos) return core::paper_letter();
+    if (n.find("a4") != std::string::npos) return core::paper_a4();
+    core::Paper p;
+    p.name = ps.get_display_name();
+    p.width = ps.get_width(Gtk::Unit::POINTS);
+    p.height = ps.get_height(Gtk::Unit::POINTS);
+    return p;
+}
+
+void text_in(const Cairo::RefPtr<Cairo::Context>& cr, const std::string& s, double x, double y, double w, double h,
+             Pango::Alignment how, double grey, bool bold = false) {
+    if (s.empty() || w <= 2) return;
+    auto pl = Pango::Layout::create(cr);
+    Pango::FontDescription fd("Sans 9");
+    if (bold) fd.set_weight(Pango::Weight::BOLD);
+    pl->set_font_description(fd);
+    pl->set_text(s);
+    pl->set_width(static_cast<int>((w - 4) * PANGO_SCALE));
+    pl->set_ellipsize(Pango::EllipsizeMode::END);
+    pl->set_alignment(how);
+    int tw = 0, th = 0;
+    pl->get_pixel_size(tw, th);
+    cr->save();
+    cr->rectangle(x, y, w, h);
+    cr->clip();
+    cr->set_source_rgb(grey, grey, grey);
+    cr->move_to(x + 2, y + std::max(0.0, (std::min<double>(h, kFolio * 2) - th) / 2));
+    pl->show_in_cairo_context(cr);
+    cr->restore();
+}
+
+// One part of the layout for one record, its top at `y0` (layout units).
+void draw_part(const Cairo::RefPtr<Cairo::Context>& cr, const PreviewDoc& d, core::Part part, const db::PrintedRecord& rec,
+               double y0) {
+    const auto& L = d.layout;
+    const int top = core::part_top(L, part);
+    for (int oi : core::part_objects(L, part)) {
+        const auto& o = L.objects[static_cast<std::size_t>(oi)];
+        const auto& p = rec[static_cast<std::size_t>(oi)];
+        const double x = o.x, y = y0 + o.y - top, w = o.w, h = o.h;
+        cr->set_line_width(0.6);
+        if (p.missing) {
+            cr->set_source_rgb(0.6, 0.6, 0.6);
+            cr->set_dash(std::vector<double>{3, 2}, 0);
+            cr->rectangle(x + 0.5, y + 0.5, w - 1, h - 1);
+            cr->stroke();
+            cr->unset_dash();
+            text_in(cr, p.text, x, y, w, h, Pango::Alignment::LEFT, 0.55);
+            continue;
+        }
+        switch (o.kind) {
+        case core::ObjectKind::Line:
+            cr->set_source_rgb(0.45, 0.45, 0.45);
+            if (w >= h) { cr->move_to(x, y + h / 2); cr->line_to(x + w, y + h / 2); }
+            else        { cr->move_to(x + w / 2, y); cr->line_to(x + w / 2, y + h); }
+            cr->stroke();
+            break;
+        case core::ObjectKind::Box:
+            cr->set_source_rgb(0.55, 0.55, 0.55);
+            cr->rectangle(x + 0.5, y + 0.5, w - 1, h - 1);
+            cr->stroke();
+            break;
+        case core::ObjectKind::Text:
+            text_in(cr, p.text, x, y, w, h, o.align == core::Align::Left ? Pango::Alignment::LEFT
+                                            : o.align == core::Align::Center ? Pango::Alignment::CENTER
+                                                                             : Pango::Alignment::RIGHT, 0.35);
+            break;
+        case core::ObjectKind::Field:
+        case core::ObjectKind::Related:
+            text_in(cr, p.text, x, y, w, h, Pango::Alignment::LEFT, 0.05);
+            cr->set_source_rgb(0.82, 0.82, 0.82);   // a hairline under the value, where its box was
+            cr->move_to(x, y + h - 0.5);
+            cr->line_to(x + w, y + h - 0.5);
+            cr->stroke();
+            break;
+        case core::ObjectKind::Portal: {
+            cr->set_source_rgb(0.6, 0.6, 0.6);
+            cr->rectangle(x + 0.5, y + 0.5, w - 1, h - 1);
+            cr->stroke();
+            const std::size_t n = std::max<std::size_t>(1, o.columns.size());
+            const double cw = w / static_cast<double>(n);
+            for (std::size_t c = 0; c < o.columns.size(); ++c)
+                text_in(cr, o.columns[c], x + c * cw, y, cw, core::kPortalRowH, Pango::Alignment::LEFT, 0.35, true);
+            double ry = y + core::kPortalRowH;
+            for (const auto& r : p.rows) {
+                if (ry + core::kPortalRowH > y + h + 0.5) break;
+                cr->set_source_rgb(0.85, 0.85, 0.85);
+                cr->move_to(x, ry + 0.5);
+                cr->line_to(x + w, ry + 0.5);
+                cr->stroke();
+                for (std::size_t c = 0; c < r.size() && c < n; ++c)
+                    text_in(cr, r[c], x + c * cw, ry, cw, core::kPortalRowH, Pango::Alignment::LEFT, 0.05);
+                ry += core::kPortalRowH;
+            }
+            break;
+        }
+        }
+    }
+}
+
+// Page `i`, on a surface whose units are points with (0, 0) the paper's corner.
+void draw_page(const Cairo::RefPtr<Cairo::Context>& cr, const PreviewDoc& d, int i) {
+    const auto& P = d.paper;
+    const auto& pg = d.pages[static_cast<std::size_t>(i)];
+    cr->save();
+    cr->set_source_rgb(1, 1, 1);
+    cr->paint();
+    cr->translate(P.margin, P.margin);
+    cr->scale(d.scale, d.scale);
+    const auto& L = d.layout;
+    const int header = core::part_height(L, core::Part::Header);
+    const int body = core::part_height(L, core::Part::Body);
+    const int footer = core::part_height(L, core::Part::Footer);
+    static const db::PrintedRecord kNone;
+    const db::PrintedRecord& lead = pg.count > 0 ? d.records[static_cast<std::size_t>(pg.first)]
+                                    : d.records.empty() ? kNone : d.records.front();
+    const bool any = !lead.empty() || L.objects.empty();
+    if (header > 0 && any) draw_part(cr, d, core::Part::Header, lead, 0);
+    for (int k = 0; k < pg.count; ++k)
+        draw_part(cr, d, core::Part::Body, d.records[static_cast<std::size_t>(pg.first + k)], header + static_cast<double>(k) * body);
+    if (footer > 0 && any) draw_part(cr, d, core::Part::Footer, lead, d.room - footer);
+    cr->restore();
+    // The folio, under the content, in the bottom margin's top.
+    const double fy = P.height - P.margin - kFolio + 4;
+    text_in(cr, core::page_words(i + 1, static_cast<int>(d.pages.size())), P.margin, fy, P.width - 2 * P.margin, kFolio,
+            Pango::Alignment::CENTER, 0.5);
+    text_in(cr, d.title, P.margin, fy, P.width - 2 * P.margin, kFolio, Pango::Alignment::LEFT, 0.65);
+}
+
+}  // namespace
+
+void Shell::paint_preview() {  // preview: the List's layout on pages, read-only
+    const db::Table* t = browse_info();
+    auto outer = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 12);
+    outer->set_halign(Gtk::Align::START);
+    outer->set_name("shell.browse.preview_view");
+    if (!t || !m_conn) { m_browse_scroll.set_child(*outer); return; }
+
+    auto doc = std::make_shared<PreviewDoc>();
+    bool kept = false;
+    doc->layout = form_layout(&kept);
+    doc->paper = default_paper();
+    doc->scale = core::print_scale(doc->layout.width, doc->paper);
+    doc->room = (doc->paper.height - 2 * doc->paper.margin - kFolio) / doc->scale;
+    doc->title = t->name + " — " + doc->layout.name;
+
+    // The records Browse shows -- every one, or the found ones -- in its order.
+    db::PageRequest all = m_browse_req;
+    all.offset = 0;
+    all.limit = db::kPrintMax;
+    auto page = found_here() ? db::read_found(*m_conn, *t, m_found, all, &m_schema) : db::read_page(*m_conn, *t, all);
+    std::string why;
+    if (!page) why = page.error().message;
+    else {
+        doc->total = static_cast<int>(page->total);
+        const auto today = core::today_iso();
+        const auto& calcs = m_solution.calcs_of(t->name);
+        for (const auto& row : page->rows)
+            doc->records.push_back(db::print_record(*m_conn, m_schema, *t, doc->layout, row, calcs, m_browse_sums, today));
+    }
+    doc->pages = core::paginate(core::part_height(doc->layout, core::Part::Header),
+                                core::part_height(doc->layout, core::Part::Body),
+                                core::part_height(doc->layout, core::Part::Footer),
+                                static_cast<int>(doc->records.size()), doc->room);
+    m_preview = doc;
+    if (auto lg = log::get(log::Area::Shell))
+        lg->info("preview: '{}' {} records -> {} pages ({}, scale {:.3f}){}", doc->title, doc->records.size(), doc->pages.size(),
+                 doc->paper.name, doc->scale, why.empty() ? "" : " -- " + why);
+
+    form_caption(*outer, *t, doc->layout, kept, {});   // the layout's name and its picker, as Form / List
+    // The caption: what this is, and the two ways out of it.
+    auto bar = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+    const int n = static_cast<int>(doc->records.size());
+    std::string says = std::to_string(n) +
+                       (found_here() ? " found" : "") + (n == 1 ? " record" : " records") + " · " +
+                       std::to_string(doc->pages.size()) + (doc->pages.size() == 1 ? " page" : " pages") + " · " +
+                       doc->paper.name;
+    if (doc->total > n) says += " · the first " + std::to_string(n) + " of " + std::to_string(doc->total);
+    if (doc->scale < 1.0) says += " · scaled to " + std::to_string(static_cast<int>(std::lround(doc->scale * 100))) + "%";
+    auto cap = Gtk::make_managed<Gtk::Label>(why.empty() ? says : "Could not read the records: " + why);
+    cap->set_xalign(0.0f);
+    cap->add_css_class(why.empty() ? "acorn-status" : "acorn-missing");
+    cap->set_name("shell.browse.preview_says");
+    cap->set_hexpand(true);
+    bar->append(*cap);
+    auto pr = Gtk::make_managed<Gtk::Button>("Print…");
+    pr->set_name("shell.browse.print");
+    pr->set_tooltip_text("Print these pages");
+    pr->signal_clicked().connect([this] { print_preview(); });
+    auto pdf = Gtk::make_managed<Gtk::Button>("Save as PDF…");
+    pdf->set_name("shell.browse.pdf");
+    pdf->set_tooltip_text("These pages as a PDF file");
+    pdf->signal_clicked().connect([this] { save_preview_pdf(); });
+    pr->set_sensitive(why.empty());
+    pdf->set_sensitive(why.empty());
+    bar->append(*pr);
+    bar->append(*pdf);
+    outer->append(*bar);
+
+    // The pages, one under another, at their size in points.
+    for (std::size_t i = 0; i < doc->pages.size(); ++i) {
+        auto da = Gtk::make_managed<Gtk::DrawingArea>();
+        da->add_css_class("acorn-paper");
+        da->set_name("shell.browse.page." + std::to_string(i + 1));
+        da->set_content_width(static_cast<int>(std::ceil(doc->paper.width)));
+        da->set_content_height(static_cast<int>(std::ceil(doc->paper.height)));
+        da->set_halign(Gtk::Align::START);
+        std::weak_ptr<PreviewDoc> weak = doc;
+        da->set_draw_func([weak, i](const Cairo::RefPtr<Cairo::Context>& cr, int, int) {
+            if (auto d = weak.lock()) draw_page(cr, *d, static_cast<int>(i));
+        });
+        outer->append(*da);
+    }
+    m_browse_scroll.set_child(*outer);
+}
+
+void Shell::print_preview() {  // preview: Print... -- the same pages through GtkPrintOperation
+    auto doc = m_preview;
+    if (!doc || doc->pages.empty()) return;
+    auto op = Gtk::PrintOperation::create();
+    op->set_job_name("Acorn -- " + doc->title);
+    op->set_n_pages(static_cast<int>(doc->pages.size()));
+    op->set_unit(Gtk::Unit::POINTS);
+    op->set_use_full_page(true);   // (0, 0) is the paper's corner: the margins are ours
+    auto setup = Gtk::PageSetup::create();
+    setup->set_paper_size(Gtk::PaperSize(doc->paper.name == "A4" ? "iso_a4" : doc->paper.name == "Letter" ? "na_letter"
+                                                                                                        : Gtk::PaperSize::get_default()));
+    op->set_default_page_setup(setup);
+    op->signal_draw_page().connect([doc](const Glib::RefPtr<Gtk::PrintContext>& ctx, int nr) {
+        if (nr >= 0 && static_cast<std::size_t>(nr) < doc->pages.size()) draw_page(ctx->get_cairo_context(), *doc, nr);
+    });
+    try {
+        const auto r = op->run(Gtk::PrintOperation::Action::PRINT_DIALOG, *this);
+        if (auto lg = log::get(log::Area::Shell)) lg->info("preview: print '{}' -> {}", doc->title, static_cast<int>(r));
+        if (r == Gtk::PrintOperation::Result::APPLY) browse_note("Sent " + std::to_string(doc->pages.size()) + " pages to print.", "ok");
+    } catch (const Glib::Error& e) {
+        browse_note("Not printed: " + std::string(e.what()) + ".", "error");
+    }
+}
+
+void Shell::save_preview_pdf() {  // preview: Save as PDF... -- Cairo's PDF surface, the same pages
+    auto doc = m_preview;
+    if (!doc || doc->pages.empty()) return;
+    auto dialog = Gtk::FileDialog::create();
+    dialog->set_title("Save as PDF");
+    std::string base = doc->title;
+    for (auto& ch : base) if (ch == '/' || ch == '\\') ch = '-';
+    dialog->set_initial_name(base + ".pdf");
+    auto filters = Gio::ListStore<Gtk::FileFilter>::create();
+    auto f = Gtk::FileFilter::create();
+    f->set_name("PDF documents");
+    f->add_pattern("*.pdf");
+    filters->append(f);
+    dialog->set_filters(filters);
+    dialog->save(*this, [this, dialog, doc](const Glib::RefPtr<Gio::AsyncResult>& res) {
+        std::string path;
+        try {
+            auto file = dialog->save_finish(res);
+            if (!file) return;
+            path = file->get_path();
+        } catch (const Glib::Error&) {
+            return;   // cancelled
+        }
+        if (path.size() < 4 || path.substr(path.size() - 4) != ".pdf") path += ".pdf";
+        try {
+            auto surface = Cairo::PdfSurface::create(path, doc->paper.width, doc->paper.height);
+            auto cr = Cairo::Context::create(surface);
+            for (std::size_t i = 0; i < doc->pages.size(); ++i) {
+                draw_page(cr, *doc, static_cast<int>(i));
+                cr->show_page();
+            }
+            surface->finish();
+        } catch (const std::exception& e) {
+            browse_note("Not saved: " + std::string(e.what()) + ".", "error");
+            return;
+        }
+        if (auto lg = log::get(log::Area::Shell)) lg->info("preview: pdf '{}' -> {}", doc->title, path);
+        browse_note("Saved " + std::to_string(doc->pages.size()) + (doc->pages.size() == 1 ? " page" : " pages") +
+                        " as " + std::filesystem::path(path).filename().string() + ".", "ok");
+    });
+}
+
+}  // namespace acorn

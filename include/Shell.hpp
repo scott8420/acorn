@@ -79,6 +79,8 @@ class ShortcutsDialog;
 class NewTableWindow;
 class DesignTableWindow;
 
+struct PreviewDoc;   // s015a: Shell_preview.cpp
+
 class Shell : public Gtk::ApplicationWindow {
 public:
     Shell();
@@ -247,6 +249,10 @@ private:
                            const std::string& shown, const std::string& row_id, unsigned gen);  // category: lists: s014d -- a key-showing list's drop-down
     Gtk::Widget* list_arrow(const db::ListItems& li, Gtk::Entry* e, const std::string& field,
                             const std::string& row_id, unsigned gen);  // category: lists: s014d -- a typed box's drop arrow
+    // ── preview + print (s015a) -- src/Shell_preview.cpp ──────────────────────
+    void paint_preview();                        // category: preview: the List's layout on pages, read-only
+    void print_preview();                        // category: preview: Print... -- GtkPrintOperation over the same pages
+    void save_preview_pdf();                     // category: preview: Save as PDF... -- Cairo's PDF surface, the same pages
     void keep_list(const core::ValueList& v, const std::string& was);  // category: lists: verbs::save_value_list, the note, a repaint
     void drop_list(const std::string& table, const std::string& name);  // category: lists: verbs::delete_value_list
     std::vector<std::string> fields_of(const std::string& table) const;  // category: layouts: the live table's fields, in order
@@ -364,7 +370,8 @@ private:
     widgets::Label                  m_browse_where;   // "Connect to a database first" / "“people” -- 312 records"
     Glib::RefPtr<Gtk::StringList>   m_browse_names;
     Gtk::DropDown                   m_browse_pick;
-    widgets::Named<Gtk::ToggleButton> m_browse_cards_btn, m_browse_grid_btn, m_browse_form_btn, m_browse_list_btn;
+    widgets::Named<Gtk::ToggleButton> m_browse_cards_btn, m_browse_grid_btn, m_browse_form_btn, m_browse_list_btn,
+                                      m_browse_preview_btn;   // s015a
     widgets::Button                 m_browse_prev, m_browse_next;
     widgets::Label                  m_browse_range;   // "51–100 of 312"
     widgets::ScrolledWindow         m_browse_scroll;
@@ -373,7 +380,7 @@ private:
     db::Page                        m_browse_data;
     std::string                     m_browse_sel;     // the picked record's journal id ("" = none)
     int                             m_browse_sel_index = -1;
-    enum class BrowseView { Cards, Grid, Form, List };
+    enum class BrowseView { Cards, Grid, Form, List, Preview };   // s015a: + Preview
     BrowseView                      m_browse_view = BrowseView::Cards;   // s010a: + Form; s012a: + List
     int                             m_paint_row = -1; // s012a: the List row being drawn -- browse_value reads it (-1: the picked record)
     std::string                     m_form_focus;     // s010a: the Form box last focused (kept across a repaint)
@@ -500,6 +507,8 @@ private:
     std::map<std::string, db::ListItems> m_form_lists;
     std::map<std::string, std::string>   m_form_lists_error;
     unsigned                        m_form_lists_gen = ~0u;
+    // s015a: what Preview laid out -- Print and Save as PDF draw the same pages.
+    std::shared_ptr<PreviewDoc> m_preview;
     bool                            m_table_painting = false;
 
     // The About window: a hide-on-close singleton, built lazily on first open.

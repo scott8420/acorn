@@ -9,6 +9,8 @@
 #include "db/Journal.hpp"
 #include "db/Starter.hpp"
 #include "db/Browse.hpp"
+#include "db/Print.hpp"
+#include "core/Print.hpp"
 #include "db/Convert.hpp"
 #include "db/Loader.hpp"
 #include "db/NewFile.hpp"
@@ -2915,6 +2917,117 @@ void test_value_lists(Engine* e, const ConnectParams& ro, const std::string& P) 
     check(P + "value lists: the database untouched throughout", g.strays() == 0, std::to_string(g.strays()));
 }
 
+// ── s015a: preview / print ───────────────────────────────────────────────────
+void test_print_pure() {
+    using core::PrintPage;
+    const auto a = core::paginate(48, 336, 40, 12, 750);   // the Contact Card on A4: one a page
+    const auto b = core::paginate(56, 32, 40, 12, 640);    // a list: all on one page
+    const auto c = core::paginate(56, 32, 40, 40, 640);    // 17 a page -> 17, 17, 6
+    const auto d = core::paginate(0, 0, 0, 0, 640);        // no records: one page, header / footer only
+    const auto e = core::paginate(0, 900, 0, 2, 640);      // a body taller than the page: still one each
+    const auto f = core::paginate(10, 0, 10, 5, 640);      // no body: one page
+    check("print: pages -- one record a page, all on one, 17 + 17 + 6, none (one page), too tall (one each), no body",
+          a.size() == 12 && a[11] == PrintPage{11, 1} && b == std::vector<PrintPage>{{0, 12}} &&
+          c == std::vector<PrintPage>{{0, 17}, {17, 17}, {34, 6}} && d == std::vector<PrintPage>{{0, 0}} &&
+          e == std::vector<PrintPage>{{0, 1}, {1, 1}} && f == std::vector<PrintPage>{{0, 5}}, std::to_string(c.size()));
+    const auto L = core::paper_letter(), A = core::paper_a4();
+    check("print: paper -- Letter 612 x 792, A4 595 x 842; a layout fits whole (1) or is scaled to the printable width",
+          L.width == 612 && L.height == 792 && std::lround(A.height) == 842 && core::print_scale(504, L) == 1.0 &&
+          std::fabs(core::print_scale(1080, L) - 540.0 / 1080) < 1e-9 && core::page_words(2, 5) == "Page 2 of 5", "");
+}
+
+void test_print(Engine* e, const ConnectParams& ro, const std::string& P) {
+    auto c = e->open(ro);
+    if (!c) { check(P + "print: open read-only", false, c.error().message); return; }
+    Gate g(std::move(*c));
+    auto sch = g.introspect();
+    const Table* t = sch ? sch->table("customers") : nullptr;
+    if (!t) { check(P + "print: the fixture's table", false, ""); return; }
+    std::vector<std::string> fields;
+    for (const auto& col : t->columns) fields.push_back(col.name);
+    core::Layout l = core::default_layout("customers", fields);
+    core::LayoutObject calc;
+    calc.kind = core::ObjectKind::Field;
+    calc.field = "loud";
+    l.objects.push_back(calc);
+    core::LayoutObject sum = calc;
+    sum.field = "how_many";
+    l.objects.push_back(sum);
+    core::LayoutObject gone = calc;
+    gone.field = "nosuch";
+    l.objects.push_back(gone);
+    const std::map<std::string, core::Calc> calcs = {{"loud", {"customers", "loud", "Upper(name)"}}};
+    const std::map<std::string, core::CalcValue> sums = {{"how_many", core::CalcValue{7.0}}};
+    auto all = read_page(g, *t, PageRequest{0, 10000});
+    bool same = all.has_value() && !all->rows.empty();
+    std::string why;
+    for (const auto& row : all ? all->rows : std::vector<Row>{}) {
+        const auto pr = print_record(g, *sch, *t, l, row, calcs, sums, "2026-11-07");
+        for (std::size_t i = 0; i < l.objects.size() && same; ++i) {
+            const auto& ob = l.objects[i];
+            if (ob.kind == core::ObjectKind::Text && pr[i].text != ob.text) { same = false; why = "words " + ob.text; }
+            if (ob.kind == core::ObjectKind::Field) {
+                const Column* col = t->column(ob.field);
+                std::size_t k = 0;
+                for (std::size_t q = 0; q < t->columns.size(); ++q) if (t->columns[q].name == ob.field) k = q;
+                const std::string want = col ? (col->type == FieldType::Container ? (row[k].is_null() ? "" : "(binary)")
+                                                                                   : cell_text(row[k], col->type))
+                                       : ob.field == "loud" ? core::calc_text(row_calcs(*t, row, calcs, "2026-11-07")["loud"])
+                                       : ob.field == "how_many" ? "7" : "missing field “nosuch”";
+                if (pr[i].text != want || pr[i].missing != (ob.field == "nosuch")) { same = false; why = ob.field + ": " + pr[i].text + " vs " + want; }
+            }
+        }
+    }
+    check(P + "print: every customer's layout resolved -- fields as Browse shows them, words, a calculation, a summary, "
+              "a field that's gone (dashed)", same, why);
+    check(P + "print: the database untouched", g.strays() == 0, std::to_string(g.strays()));
+}
+
+// s015a: portals and related fields print through their links -- on the
+// Address Book (contacts <- phones), which has records that point.
+void test_print_book(Gate& g, const std::string& P) {
+    auto sch = g.introspect();
+    const Table* ct = sch ? sch->table("contacts") : nullptr;
+    const Table* pt = sch ? sch->table("phones") : nullptr;
+    if (!ct || !pt) { check(P + "print: the Address Book's tables", false, ""); return; }
+    auto col = [](const Table& t, const std::string& n) {
+        for (std::size_t i = 0; i < t.columns.size(); ++i) if (t.columns[i].name == n) return i;
+        return std::size_t{0};
+    };
+    core::Layout cl = core::default_layout("contacts", {"last_name"});
+    core::PortalLink link{"phones", "contact_id"};
+    core::add_portal(cl, link, {"kind", "number"});
+    cl.objects.back().h = core::kPortalRowH * 2;   // the names and ONE record
+    auto contacts = read_page(g, *ct, PageRequest{0, 10000});
+    auto phones = read_page(g, *pt, PageRequest{0, 10000});
+    std::map<std::string, std::vector<std::string>> numbers;   // contact id -> its numbers, in key order
+    for (const auto& r : phones ? phones->rows : std::vector<Row>{})
+        numbers[cell_text(r[col(*pt, "contact_id")], FieldType::Integer)].push_back(cell_text(r[col(*pt, "number")], FieldType::Text));
+    bool portals = contacts.has_value() && !contacts->rows.empty() && !numbers.empty();
+    std::string why;
+    for (const auto& r : contacts ? contacts->rows : std::vector<Row>{}) {
+        const auto pr = print_record(g, *sch, *ct, cl, r, {}, {}, "2026-11-07");
+        const auto& rows = pr.back().rows;
+        const auto& want = numbers[cell_text(r[col(*ct, "id")], FieldType::Integer)];
+        if (rows.size() != std::min<std::size_t>(1, want.size()) || (!rows.empty() && rows[0][1] != want[0])) {
+            portals = false;
+            why = std::to_string(rows.size()) + " rows";
+        }
+    }
+    check(P + "print: a portal prints the records that point at the record, as many as its box holds", portals, why);
+    core::Layout pl = core::default_layout("phones", {"number"});
+    core::add_related(pl, core::RelatedLink{"contact_id", "contacts"}, "last_name");
+    std::map<std::string, std::string> name_of;
+    for (const auto& r : contacts ? contacts->rows : std::vector<Row>{})
+        name_of[cell_text(r[col(*ct, "id")], FieldType::Integer)] = cell_text(r[col(*ct, "last_name")], FieldType::Text);
+    bool related = phones.has_value() && !phones->rows.empty();
+    for (const auto& r : phones ? phones->rows : std::vector<Row>{}) {
+        const auto pr = print_record(g, *sch, *pt, pl, r, {}, {}, "2026-11-07");
+        if (pr.back().text != name_of[cell_text(r[col(*pt, "contact_id")], FieldType::Integer)]) { related = false; why = pr.back().text; }
+    }
+    check(P + "print: a related field prints the last name of the contact its link points at", related, why);
+}
+
 // ── s009b: the Address Book starter ──────────────────────────────────────────
 void test_starter(Journal& j, Gate& g, const std::string& P) {
     auto count = [&](const std::string& t) {
@@ -2922,6 +3035,7 @@ void test_starter(Journal& j, Gate& g, const std::string& P) {
         return r && !r->rows.empty() ? num(r->rows[0][0]).value_or(-1) : -1.0;
     };
     auto made = make_address_book(j);
+    if (made) test_print_book(g, P);   // s015a
     auto s = g.introspect();
     bool links = false;
     if (s && s->table("addresses") && s->table("phones")) {
@@ -3393,6 +3507,7 @@ void test_server(Engine* e, const char* env_name, const char* admin_db) {
     test_calcs(e, T.ro, std::string(e->id()) + ": ");   // s014a
     test_summaries(e, T.ro, std::string(e->id()) + ": ");   // s014b
     test_value_lists(e, T.ro, std::string(e->id()) + ": "); // s014c
+    test_print(e, T.ro, std::string(e->id()) + ": ");       // s015a
 
     auto a2 = e->open(admin);
     std::string why = a2 ? "" : a2.error().message;
@@ -3450,6 +3565,8 @@ void db_tests(CheckFn fn, int& skip_count) {
         test_summaries(e, T.ro, "sqlite: ");  // s014b: summaries kept read-only, worked out by the database
         test_value_list_pure(tmp.p);          // s014c
         test_value_lists(e, T.ro, "sqlite: ");  // s014c: value lists kept read-only, read from a field
+        test_print_pure();                    // s015a
+        test_print(e, T.ro, "sqlite: ");      // s015a: a record's layout resolved to what it prints
         {   // s005b: the door, on its own fresh fixture file
             Target J = T;
             J.rw.path = (tmp.p / "journal.sqlite").string();

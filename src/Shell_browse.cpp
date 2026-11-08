@@ -95,6 +95,11 @@ void Shell::build_browse_page() {  // browse: the Browse area
     m_browse_list_btn.set_tooltip_text("Every record of the page through its layout, a row each, edited in place -- "
                                        "the header above, the footer below. Double-click a row for its Form");
     m_browse_list_btn.set_group(m_browse_cards_btn);
+    // s015a: Preview -- the same layout laid on pages, as it will print.
+    m_browse_preview_btn.set_label("Preview");
+    m_browse_preview_btn.set_tooltip_text("The records through the List's layout, on paper -- the header and footer on "
+                                          "every page. Print or save a PDF from here");
+    m_browse_preview_btn.set_group(m_browse_cards_btn);
     m_browse_cards_btn.set_active(true);
     auto to_view = [this](Gtk::ToggleButton& b, BrowseView v) {
         b.signal_toggled().connect([this, &b, v] {
@@ -116,10 +121,12 @@ void Shell::build_browse_page() {  // browse: the Browse area
     to_view(m_browse_grid_btn, BrowseView::Grid);
     to_view(m_browse_form_btn, BrowseView::Form);
     to_view(m_browse_list_btn, BrowseView::List);
+    to_view(m_browse_preview_btn, BrowseView::Preview);
     views->append(m_browse_cards_btn);
     views->append(m_browse_grid_btn);
     views->append(m_browse_form_btn);
     views->append(m_browse_list_btn);
+    views->append(m_browse_preview_btn);
     bar->append(*views);
     // s006c: the record verbs (greyed by sync_undo when the table can't take them).
     m_browse_new.set_label("New Record");
@@ -344,6 +351,7 @@ void Shell::paint_browse() {  // browse: cards or grid
     m_browse_grid_btn.set_sensitive(browse_info() != nullptr);
     m_browse_form_btn.set_sensitive(browse_info() != nullptr);
     m_browse_list_btn.set_sensitive(browse_info() != nullptr);
+    m_browse_preview_btn.set_sensitive(browse_info() != nullptr);
     m_browse_show_all.set_visible(found_here());
     if (m_finding && browse_info()) {   // s013a: the Find screen
         m_browse_prev.set_sensitive(false);
@@ -365,6 +373,7 @@ void Shell::paint_browse() {  // browse: cards or grid
         case BrowseView::Grid:  paint_grid();  break;
         case BrowseView::Form:  paint_form();  break;
         case BrowseView::List:  paint_list();  break;
+        case BrowseView::Preview: paint_preview(); break;
     }
 }
 
