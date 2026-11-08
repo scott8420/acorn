@@ -22,6 +22,7 @@
 #include <iterator>
 #include <optional>
 #include <vector>
+#include <set>
 #include <string>
 #include <unistd.h>
 
@@ -2450,6 +2451,41 @@ void test_sample(Journal& j, Gate& g, const std::string& P) {
         auto pg = found({{"last_name", "a"}}, {0, 2});
         check(P + "find: a page of the found set -- two rows, the total counts all",
               pg && pg->rows.size() == std::min<std::size_t>(2, static_cast<std::size_t>(a_n)) && pg->total == a_n, "");
+        // s013b: through a link -- a portal's column, a related field.
+        if (sc->table("phones") && sc->table("addresses")) {
+            const Table& ph = *sc->table("phones");
+            const Table& ad = *sc->table("addresses");
+            auto phones = read_page(g, ph, {0, 500});
+            auto addrs = read_page(g, ad, {0, 500});
+            auto pcol = [&](const Table& tt, const std::string& n) {
+                for (std::size_t i = 0; i < tt.columns.size(); ++i) if (tt.columns[i].name == n) return i;
+                return std::size_t{0};
+            };
+            std::set<double> with;   // contacts with a phone holding "0177"
+            if (phones) for (const auto& r : phones->rows)
+                if (cell_text(r[pcol(ph, "number")], FieldType::Text).find("0177") != std::string::npos) with.insert(num(r[pcol(ph, "contact_id")]).value_or(-1));
+            const auto ph_n = expect([&](const Row& r) { return with.count(num(r[col(key)]).value_or(-2)) > 0; });
+            const Criterion by_phone{"number", "0177", "phones", key, "contact_id"};
+            auto fph = read_found(g, ct, {by_phone}, {0, 100}, &*sc);
+            check(P + "find: through a portal -- contacts with a phone holding “0177”", fph && fph->total == ph_n && ph_n > 0,
+                  fph ? std::to_string(fph->total) + " / " + std::to_string(ph_n) : fph.error().message);
+            const auto both = expect([&](const Row& r) { return with.count(num(r[col(key)]).value_or(-2)) > 0 && has("last_name", "o")(r); });
+            auto fpb = read_found(g, ct, {by_phone, {"last_name", "o"}}, {0, 100}, &*sc);
+            check(P + "find: a portal box and an own box -- both", fpb && fpb->total == both,
+                  fpb ? std::to_string(fpb->total) + " / " + std::to_string(both) : fpb.error().message);
+            std::set<double> th;   // contacts whose last name has "th"
+            if (all) for (const auto& r : all->rows) if (has("last_name", "th")(r)) th.insert(num(r[col(key)]).value_or(-1));
+            std::int64_t ad_n = 0;
+            if (addrs) for (const auto& r : addrs->rows) ad_n += th.count(num(r[pcol(ad, "contact_id")]).value_or(-2)) ? 1 : 0;
+            auto fad = read_found(g, ad, {{"last_name", "TH", "contacts", "contact_id", key}}, {0, 100}, &*sc);
+            check(P + "find: through a related field -- addresses whose contact's last name has “th”",
+                  fad && fad->total == ad_n && ad_n > 0, fad ? std::to_string(fad->total) + " / " + std::to_string(ad_n) : fad.error().message);
+            auto nos = read_found(g, ct, {by_phone}, {0, 100});
+            auto badt = read_found(g, ct, {{"number", "1", "nope", key, "contact_id"}}, {0, 100}, &*sc);
+            auto badi = read_found(g, ct, {{"number", "1", "phones", key, "nope"}}, {0, 100}, &*sc);
+            check(P + "find: a link without the schema / to no table / by a field it hasn't -> refused in words",
+                  !nos && !badt && badt.error().message.find("nope") != std::string::npos && !badi, "");
+        }
         auto none = found({{"last_name", "zzqx"}});
         auto blank = found({{"last_name", "  "}});
         auto bad = found({{key, "abc"}});

@@ -157,6 +157,7 @@ private:
     void cancel_find();                          // category: find: back to the records as they were
     void show_all();                             // category: find: win.show-all -> every record again
     bool found_here() const;                     // category: find: a found set for the shown table
+    std::optional<db::Criterion> find_box(const core::LayoutObject& o, const std::string& column) const;  // category: find: what a box asks through (s013b)
     void paint_list();                           // category: form: the header once, the body per record, the footer once
     void form_caption(Gtk::Box& outer, const db::Table& t, const core::Layout& L, bool kept, const std::string& row_id);  // category: form: which layout (+ the picker, the mark)
     Gtk::Fixed* layout_part(const core::Layout& L, core::Part part, bool edit, Gtk::Widget*& focus_back);  // category: form: one part drawn for the record browse_value reads
@@ -355,6 +356,7 @@ private:
     std::map<std::string, std::string> m_find_typed;  // field -> what is typed in its box (kept across a repaint)
     std::string                     m_found_table;    // the found set's table ("" = none: every record)
     std::vector<db::Criterion>      m_found;          // ...and what it asked
+    std::map<std::string, std::string> m_found_typed; // s013b: its boxes as typed (Find again shows them)
     std::int64_t                    m_found_of = 0;   // every record in the table, for "found 5 of 12"
     widgets::Button                 m_browse_find, m_browse_show_all;
     Glib::RefPtr<Gio::SimpleAction> m_find_action, m_show_all_action;

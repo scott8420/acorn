@@ -220,6 +220,7 @@ void Shell::browse_table(const std::string& name) {  // browse: this table's fir
     m_form_focus.clear();
     m_finding = false;   // s013a: a find belongs to its table
     m_found.clear();
+    m_found_typed.clear();
     m_found_table.clear();
     m_browse_req = {0, kPage};
     m_browse_sel.clear();
@@ -257,7 +258,7 @@ void Shell::load_browse_page(bool keep_panel) {  // browse: read the page, repai
     // s013a: a found set reads only what matches -- the find run again, so
     // the page, the count and an edited record follow it.
     const bool found = found_here();
-    auto p = found ? db::read_found(*m_conn, *t, m_found, m_browse_req) : db::read_page(*m_conn, *t, m_browse_req);
+    auto p = found ? db::read_found(*m_conn, *t, m_found, m_browse_req, &m_schema) : db::read_page(*m_conn, *t, m_browse_req);
     if (!p && found) {   // the find no longer fits the table (a field undone away): every record again
         browse_note("The find no longer fits “" + t->name + "” (" + p.error().message + ") -- showing every record.", "error");
         m_found.clear();

@@ -95,13 +95,22 @@ std::pair<std::string, std::string> split_op(const std::string& typed) {
 
 }  // namespace
 
-std::expected<FindQuery, std::string> find_query(const Connection& c, const Table& t, const std::vector<Criterion>& crit) {
+std::expected<FindQuery, std::string> find_query(const Connection& c, const Table& t, const std::vector<Criterion>& crit,
+                                                 const Schema* sch) {
     FindQuery q;
     for (const auto& k : crit) {
         if (trimmed(k.typed).empty()) continue;
-        const Column* col = t.column(k.field);
-        if (!col) return std::unexpected("“" + t.name + "” has no field “" + k.field + "”");
-        const std::string name = "\u201C" + col->name + "\u201D";
+        // s013b: whose field -- this table's, or another's through a link.
+        const Table* in = &t;
+        if (!k.table.empty()) {
+            in = sch ? sch->table(k.table) : nullptr;
+            if (!in) return std::unexpected("there is no table “" + k.table + "”");
+            if (!t.column(k.outer)) return std::unexpected("“" + t.name + "” has no field “" + k.outer + "”");
+            if (!in->column(k.inner)) return std::unexpected("“" + in->name + "” has no field “" + k.inner + "”");
+        }
+        const Column* col = in->column(k.field);
+        if (!col) return std::unexpected("“" + in->name + "” has no field “" + k.field + "”");
+        const std::string name = "\u201C" + (in == &t ? col->name : in->name + "." + col->name) + "\u201D";
         if (col->type == FieldType::Container) return std::unexpected(name + " holds binary data -- it can't be searched");
         const std::string f = c.quote_ident(col->name);
         auto [op, rest] = split_op(k.typed);
@@ -126,6 +135,9 @@ std::expected<FindQuery, std::string> find_query(const Connection& c, const Tabl
             cond = f + " " + (op.empty() ? std::string("=") : op) + " ?";
             q.values.push_back(std::move(*v));
         }
+        if (in != &t)   // the link: this record's outer among the matching records' inner
+            cond = c.quote_ident(k.outer) + " IN (SELECT " + c.quote_ident(k.inner) + " FROM " + c.quote_ident(in->name) +
+                   " WHERE " + cond + ")";
         q.where += (q.where.empty() ? " WHERE " : " AND ") + cond;
     }
     if (q.where.empty()) return std::unexpected("Type what to look for in at least one box");
@@ -133,8 +145,8 @@ std::expected<FindQuery, std::string> find_query(const Connection& c, const Tabl
 }
 
 std::expected<Page, Error> read_found(Connection& c, const Table& t, const std::vector<Criterion>& crit,
-                                      const PageRequest& r) {
-    auto q = find_query(c, t, crit);
+                                      const PageRequest& r, const Schema* sch) {
+    auto q = find_query(c, t, crit, sch);
     if (!q) return std::unexpected(Error{Error::Code::Unsupported, q.error()});
     return read_sql_where(c, t, r, q->where, q->values);
 }
@@ -144,10 +156,11 @@ std::string find_summary(const std::vector<Criterion>& crit) {
     for (const auto& k : crit) {
         if (trimmed(k.typed).empty()) continue;
         auto [op, rest] = split_op(k.typed);
+        const std::string who = k.table.empty() ? k.field : k.table + "." + k.field;   // s013b
         std::string said;
-        if (op == "=" && rest.empty()) said = k.field + " is empty";
-        else if (op.empty())           said = k.field + " has “" + rest + "”";
-        else                           said = k.field + " " + op + " " + rest;
+        if (op == "=" && rest.empty()) said = who + " is empty";
+        else if (op.empty())           said = who + " has “" + rest + "”";
+        else                           said = who + " " + op + " " + rest;
         out += (out.empty() ? "" : " · ") + said;
     }
     return out;

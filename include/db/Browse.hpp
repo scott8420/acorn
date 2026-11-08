@@ -61,20 +61,33 @@ std::expected<Page, Error> read_related(Connection& c, const Table& t, const std
 // Values are bound (never written into the SQL); a value the field can't
 // hold is refused in words ("“id” needs a whole number"), as is a field the
 // table hasn't, a binary field, and no criterion at all.
+// s013b: a criterion can reach THROUGH a link -- `table` names another table
+// and the record matches when `outer` (a field of this table) is IN the
+// `inner` values of that table's records whose `field` matches:
+//   a portal's column (contacts with a phone "0177"):
+//       {field "number", table "phones", outer "id", inner "contact_id"}
+//   a related field (addresses whose contact's last name has "th"):
+//       {field "last_name", table "contacts", outer "contact_id", inner "id"}
+// `table` empty: `field` is this table's own.
 struct Criterion {
     std::string field;
     std::string typed;
+    std::string table = {};
+    std::string outer = {};
+    std::string inner = {};
     bool operator==(const Criterion&) const = default;
 };
 struct FindQuery {
     std::string        where;    // " WHERE ..." (with the leading space)
     std::vector<Value> values;
 };
-std::expected<FindQuery, std::string> find_query(const Connection& c, const Table& t, const std::vector<Criterion>& crit);
+// `s` resolves a criterion's other table; without it such a criterion is refused.
+std::expected<FindQuery, std::string> find_query(const Connection& c, const Table& t, const std::vector<Criterion>& crit,
+                                                 const Schema* s = nullptr);
 // A page of the found set; `total` counts every match. A refusal is an Error
 // (Code::Unsupported) carrying the words.
 std::expected<Page, Error> read_found(Connection& c, const Table& t, const std::vector<Criterion>& crit,
-                                      const PageRequest& r);
+                                      const PageRequest& r, const Schema* s = nullptr);
 // "last_name contains “a” · company is empty" -- the non-blank criteria, in
 // words, for the line under Browse.
 std::string find_summary(const std::vector<Criterion>& crit);
