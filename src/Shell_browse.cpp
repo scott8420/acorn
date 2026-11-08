@@ -92,7 +92,7 @@ void Shell::build_browse_page() {  // browse: the Browse area
     m_browse_form_btn.set_group(m_browse_cards_btn);
     // s012a: List -- the page through the same layout, a row per record.
     m_browse_list_btn.set_label("List");
-    m_browse_list_btn.set_tooltip_text("Every record of the page through its layout, a row each -- "
+    m_browse_list_btn.set_tooltip_text("Every record of the page through its layout, a row each, edited in place -- "
                                        "the header above, the footer below. Double-click a row for its Form");
     m_browse_list_btn.set_group(m_browse_cards_btn);
     m_browse_cards_btn.set_active(true);
@@ -277,7 +277,7 @@ void Shell::load_browse_page(bool keep_panel) {  // browse: read the page, repai
     }
     // s010a: a field just saved from the Form keeps its boxes (the one Tab
     // moved to holds the focus); the values under them are fresh.
-    if (keep_panel && m_browse_view == BrowseView::Form) {
+    if (keep_panel && (m_browse_view == BrowseView::Form || m_browse_view == BrowseView::List)) {   // s012c: + List
         sync_undo();
         return;
     }

@@ -134,10 +134,18 @@ const std::vector<ShortcutSpec>& shortcut_registry() {
         {"Layouts", "", {}, "Esc", "Let go of the picked objects"},
         {"Layouts", "", {}, "Ctrl+A", "Pick every object in the body (s010e)"},
 
+        // ── List (s012a / s012c) ──────────────────────────────────────────────
+        // Doc-only: Browse -> List's own keys.
+        {"List", "", {}, "Tab", "The next box along the row, then on into the next row"},
+        {"List", "", {}, "↑ ↓", "The same box a row up / down (read-only: walk the rows)"},
+        {"List", "", {}, "Enter", "Save the box (read-only: open the row's Form)"},
+        {"List", "", {}, "Esc", "Put the box back to what is saved"},
+
         // ── Mouse ─────────────────────────────────────────────────────────────
         // Doc-only: a gesture is not a GAction, but the reader still needs it.
         {"Mouse", "", {}, "Click a recent connection", "Connect to it again (read-only)"},
         {"Mouse", "", {}, "Drag in Layouts", "Move an object; a handle resizes it (Shift: by the pixel)"},
+        {"Mouse", "", {}, "Double-click a List row", "Open that record in the Form"},
         {"Mouse", "", {}, "Shift-click in Layouts", "Add an object to the pick, or drop it -- a drag then moves them all"},
 
     };

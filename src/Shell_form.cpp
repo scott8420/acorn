@@ -19,6 +19,7 @@
 #include <gtkmm/scrolledwindow.h>
 
 #include <cstdio>
+#include <functional>
 
 // Shell_form.cpp -- the FORM view (s010a): Browse's third view. One record,
 // drawn through its table's layout (core::Layout, kept in the solution) and
@@ -106,15 +107,23 @@ void Shell::paint_form() {  // form: the picked record through its layout
 
 // s012a: the LIST view -- the picked layout drawn as rows: the header once
 // at the top, the body once per record of the page, the footer once at the
-// bottom; the header and footer stay put while the rows scroll. Rows are
-// SHOWN, not edited (s012b): a click picks the record (the panel beside
-// edits it, as with Cards and Grid); a double-click or Enter opens it in the
-// Form. Fields in the header / footer show the picked record.
+// bottom; the header and footer stay put while the rows scroll. A click
+// picks the record; a double-click opens it in the Form. Fields in the
+// header / footer show the picked record.
+// s012c: rows are EDITED in place -- the Form's boxes in every row (when the
+// table is writable), each saving as the Form's do (Enter / leave = one step,
+// Esc puts it back, Ctrl+Z with nothing typed undoes). A box taking the focus
+// picks its row (a save is always for the picked record). Tab goes along a
+// row and on into the next; Up / Down go to the same box a row up / down.
+// The rows themselves take no focus while they edit (Tab would stop on each
+// row before its first box); read-only, they walk and Enter opens the Form
+// as before. Portals in a row stay shown -- edit them on the record's Form.
 void Shell::paint_list() {  // form: the page through its layout, a row each
     const db::Table* t = browse_info();
     const unsigned gen = m_view_gen;
     bool kept = false;
     const core::Layout L = form_layout(&kept);
+    const bool can = browse_writable();   // s012c: rows are boxes
     auto outer = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 8);
     outer->set_halign(Gtk::Align::START);
     outer->set_name("shell.browse.list_view");
@@ -125,15 +134,15 @@ void Shell::paint_list() {  // form: the page through its layout, a row each
 
     struct Row { int& r; int was; ~Row() { r = was; } };   // m_paint_row back as it was, however we leave
     Gtk::Widget* unused = nullptr;
-    auto part = [&](core::Part p, int row) -> Gtk::Fixed* {
+    auto part = [&](core::Part p, int row, bool edit, Gtk::Widget*& fb) -> Gtk::Fixed* {
         Row keep{m_paint_row, m_paint_row};
         m_paint_row = row;
-        return layout_part(L, p, false, unused);
+        return layout_part(L, p, edit, fb);
     };
     const int picked = m_browse_sel_index >= 0 && static_cast<std::size_t>(m_browse_sel_index) < m_browse_data.rows.size()
                            ? m_browse_sel_index : 0;
     if (core::part_height(L, core::Part::Header) > 0) {
-        auto h = part(core::Part::Header, picked);
+        auto h = part(core::Part::Header, picked, false, unused);
         h->add_css_class("acorn-list-header");
         h->set_name("shell.browse.list_header");
         h->set_tooltip_text("The layout's header -- drawn once, above the records");
@@ -145,8 +154,11 @@ void Shell::paint_list() {  // form: the page through its layout, a row each
     list->set_activate_on_single_click(false);   // a click picks; a double-click (or Enter) opens the Form
     list->add_css_class("acorn-list");
     list->set_name("shell.browse.list_rows");
+    Gtk::Widget* focus_back = nullptr;   // s012c: the box last focused, in the picked row
     for (std::size_t r = 0; r < m_browse_data.rows.size(); ++r) {
-        auto body = part(core::Part::Body, static_cast<int>(r));
+        Gtk::Widget* fb = nullptr;
+        auto body = part(core::Part::Body, static_cast<int>(r), can, fb);
+        if (static_cast<int>(r) == m_browse_sel_index) focus_back = fb;
         body->add_css_class("acorn-list-body");
         const std::string mark = r < m_browse_data.ids.size() ? mark_of(t->name, m_browse_data.ids[r]) : std::string{};
         if (!mark.empty()) {   // s008b: an amber edge and a hint
@@ -154,6 +166,57 @@ void Shell::paint_list() {  // form: the page through its layout, a row each
             body->set_tooltip_text("⚠ " + mark);
         }
         list->append(*body);
+        if (can) {
+            if (auto* lr = list->get_row_at_index(static_cast<int>(r))) lr->set_focusable(false);   // Tab: box to box
+            // A box (or check, or calendar button) taking the focus picks its
+            // row -- after the box it left has saved for the row it was in.
+            auto focus = Gtk::EventControllerFocus::create();
+            focus->signal_enter().connect([this, list, body, gen] {
+                if (m_browse_painting || gen != m_view_gen) return;
+                auto* lr = dynamic_cast<Gtk::ListBoxRow*>(body->get_parent());
+                if (lr && !lr->is_selected()) list->select_row(*lr);
+            });
+            body->add_controller(focus);
+        }
+    }
+    if (can) {
+        // s012c: Up / Down -- the same box a row up / down (by its name:
+        // "form.field.<f>" / "form.date.<f>"). Heard before the box, so the
+        // list's own row-walk never moves a cursor the rows don't show.
+        auto keys = Gtk::EventControllerKey::create();
+        keys->signal_key_pressed().connect(
+            [this, list, gen](guint keyval, guint, Gdk::ModifierType state) -> bool {
+                if (gen != m_view_gen) return false;
+                if (keyval != GDK_KEY_Up && keyval != GDK_KEY_Down && keyval != GDK_KEY_KP_Up && keyval != GDK_KEY_KP_Down)
+                    return false;
+                if ((state & (Gdk::ModifierType::CONTROL_MASK | Gdk::ModifierType::ALT_MASK |
+                              Gdk::ModifierType::SHIFT_MASK)) != Gdk::ModifierType{}) return false;
+                auto* root = list->get_root();
+                Gtk::Widget* f = root ? root->get_focus() : nullptr;
+                Gtk::Widget* named = nullptr;   // the focused box's own widget (it has the name)
+                Gtk::ListBoxRow* from = nullptr;
+                for (Gtk::Widget* w = f; w && w != list; w = w->get_parent()) {
+                    const std::string n = w->get_name();
+                    if (!named && (n.rfind("form.field.", 0) == 0 || n.rfind("form.date.", 0) == 0)) named = w;
+                    if (auto* lr = dynamic_cast<Gtk::ListBoxRow*>(w)) { from = lr; break; }
+                }
+                if (!named || !from) return false;   // not in a row's box: let it be
+                const bool up = keyval == GDK_KEY_Up || keyval == GDK_KEY_KP_Up;
+                auto* to = list->get_row_at_index(from->get_index() + (up ? -1 : 1));
+                if (!to) return true;   // the first / last row: stay
+                const std::string want = named->get_name();
+                std::function<Gtk::Widget*(Gtk::Widget*)> find = [&](Gtk::Widget* w) -> Gtk::Widget* {
+                    if (std::string(w->get_name()) == want) return w;
+                    for (auto* c = w->get_first_child(); c; c = c->get_next_sibling())
+                        if (auto* hit = find(c)) return hit;
+                    return nullptr;
+                };
+                if (auto* hit = find(to)) hit->grab_focus();
+                return true;
+            },
+            false);
+        keys->set_propagation_phase(Gtk::PropagationPhase::CAPTURE);
+        list->add_controller(keys);
     }
     auto rows = Gtk::make_managed<Gtk::ScrolledWindow>();
     rows->set_policy(Gtk::PolicyType::NEVER, Gtk::PolicyType::AUTOMATIC);
@@ -198,7 +261,7 @@ void Shell::paint_list() {  // form: the page through its layout, a row each
     sheet->append(*rows);
 
     if (core::part_height(L, core::Part::Footer) > 0) {
-        auto f = part(core::Part::Footer, picked);
+        auto f = part(core::Part::Footer, picked, false, unused);
         f->add_css_class("acorn-list-footer");
         f->set_name("shell.browse.list_footer");
         f->set_tooltip_text("The layout's footer -- drawn once, below the records");
@@ -211,6 +274,7 @@ void Shell::paint_list() {  // form: the page through its layout, a row each
     m_browse_scroll.set_child(*outer);
     m_browse_painting = false;
     if (sel) show_row(m_browse_sel_index, true);   // the picked row in view, once it has its place
+    if (focus_back) focus_back->grab_focus();       // s012c: back in the box you were in (an undo, a repaint)
 }
 
 // The Form's and the List's caption: which layout, and where it came from;
@@ -299,7 +363,7 @@ Gtk::Fixed* Shell::layout_part(const core::Layout& L, core::Part part, bool edit
             });
             w = da;
         } else if (o.kind == core::ObjectKind::Portal) {   // s011a
-            w = form_portal(o, *t, focus_back, edit);
+            w = form_portal(o, *t, focus_back, edit && m_paint_row < 0);   // s012c: a List row's portal is shown
         } else if (o.kind == core::ObjectKind::Related) {  // s011d
             w = form_related(o, *t);
         } else if (o.kind == core::ObjectKind::Text) {

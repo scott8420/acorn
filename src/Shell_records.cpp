@@ -75,7 +75,9 @@ void Shell::paint_record() {  // records: the panel
     const bool picked = m_browse_sel_index >= 0 &&
                         static_cast<std::size_t>(m_browse_sel_index) < m_browse_data.rows.size();
     // s010a: the Form IS the record's editor -- the panel only for a new one.
-    if (!t || (!picked && !m_record_new) || (m_browse_view == BrowseView::Form && !m_record_new)) {
+    // s012c: so are the List's rows.
+    const bool own_editor = m_browse_view == BrowseView::Form || m_browse_view == BrowseView::List;
+    if (!t || (!picked && !m_record_new) || (own_editor && !m_record_new)) {
         m_record_scroll.set_visible(false);
         m_record_scroll.unset_child();
         return;
@@ -263,7 +265,7 @@ void Shell::commit_field(const std::string& row, const std::string& column, cons
     bool keep = r.has_value();
     // s011d: the Form shows a related field through this one (an address's
     // contact_id changed -> its contact's name changes): repaint it whole.
-    if (keep && m_browse_view == BrowseView::Form)
+    if (keep && (m_browse_view == BrowseView::Form || m_browse_view == BrowseView::List))   // s012c: + List
         for (const auto& o : form_layout().objects)
             if (o.kind == core::ObjectKind::Related && o.field == column) keep = false;
     Glib::signal_idle().connect_once([this, keep] { load_browse_page(keep); });
