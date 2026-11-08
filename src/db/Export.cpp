@@ -100,6 +100,8 @@ std::expected<ExportResult, Error> export_records(Connection& c, const Schema& s
             ++res.records;
         }
         if (!out) return std::unexpected(Error{Error::Code::Internal, "the file couldn't be written"});
+        if (r.keep_going && !r.keep_going(res.records))   // s020b: Stop
+            return std::unexpected(Error{Error::Code::Internal, "stopped"});
         if (page->rows.empty() || static_cast<std::int64_t>(page->rows.size()) < pr.limit) break;
         pr.offset += pr.limit;
     }

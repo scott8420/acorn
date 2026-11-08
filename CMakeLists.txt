@@ -199,6 +199,7 @@ add_executable(acorn
     src/Shell_calcs.cpp      # s014a: calculation fields -- the Tables section, the values per record
     src/Shell_lists.cpp      # s014c: value lists -- the Tables section and its editor
     src/Shell_scripts.cpp    # s017a: scripts -- the Tables section, Browse's Scripts menu, the run
+    src/Shell_long.cpp       # s020b: long reads on a worker -- the window shut, a line with Stop
     src/Shell_export.cpp     # s018a: Browse -> Export -- the popover, the save dialog, db::export_file
     src/Shell_import.cpp     # s018b: Browse -> Import… -- the open dialog, ImportWindow, db::import_records
     src/ImportWindow.cpp     # s018b: the preview + column matching window

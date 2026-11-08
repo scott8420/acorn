@@ -3351,6 +3351,25 @@ void test_export_book(Gate& g, const std::string& P) {
     { std::ifstream in(path, std::ios::binary); text.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>()); }
     check(P + "export: the file put in place whole (the same text as the stream), no .part left",
           rf && text == a.str() && !fs::exists(path + ".part"), rf ? "" : rf.error().message);
+    // s020b: Stop -- asked after each read; false leaves the file that was there, no .part.
+    ExportRequest stop = all;
+    stop.chunk = 5;
+    std::vector<std::int64_t> asked;
+    stop.keep_going = [&asked](std::int64_t n) { asked.push_back(n); return false; };
+    auto rs = export_file(g, *sch, *ct, stop, path);
+    std::string after;
+    { std::ifstream in(path, std::ios::binary); after.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>()); }
+    check(P + "export: Stop after the first read -- \"stopped\", asked once with 5, the file there untouched, no .part",
+          !rs && rs.error().message == "stopped" && asked == std::vector<std::int64_t>{5} && after == text && !fs::exists(path + ".part"),
+          rs ? "not stopped" : rs.error().message);
+    ExportRequest go = all;
+    go.chunk = 5;
+    std::vector<std::int64_t> told;
+    go.keep_going = [&told](std::int64_t n) { told.push_back(n); return true; };
+    std::ostringstream sink;
+    auto rg = export_records(g, *sch, *ct, go, sink);
+    check(P + "export: keep_going told the running count after each read (5, 10, 12)",
+          rg && told == std::vector<std::int64_t>{5, 10, 12}, std::to_string(told.size()));
     std::error_code ec;
     fs::remove_all(dir, ec);
     check(P + "export: reads only -- nothing went near the door", g.strays() == strays0, std::to_string(g.strays()));

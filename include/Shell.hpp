@@ -32,6 +32,11 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <atomic>
+#include <functional>
+#include <gtkmm/spinner.h>
+#include <gtkmm/label.h>
+#include <gtkmm/button.h>
 #include <vector>
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -121,6 +126,21 @@ private:
     void on_connect();                           // category: connect: read the form -> keyring -> start
     void start_connect(db::Engine* e, db::ConnectParams p);  // category: connect: open + introspect on a worker
     void on_connect_done();                      // category: connect: back on the UI thread
+    // s020b: a long read on a worker (Shell_long.cpp). The work runs off the
+    // UI thread with the connection to itself -- the window takes no input
+    // meanwhile (nothing else can reach m_conn) -- and returns what to do
+    // back on the UI thread. After a moment a line says what it's doing,
+    // with Stop. False (nothing started) when one is already running.
+    struct LongTicket {
+        std::atomic<bool>         stop{false};
+        std::atomic<std::int64_t> count{0};   // shown beside the words when > 0
+    };
+    using LongWork = std::function<std::function<void()>(LongTicket&)>;
+    bool run_long(const std::string& says, LongWork work);
+    bool busy() const { return m_busy; }
+    void long_done();                            // long: back on the UI thread
+    void shut(bool on);                          // long: no input while the worker has the connection
+    void build_busy();                           // long: the line and Stop, over the window
     void show_schema();                          // category: connect: paint the table list
     void set_status(const std::string& text, const char* kind);  // category: connect: "", "ok", "error"
     void fill_form(const core::SavedConnection& c);  // category: connect: a recent -> the form
@@ -358,6 +378,22 @@ private:
     // The worker hands its result back through the dispatcher; the mutex
     // guards the hand-off slots, which the UI thread reads in on_connect_done.
     std::thread                     m_worker;
+    // s020b: the long read's worker, its hand-back and its line.
+    std::thread                     m_long;
+    Glib::Dispatcher                m_long_done;
+    std::mutex                      m_long_mx;
+    std::function<void()>           m_long_then;
+    std::shared_ptr<LongTicket>     m_long_ticket;
+    std::string                     m_long_says;
+    bool                            m_busy = false;
+    bool                            m_preview_again = false;   // Preview asked for while busy
+    sigc::connection                m_busy_timer;
+    Gtk::Overlay                    m_frame;
+    Gtk::Box                        m_busy_bar{Gtk::Orientation::HORIZONTAL, 10};
+    Gtk::Spinner                    m_busy_spin;
+    Gtk::Label                      m_busy_says;
+    Gtk::Button                     m_busy_stop{"Stop"};
+    std::vector<std::pair<Glib::RefPtr<Gio::SimpleAction>, bool>> m_busy_actions;
     Glib::Dispatcher                m_connect_done;
     std::mutex                      m_result_mx;
     std::unique_ptr<db::Connection> m_result_conn;

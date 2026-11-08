@@ -69,6 +69,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <utility>
@@ -259,7 +260,7 @@ class Gate final : public Connection {
 public:
     explicit Gate(std::unique_ptr<Connection> inner) : m_inner(std::move(inner)) {}
     std::expected<Result, Error> query(const std::string& sql, const std::vector<Value>& params = {}) override;
-    std::expected<Schema, Error> introspect() override { return m_inner->introspect(); }
+    std::expected<Schema, Error> introspect() override { std::lock_guard lk(m_use); return m_inner->introspect(); }
     bool read_only() const override { return m_inner->read_only(); }
     std::string quote_ident(const std::string& n) const override { return m_inner->quote_ident(n); }
 
@@ -271,6 +272,12 @@ private:
     std::unique_ptr<Connection> m_inner;
     std::function<bool()>       m_door;
     int                         m_strays = 0;
+    // s020b: one statement at a time. Browse's long reads (Preview, Export)
+    // run on a worker; the window is shut meanwhile, but anything the UI
+    // thread still sends -- the rest of a repaint that started the read --
+    // waits for the worker's statement instead of sharing the connection
+    // (a MariaDB / libpq connection is not for two threads at once).
+    std::recursive_mutex        m_use;
 };
 
 // ── the store the journal writes through ──────────────────────────────────────

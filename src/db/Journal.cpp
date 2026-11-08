@@ -944,6 +944,7 @@ bool is_read(const std::string& sql) {
 }
 
 std::expected<Result, Error> Gate::query(const std::string& sql, const std::vector<Value>& params) {
+    std::lock_guard lk(m_use);   // s020b
     if (!is_read(sql) && !(m_door && m_door())) {
         ++m_strays;
         return std::unexpected(Error{Error::Code::ReadOnly,

@@ -215,10 +215,13 @@ void draw_page(const Cairo::RefPtr<Cairo::Context>& cr, const PreviewDoc& d, int
 
 void Shell::paint_preview() {  // preview: the List's layout on pages, read-only
     const db::Table* t = browse_info();
-    auto outer = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 12);
-    outer->set_halign(Gtk::Align::START);
-    outer->set_name("shell.browse.preview_view");
-    if (!t || !m_conn) { m_browse_scroll.set_child(*outer); return; }
+    if (!t || !m_conn) {
+        auto outer = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 12);
+        outer->set_name("shell.browse.preview_view");
+        m_browse_scroll.set_child(*outer);
+        return;
+    }
+    if (m_busy) { m_preview_again = true; return; }   // s020b: painted again when the read running ends
 
     auto doc = std::make_shared<PreviewDoc>();
     bool kept = false;
@@ -246,15 +249,30 @@ void Shell::paint_preview() {  // preview: the List's layout on pages, read-only
     all.offset = 0;
     all.limit = db::kPrintMax;
     all.group = groups;
-    auto page = found_here() ? db::read_found(*m_conn, *t, m_found, all, &m_schema) : db::read_page(*m_conn, *t, all);
-    std::string why;
+    // s020b: the reading runs on a worker (Shell_long.cpp) -- what it needs is
+    // copied here; t and m_schema stay put while the window is shut.
+    const bool found = found_here();
+    const std::vector<db::Criterion> crit = found ? m_found : std::vector<db::Criterion>{};
+    const auto calcs = m_solution.calcs_of(t->name);
+    const auto sums = m_solution.summaries_of(t->name);
+    const auto browse_sums = m_browse_sums;
+    const std::string table = t->name;
+    auto why_p = std::make_shared<std::string>();
+    run_long("Reading the records of " + curly(table) + " for Preview",
+             [this, t, doc, all, found, crit, calcs, sums, browse_sums, groups, labels, why_p, kept, gone, table](LongTicket& tk) -> std::function<void()> {
+    std::string& why = *why_p;
+    const auto today = core::today_iso();
+    auto page = found ? db::read_found(*m_conn, *t, crit, all, &m_schema) : db::read_page(*m_conn, *t, all);
     if (!page) why = page.error().message;
     else {
         doc->total = static_cast<int>(page->total);
-        const auto today = core::today_iso();
-        const auto& calcs = m_solution.calcs_of(t->name);
-        for (const auto& row : page->rows)
-            doc->records.push_back(db::print_record(*m_conn, m_schema, *t, doc->layout, row, calcs, m_browse_sums, today));
+        for (const auto& row : page->rows) {
+            if (tk.stop) { why = "stopped"; break; }
+            doc->records.push_back(db::print_record(*m_conn, m_schema, *t, doc->layout, row, calcs, browse_sums, today));
+            ++tk.count;
+        }
+    }
+    if (page && why.empty()) {
         // s015b: each record's group values, the groups' summaries (one
         // SELECT per level), then what prints in order.
         std::vector<std::vector<std::string>> keys(page->rows.size());
@@ -264,12 +282,11 @@ void Shell::paint_preview() {  // preview: the List's layout on pages, read-only
         for (std::size_t r = 0; r < page->rows.size(); ++r)
             for (std::size_t k = 0; k < at.size(); ++k)
                 keys[r].push_back(db::cell_text(page->rows[r][static_cast<std::size_t>(at[k])], t->columns[static_cast<std::size_t>(at[k])].type));
-        const auto& sums = m_solution.summaries_of(t->name);
         std::vector<db::GroupSums> level(groups.size());
         if (!sums.empty())
-            for (std::size_t k = 0; k < groups.size() && why.empty(); ++k) {
+            for (std::size_t k = 0; k < groups.size() && why.empty() && !tk.stop; ++k) {
                 auto gs = db::read_group_summaries(*m_conn, *t, sums, std::vector<std::string>(groups.begin(), groups.begin() + static_cast<std::ptrdiff_t>(k) + 1),
-                                                   found_here() ? m_found : std::vector<db::Criterion>{}, &m_schema);
+                                                   crit, &m_schema);
                 if (gs) level[k] = std::move(*gs);
                 else why = gs.error().message;
             }
@@ -304,17 +321,26 @@ void Shell::paint_preview() {  // preview: the List's layout on pages, read-only
     }
     doc->pages = core::paginate_blocks(core::part_height(doc->layout, core::Part::Header),
                                        core::part_height(doc->layout, core::Part::Footer), heights, keep, doc->room);
-    m_preview = doc;
     if (auto lg = log::get(log::Area::Shell))
         lg->info("preview: '{}' {} records -> {} pages ({}, scale {:.3f}){}", doc->title, doc->records.size(), doc->pages.size(),
                  doc->paper.name, doc->scale, why.empty() ? "" : " -- " + why);
+
+    // Back on the UI thread: the pages, if Browse still shows this Preview.
+    return [this, doc, why_p, groups, labels, gone, kept, found, table]() {
+    const std::string& why = *why_p;
+    const db::Table* t = browse_info();
+    if (!t || t->name != table || m_browse_view != BrowseView::Preview) { m_preview_again = true; return; }
+    m_preview = doc;
+    auto outer = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 12);
+    outer->set_halign(Gtk::Align::START);
+    outer->set_name("shell.browse.preview_view");
 
     form_caption(*outer, *t, doc->layout, kept, {});   // the layout's name and its picker, as Form / List
     // The caption: what this is, and the two ways out of it.
     auto bar = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
     const int n = static_cast<int>(doc->records.size());
     std::string says = std::to_string(n) +
-                       (found_here() ? " found" : "") + (n == 1 ? " record" : " records") + " · " +
+                       (found ? " found" : "") + (n == 1 ? " record" : " records") + " · " +
                        std::to_string(doc->pages.size()) + (doc->pages.size() == 1 ? " page" : " pages") + " · " +
                        doc->paper.name;
     if (doc->total > n) says += " · the first " + std::to_string(n) + " of " + std::to_string(doc->total);
@@ -325,7 +351,10 @@ void Shell::paint_preview() {  // preview: the List's layout on pages, read-only
     if (labels) says += " · labels " + core::labels_label(doc->layout);
     if (!gone.empty()) says += " · there's no " + curly(gone) + " now -- its sub-summary is left out";
     if (doc->scale < 1.0) says += " · scaled to " + std::to_string(static_cast<int>(std::lround(doc->scale * 100))) + "%";
-    auto cap = Gtk::make_managed<Gtk::Label>(why.empty() ? says : "Could not read the records: " + why);
+    const bool stopped = why == "stopped";   // s020b
+    auto cap = Gtk::make_managed<Gtk::Label>(why.empty() ? says
+                                             : stopped ? "Stopped before every record was read -- nothing to print. Read Again reads them."
+                                                       : "Could not read the records: " + why);
     cap->set_xalign(0.0f);
     cap->add_css_class(why.empty() ? "acorn-status" : "acorn-missing");
     cap->set_name("shell.browse.preview_says");
@@ -341,6 +370,13 @@ void Shell::paint_preview() {  // preview: the List's layout on pages, read-only
     pdf->signal_clicked().connect([this] { save_preview_pdf(); });
     pr->set_sensitive(why.empty());
     pdf->set_sensitive(why.empty());
+    if (stopped) {   // s020b: the way back after Stop
+        auto again = Gtk::make_managed<Gtk::Button>("Read Again");
+        again->set_name("shell.browse.preview_again");
+        again->set_tooltip_text("Read the records for Preview again");
+        again->signal_clicked().connect([this] { paint_preview(); });
+        bar->append(*again);
+    }
     bar->append(*pr);
     bar->append(*pdf);
     outer->append(*bar);
@@ -360,6 +396,8 @@ void Shell::paint_preview() {  // preview: the List's layout on pages, read-only
         outer->append(*da);
     }
     m_browse_scroll.set_child(*outer);
+    };   // the UI part
+    });  // the worker
 }
 
 void Shell::print_preview() {  // preview: Print... -- the same pages through GtkPrintOperation

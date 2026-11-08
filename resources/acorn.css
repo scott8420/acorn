@@ -382,3 +382,15 @@ window.acorn checkbutton:focus-visible > check,
 window.acorn dropdown > button:focus-visible { outline-color: alpha(@acorn_amber, 0.60); }
 window.acorn stacksidebar row:focus-visible,
 window.acorn row:focus-visible { outline-color: alpha(@acorn_amber, 0.60); }
+
+/* s020b: a long read -- the areas dim, a line over them with Stop. */
+.acorn-busy { opacity: 0.55; }
+box.acorn-busy-bar {
+    background: @acorn_panel;
+    border: 1px solid @acorn_panel_edge;
+    border-radius: 999px;
+    padding: 6px 8px 6px 16px;
+    color: @acorn_ink;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+}
+box.acorn-busy-bar spinner { color: @acorn_amber; }

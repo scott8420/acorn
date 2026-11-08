@@ -97,6 +97,9 @@ Shell::~Shell() {
     // A connect in flight finishes on its own (it has a timeout); wait for it
     // so no thread outlives the loader whose plugin code it is running.
     if (m_worker.joinable()) m_worker.join();
+    // s020b: a long read is asked to stop and waited for (its work holds m_conn).
+    if (m_long_ticket) m_long_ticket->stop = true;
+    if (m_long.joinable()) m_long.join();
 }
 
 // The ordered pass Scott's Controller/MainWindow shape names: construct the

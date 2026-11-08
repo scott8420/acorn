@@ -118,11 +118,25 @@ void Shell::export_records_to_file() {  // export: the save dialog, then db::exp
             const std::string ext = std::filesystem::path(path).extension().string();
             if (ext.empty()) path += ending;   // a name with no ending gets one; another ending is the person's
         }
-        auto done = db::export_file(*m_conn, m_schema, *t, r, path);
-        if (auto lg = log::get(log::Area::Shell))
-            lg->info("export: '{}' {} fields -> {}: {}", table, r.fields.size(), path, done ? "ok" : done.error().message);
-        if (!done) { browse_note("Not exported: " + done.error().message + ".", "error"); return; }
-        browse_note(db::export_says(*done, std::filesystem::path(path).filename().string()) + ".", "ok");
+        // s020b: written on a worker (Shell_long.cpp); Stop between reads leaves
+        // the file that was there.
+        const std::string file = std::filesystem::path(path).filename().string();
+        const bool started = run_long("Exporting “" + table + "” to " + file,
+            [this, t, r, path, table, file](LongTicket& tk) mutable -> std::function<void()> {
+                r.keep_going = [&tk](std::int64_t n) { tk.count = n; return !tk.stop.load(); };
+                auto done = db::export_file(*m_conn, m_schema, *t, r, path);
+                if (auto lg = log::get(log::Area::Shell))
+                    lg->info("export: '{}' {} fields -> {}: {}", table, r.fields.size(), path, done ? "ok" : done.error().message);
+                return [this, done, file]() {
+                    if (!done && done.error().message == "stopped") {
+                        browse_note("Stopped -- " + file + " wasn't written (one already there is left as it was).", "error");
+                        return;
+                    }
+                    if (!done) { browse_note("Not exported: " + done.error().message + ".", "error"); return; }
+                    browse_note(db::export_says(*done, file) + ".", "ok");
+                };
+            });
+        if (!started) browse_note("Not exported: Acorn is still reading -- try again when it's done.", "error");
     });
 }
 

@@ -29,6 +29,7 @@
 
 #include <cstdint>
 #include <expected>
+#include <functional>
 #include <map>
 #include <ostream>
 #include <string>
@@ -66,6 +67,11 @@ struct ExportRequest {
     std::map<std::string, core::CalcValue> sums;    // its summaries' values (a calculation may read one)
     std::string              today;    // what Today means for a calculation (ISO)
     std::int64_t             chunk = 500;   // records per read
+    // s020b: asked after each read with the records written so far; false
+    // stops the export (Error "stopped") -- export_file then leaves the file
+    // that was there and no .part. Empty: never asked. Browse runs Export on
+    // a worker, and Stop sets what this answers.
+    std::function<bool(std::int64_t)> keep_going;
 };
 
 struct ExportResult {

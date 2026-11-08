@@ -44,7 +44,8 @@ void Shell::build_shell() {  // zone: window + sidebar + stack
 
     m_body.append(m_sidebar);
     m_body.append(m_stack);
-    set_child(m_body);
+    build_busy();          // s020b: m_body in m_frame, the busy line over it
+    set_child(m_frame);
 }
 
 void Shell::build_pages() {  // zone: Acorn's areas
