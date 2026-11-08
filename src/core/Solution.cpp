@@ -65,6 +65,19 @@ const std::map<std::string, Calc>& Solution::calcs_of(const std::string& table) 
     return t == calcs.end() ? none : t->second;
 }
 
+const Summary* Solution::summary(const std::string& table, const std::string& name) const {
+    auto t = summaries.find(table);
+    if (t == summaries.end()) return nullptr;
+    auto n = t->second.find(name);
+    return n == t->second.end() ? nullptr : &n->second;
+}
+
+const std::map<std::string, Summary>& Solution::summaries_of(const std::string& table) const {
+    static const std::map<std::string, Summary> none;
+    auto t = summaries.find(table);
+    return t == summaries.end() ? none : t->second;
+}
+
 std::optional<Solution> load_solution(const std::string& file) {
     std::ifstream in(file);
     if (!in) return std::nullopt;
@@ -146,6 +159,17 @@ std::optional<Solution> load_solution(const std::string& file) {
                     s.calcs[table][name] = Calc{table, name, cj["expr"].get<std::string>()};
                 }
             }
+        if (auto it = j.find("summaries"); it != j.end() && it->is_object())   // s014b
+            for (auto& [table, named] : it->items()) {
+                if (!named.is_object()) continue;
+                for (auto& [name, sj] : named.items()) {
+                    if (!sj.is_object() || !check_calc_name(name).empty()) continue;
+                    const auto op = parse_summary_op(str_or_empty(sj, "op"));
+                    const std::string of = str_or_empty(sj, "of");
+                    if (!op || of.empty()) continue;   // never half a summary
+                    s.summaries[table][name] = Summary{table, name, *op, of};
+                }
+            }
         return s;
     } catch (const std::exception&) {
         return std::nullopt;
@@ -200,6 +224,12 @@ bool save_solution(const std::string& file, const Solution& s) {
         for (const auto& [table, named] : s.calcs)
             for (const auto& [name, c] : named) calcs[table][name] = {{"expr", c.expr}};
         j["calcs"] = std::move(calcs);
+    }
+    if (!s.summaries.empty()) {   // s014b: only when there are some
+        nlohmann::json sums = nlohmann::json::object();
+        for (const auto& [table, named] : s.summaries)
+            for (const auto& [name, x] : named) sums[table][name] = {{"op", summary_op_name(x.op)}, {"of", x.field}};
+        j["summaries"] = std::move(sums);
     }
     std::error_code ec;
     const fs::path p(file);

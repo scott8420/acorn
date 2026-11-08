@@ -677,7 +677,10 @@ void Shell::draw_layout(const Cairo::RefPtr<Cairo::Context>& cr, int w, int h) {
             cr->stroke();
             const db::Column* col = t ? t->column(o.field) : nullptr;
             text_in(o.field + (col ? std::string("  ·  ") + db::to_string(col->type)
-                                   : m_solution.calc(m_lay_table, o.field) ? std::string("  ·  Calculation") : std::string{}),
+                                   : m_solution.calc(m_lay_table, o.field) ? std::string("  ·  Calculation")
+                                   : m_solution.summary(m_lay_table, o.field)
+                                         ? "  ·  " + core::summary_says(*m_solution.summary(m_lay_table, o.field))
+                                         : std::string{}),
                     o, Pango::Alignment::LEFT, 0.9);
         }
     }

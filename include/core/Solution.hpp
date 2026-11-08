@@ -45,6 +45,11 @@ struct Solution {
     std::map<std::string, std::map<std::string, Calc>> calcs;
     const Calc* calc(const std::string& table, const std::string& name) const;
     const std::map<std::string, Calc>& calcs_of(const std::string& table) const;
+    // s014b: summaries, by table then name. On disk: "summaries": { "<table>":
+    // { "<name>": {"op": "total", "of": "<field>"} } } -- absent reads as none.
+    std::map<std::string, std::map<std::string, Summary>> summaries;
+    const Summary* summary(const std::string& table, const std::string& name) const;
+    const std::map<std::string, Summary>& summaries_of(const std::string& table) const;
     bool operator==(const Solution&) const = default;
 };
 

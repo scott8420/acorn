@@ -283,6 +283,10 @@ void Shell::paint_find() {  // find: the layout's boxes, empty
             } else {
                 w = find_label("missing link “" + o.from + "." + o.shows + "” -- not searched", "acorn-missing");
             }
+        } else if (!t->column(o.field) && m_solution.summary(t->name, o.field)) {   // s014b
+            auto l = find_label("summary -- not searched", "acorn-null");
+            l->add_css_class("acorn-form-static");
+            w = l;
         } else if (!t->column(o.field) && m_solution.calc(t->name, o.field)) {   // s014a
             auto l = find_label("calculation -- not searched", "acorn-null");
             l->add_css_class("acorn-form-static");

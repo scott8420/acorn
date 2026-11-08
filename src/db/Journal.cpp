@@ -1058,6 +1058,15 @@ bool Store::parse_calc_id(const Id& id, std::string& table, std::string& name) {
     return parse_layout_id("layout:" + id.substr(5), table, name);
 }
 
+Store::Id Store::summary_id(const std::string& table, const std::string& name) {
+    return "summary:" + std::to_string(table.size()) + ":" + table + "/" + name;
+}
+
+bool Store::parse_summary_id(const Id& id, std::string& table, std::string& name) {
+    if (!is_summary(id)) return false;
+    return parse_layout_id("layout:" + id.substr(8), table, name);
+}
+
 Store::Id Store::field_id(const std::string& table, const std::string& column) {
     return "field:" + std::to_string(table.size()) + ":" + table + ":" + column;
 }
@@ -1097,6 +1106,7 @@ std::string Store::describe(const Id& id) {
     std::string name;
     if (parse_layout_id(id, table, name)) return "the layout " + curly(name) + " of " + curly(table);
     if (parse_calc_id(id, table, name)) return "the calculation " + curly(name) + " of " + curly(table);
+    if (parse_summary_id(id, table, name)) return "the summary " + curly(name) + " of " + curly(table);
     return curly(name_of(id));
 }
 
@@ -1143,6 +1153,12 @@ std::optional<Record> Store::get(const Id& id) const {
         std::string t, n;
         if (!m_solution || !parse_calc_id(id, t, n)) return std::nullopt;
         if (const auto* c = m_solution->calc(t, n)) return *c;
+        return std::nullopt;
+    }
+    if (is_summary(id)) {   // s014b: from the solution
+        std::string t, n;
+        if (!m_solution || !parse_summary_id(id, t, n)) return std::nullopt;
+        if (const auto* x = m_solution->summary(t, n)) return *x;
         return std::nullopt;
     }
     return std::nullopt;   // "new:..." -- a declaration, never a record
@@ -1421,7 +1437,7 @@ void Store::put(const Id& id, const std::optional<Record>& v) {
 void Store::put_local(const Id& id, const std::optional<Record>& v) {
     if (!m_solution) {
         fail(Error::Code::Unsupported, is_box(id)    ? "there is no solution to keep the Graph's boxes in"
-                                       : is_calc(id) ? "there is no solution to keep calculations in"
+                                       : is_calc(id) || is_summary(id) ? "there is no solution to keep calculations in"
                                                      : "there is no solution to keep layouts in");
         return;
     }
@@ -1431,6 +1447,18 @@ void Store::put_local(const Id& id, const std::optional<Record>& v) {
         const std::string t = id.substr(4);
         if (v) m_solution->boxes[t] = {std::get<BoxDef>(*v).x, std::get<BoxDef>(*v).y};
         else   m_solution->boxes.erase(t);
+    } else if (is_summary(id)) {   // s014b
+        std::string t, n;
+        if (!parse_summary_id(id, t, n)) { fail(Error::Code::Internal, "not a summary: " + id); return; }
+        if (v && !std::holds_alternative<core::Summary>(*v)) { fail(Error::Code::Internal, id + " given something else"); return; }
+        if (v) {
+            const auto& x = std::get<core::Summary>(*v);
+            if (x.table != t || x.name != n) { fail(Error::Code::Internal, id + " given another summary"); return; }
+            m_solution->summaries[t][n] = x;
+        } else if (auto it = m_solution->summaries.find(t); it != m_solution->summaries.end()) {
+            it->second.erase(n);
+            if (it->second.empty()) m_solution->summaries.erase(it);
+        }
     } else if (is_calc(id)) {   // s014a
         std::string t, n;
         if (!parse_calc_id(id, t, n)) { fail(Error::Code::Internal, "not a calculation: " + id); return; }
@@ -2577,6 +2605,10 @@ std::expected<void, Error> save_calc(Journal& j, const core::Calc& c, const std:
     if (!t) return std::unexpected(Error{Error::Code::NotFound, "there's no table " + curly(c.table)});
     std::vector<std::string> fields;
     for (const auto& col : t->columns) fields.push_back(col.name);
+    for (const auto& [n, x] : st.solution()->summaries_of(c.table)) {   // s014b: read like fields
+        if (n == c.name) return std::unexpected(Error{Error::Code::Exists, curly(c.table) + " already has a summary " + curly(n)});
+        fields.push_back(n);
+    }
     auto calcs = st.solution()->calcs_of(c.table);
     const bool renaming = !was.empty() && was != c.name;
     if (!was.empty() && !calcs.contains(was))
@@ -2600,6 +2632,50 @@ std::expected<void, Error> save_calc(Journal& j, const core::Calc& c, const std:
         s.put(old, std::nullopt);
         s.put(id, c);
     });
+}
+
+std::expected<void, Error> save_summary(Journal& j, const core::Summary& x, const std::string& was) {
+    Store& st = j.store();
+    if (!st.solution()) return std::unexpected(Error{Error::Code::Unsupported, "there is no solution to keep summaries in"});
+    st.forget_schema();
+    const Table* t = st.table_info(x.table);
+    if (st.failed()) { Error e = st.error(); st.clear_failed(); return std::unexpected(e); }
+    if (!t) return std::unexpected(Error{Error::Code::NotFound, "there's no table " + curly(x.table)});
+    std::vector<std::string> fields, taken;
+    for (const auto& col : t->columns) fields.push_back(col.name);
+    for (const auto& [n, c] : st.solution()->calcs_of(x.table)) taken.push_back(n);
+    const auto& sums = st.solution()->summaries_of(x.table);
+    if (!was.empty() && !sums.contains(was))
+        return std::unexpected(Error{Error::Code::NotFound, curly(x.table) + " has no summary " + curly(was)});
+    const bool renaming = !was.empty() && was != x.name;
+    for (const auto& [n, s] : sums) if (n != (was.empty() ? x.name : was)) taken.push_back(n);
+    if (auto why = core::check_summary(x, fields, taken); !why.empty())
+        return std::unexpected(Error{Error::Code::Unsupported, why});
+    const Column* col = t->column(x.field);
+    if (col->type == FieldType::Container)
+        return std::unexpected(Error{Error::Code::Unsupported, curly(x.field) + " holds binary data -- it can't be summarised"});
+    if ((x.op == core::SummaryOp::Total || x.op == core::SummaryOp::Average) &&
+        col->type != FieldType::Integer && col->type != FieldType::Number)
+        return std::unexpected(Error{Error::Code::Unsupported, std::string(core::summary_op_label(x.op)) + " needs a number -- " +
+                                                               curly(x.field) + " is " + to_string(col->type)});
+    const auto id = Store::summary_id(x.table, x.name);
+    if (!renaming) {
+        const auto now = st.get(id);
+        if (now && std::get<core::Summary>(*now) == x) return {};
+        return j.run((now ? "Change Summary " : "New Summary ") + curly(x.name), {id}, [&](Store& s) { s.put(id, x); });
+    }
+    const auto old = Store::summary_id(x.table, was);
+    return j.run("Change Summary " + curly(was), {old, id}, [&](Store& s) {
+        s.put(old, std::nullopt);
+        s.put(id, x);
+    });
+}
+
+std::expected<void, Error> delete_summary(Journal& j, const std::string& table, const std::string& name) {
+    const auto id = Store::summary_id(table, name);
+    if (!j.store().get(id))
+        return std::unexpected(Error{Error::Code::NotFound, curly(table) + " has no summary " + curly(name)});
+    return j.run("Delete Summary " + curly(name), {id}, [&](Store& s) { s.put(id, std::nullopt); });
 }
 
 std::expected<void, Error> delete_calc(Journal& j, const std::string& table, const std::string& name) {
@@ -2867,6 +2943,16 @@ const std::vector<Verb>& all() {
          [](Journal& j) { return design_fixture(j).and_then([&] { return save_calc(j, core::Calc{kDesign, "to_rename", "n + 1"}); }); }, true},
         {"Delete Calculation", [](Journal& j) { return delete_calc(j, kDesign, "gone"); },
          [](Journal& j) { return design_fixture(j).and_then([&] { return save_calc(j, core::Calc{kDesign, "gone", "Length(title)"}); }); }, true},
+        // s014b -- summaries, in the solution too.
+        {"New Summary", [](Journal& j) { return save_summary(j, core::Summary{kDesign, "total_n", core::SummaryOp::Total, "n"}); },
+         design_fixture, true},
+        {"Change Summary", [](Journal& j) {
+             return save_summary(j, core::Summary{kDesign, "most", core::SummaryOp::Max, "title"});
+         }, [](Journal& j) { return design_fixture(j).and_then([&] {
+             return save_summary(j, core::Summary{kDesign, "most", core::SummaryOp::Max, "n"}); }); }, true},
+        {"Delete Summary", [](Journal& j) { return delete_summary(j, kDesign, "how_many"); },
+         [](Journal& j) { return design_fixture(j).and_then([&] {
+             return save_summary(j, core::Summary{kDesign, "how_many", core::SummaryOp::Count, "title"}); }); }, true},
         {"Delete Record (Set Empty)", [](Journal& j) -> std::expected<void, Error> {
              auto row = newest_parent(j);
              if (!row) return std::unexpected(row.error());

@@ -232,7 +232,14 @@ private:
     std::optional<core::CalcOutcome> browse_calc(const std::string& name) const;  // category: calcs: the painted record's calculation (as browse_value)
     Gtk::Label* calc_label(const core::CalcOutcome& o, int max_chars);  // category: calcs: a value shown, "?" with its words
     std::vector<std::string> fields_and_calcs(const std::string& table) const;
-    void refresh_calc_labels();                  // category: calcs: a field saved in place -- the Form's / List's calculations worked out again  // category: calcs: the fields, then the calculations -- what a layout may show
+    void refresh_calc_labels();
+    void read_browse_summaries();                // category: calcs: s014b -- the shown table's summaries over the found set (one SELECT)
+    Gtk::Widget* summary_strip();                // category: calcs: s014b -- "Over the 12 records: total 1234 · ..." above Cards / Grid (nullptr: none)
+    void browse_show(Gtk::Widget& view);         // category: calcs: s014b -- the view into the scroll, the strip above it
+    std::optional<core::CalcOutcome> browse_summary(const std::string& name) const;  // category: calcs: s014b -- a summary's value as shown
+    void summary_editor(Gtk::Box& body, const db::Table& t, const std::map<std::string, core::CalcValue>& sums);  // category: calcs: s014b -- the summary editor in the Tables section
+    void keep_summary(const core::Summary& s, const std::string& was);  // category: calcs: s014b -- verbs::save_summary, the note, a repaint
+    void drop_summary(const std::string& table, const std::string& name);  // category: calcs: s014b -- verbs::delete_summary  // category: calcs: s014b -- the summary editor in the Tables section                  // category: calcs: a field saved in place -- the Form's / List's calculations worked out again  // category: calcs: the fields, then the calculations -- what a layout may show
     std::vector<std::string> fields_of(const std::string& table) const;  // category: layouts: the live table's fields, in order
     std::vector<core::PortalLink> portal_links(const std::string& table) const;  // category: layouts: s011a -- one-field links INTO the table
     std::vector<core::RelatedLink> related_links(const std::string& table) const;  // category: layouts: s011d -- one-field links OUT of the table
@@ -461,7 +468,15 @@ private:
     std::string                     m_calc_typed_name, m_calc_typed_expr;
     // s014a: the calculations the Form / List shows now, so a field saved in
     // place (the boxes kept) updates them. Only this view generation's.
-    struct CalcShown { Gtk::Label* label; int row; std::string name; unsigned gen; };
+    struct CalcShown { Gtk::Label* label; int row; std::string name; unsigned gen; };   // row -2: a summary
+    // s014b: the shown table's summaries over the found set, read with the page.
+    std::map<std::string, core::CalcValue> m_browse_sums;
+    std::string                     m_browse_sums_error;   // the read refused: every summary "?" with these words
+    // s014b: the summary editor (as the calculation's).
+    std::string                     m_sum_editing;
+    bool                            m_sum_new = false;
+    std::string                     m_sum_typed_name, m_sum_typed_field;
+    core::SummaryOp                 m_sum_typed_op = core::SummaryOp::Total;
     std::vector<CalcShown>          m_calc_shown;
     Gtk::Box*                       m_calc_box = nullptr;   // the section's body, repainted alone
     bool                            m_table_painting = false;

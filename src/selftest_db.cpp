@@ -14,6 +14,7 @@
 #include "db/NewFile.hpp"
 #include "db/Types.hpp"
 
+#include <cmath>
 #include <algorithm>
 #include <cstdlib>
 #include <filesystem>
@@ -2568,6 +2569,164 @@ void test_calcs(Engine* e, const ConnectParams& ro, const std::string& P) {
           page ? why : page.error().message);
 }
 
+// ── s014b: summaries ─────────────────────────────────────────────────────────
+void test_summary_pure(const fs::path& dir) {
+    using core::SummaryOp;
+    bool ops = true;
+    for (auto op : {SummaryOp::Count, SummaryOp::Total, SummaryOp::Average, SummaryOp::Min, SummaryOp::Max})
+        ops = ops && core::parse_summary_op(core::summary_op_name(op)) == op;
+    check("summary: each kind's word reads back; an unknown one doesn't; \"Total of balance\"",
+          ops && !core::parse_summary_op("sum") && core::summary_says({"t", "x", SummaryOp::Total, "balance"}) == "Total of balance", "");
+    const std::vector<std::string> fields = {"id", "name", "balance"};
+    const auto a = core::check_summary({"t", "total_balance", SummaryOp::Total, "balance"}, fields, {"label"});
+    const auto b = core::check_summary({"t", "label", SummaryOp::Count, "name"}, fields, {"label"});
+    const auto c = core::check_summary({"t", "name", SummaryOp::Count, "name"}, fields, {});
+    const auto d = core::check_summary({"t", "x", SummaryOp::Count, "nope"}, fields, {});
+    const auto e = core::check_summary({"t", "", SummaryOp::Count, "name"}, fields, {});
+    const auto f = core::check_summary({"t", "x", SummaryOp::Count, ""}, fields, {});
+    check("summary: a good one passes; refused in words -- a calculation's name, a field's, no such field, no name, no field",
+          a.empty() && b.find("already has a calculation or summary") != std::string::npos &&
+          c.find("already has a field") != std::string::npos && d.find("no field") != std::string::npos &&
+          e == "A summary needs a name" && !f.empty(), b + " | " + e);
+    std::string ti, na;
+    check("summary: ids round-trip; a summary is the solution's",
+          Store::parse_summary_id(Store::summary_id("a/b", "s"), ti, na) && ti == "a/b" && na == "s" &&
+          !Store::parse_summary_id(Store::calc_id("a", "s"), ti, na) && Store::is_local(Store::summary_id("x", "y")), "");
+    core::Solution sol;
+    sol.points_at.engine = "sqlite";
+    sol.points_at.path = (dir / "sum.sqlite").string();
+    sol.summaries["t"]["total_balance"] = {"t", "total_balance", SummaryOp::Total, "balance"};
+    sol.summaries["t"]["newest"] = {"t", "newest", SummaryOp::Max, "joined"};
+    sol.calcs["t"]["share"] = {"t", "share", "balance / total_balance"};
+    const auto file = (dir / "sum.acorn").string();
+    auto back = core::save_solution(file, sol) ? core::load_solution(file) : std::nullopt;
+    check("summary: round-trip in the .acorn beside the calculations", back && *back == sol, "");
+    {
+        std::ofstream g(dir / "sum_half.acorn");
+        g << R"({"acorn": 1, "summaries": {"t": {"good": {"op": "average", "of": "b"}, "bad": {"op": "sum", "of": "b"},)"
+             R"( "nofield": {"op": "count"}}}})";
+    }
+    auto half = core::load_solution((dir / "sum_half.acorn").string());
+    check("summary: a broken one is skipped (an unknown kind, no field), the rest reads",
+          half && half->summary("t", "good") && half->summary("t", "good")->op == SummaryOp::Average &&
+          !half->summary("t", "bad") && !half->summary("t", "nofield"), "");
+    // A calculation reading a summary: through `extra`, like a field.
+    Table t;
+    t.name = "t";
+    t.columns = {{"id", "INTEGER", FieldType::Integer, false, std::nullopt, 1, true},
+                 {"balance", "REAL", FieldType::Number, true, std::nullopt, 0, false}};
+    const std::map<std::string, core::CalcValue> extra = {{"total_balance", core::CalcValue{200.0}}};
+    auto out = row_calcs(t, {Value(1), Value(50.0)}, sol.calcs_of("t"), "2026-11-07", &extra);
+    auto none = row_calcs(t, {Value(1), Value(50.0)}, sol.calcs_of("t"), "2026-11-07");
+    check("summary: a calculation reads one like a field (50 / 200 -> 0.25); without it, \"?\"",
+          core::calc_text(out["share"]) == "0.25" && !none["share"].ok(), core::calc_text(out["share"]));
+}
+
+void test_summaries(Engine* e, const ConnectParams& ro, const std::string& P) {
+    using core::SummaryOp;
+    auto c = e->open(ro);
+    if (!c) { check(P + "summaries: open read-only", false, c.error().message); return; }
+    Gate g(std::move(*c));
+    Journal j(g, e->dialect(), e->caps());
+    core::Solution sol;
+    j.store().set_solution(&sol, [] { return true; });
+    const core::Summary tb{"customers", "total_balance", SummaryOp::Total, "balance"};
+    auto m = verbs::save_summary(j, tb);
+    check(P + "summaries: New Summary on a READ-ONLY connection -- a step, kept, nothing written to the database",
+          m && sol.summary("customers", "total_balance") && j.undo_label() == "New Summary “total_balance”" &&
+          g.strays() == 0, m ? j.undo_label() : m.error().message);
+    auto avg = tb;
+    avg.op = SummaryOp::Average;
+    auto m2 = verbs::save_summary(j, avg);
+    auto rn = avg;
+    rn.name = "avg_balance";
+    auto m3 = verbs::save_summary(j, rn, "total_balance");
+    check(P + "summaries: a change is \"Change Summary\"; a new name in the same step",
+          m2 && m3 && !sol.summary("customers", "total_balance") && sol.summary("customers", "avg_balance") &&
+          j.undo_label() == "Change Summary “total_balance”", m3 ? j.undo_label() : m3.error().message);
+    auto u = j.undo();
+    auto del = verbs::delete_summary(j, "customers", "total_balance");
+    auto ud = del ? j.undo() : std::expected<std::string, Error>(std::unexpected(del.error()));
+    check(P + "summaries: Ctrl+Z puts the old name back; Delete Summary, Ctrl+Z brings it back exactly",
+          u && del && ud && sol.summary("customers", "total_balance") && *sol.summary("customers", "total_balance") == avg,
+          ud ? "" : ud.error().message);
+    (void)verbs::save_calc(j, {"customers", "label", "Upper(name)"});
+    const auto lbl = j.undo_label();
+    auto r1 = verbs::save_summary(j, {"customers", "x", SummaryOp::Total, "name"});
+    auto r2 = verbs::save_summary(j, {"customers", "x", SummaryOp::Count, "photo"});
+    auto r3 = verbs::save_summary(j, {"customers", "label", SummaryOp::Count, "name"});
+    auto r4 = verbs::save_summary(j, {"customers", "email", SummaryOp::Count, "name"});
+    auto r5 = verbs::save_summary(j, {"nosuch", "x", SummaryOp::Count, "a"});
+    auto r6 = verbs::save_summary(j, {"customers", "x", SummaryOp::Count, "nosuch"});
+    auto r7 = verbs::delete_summary(j, "customers", "nosuch");
+    auto r8 = verbs::save_calc(j, {"customers", "total_balance", "1"});
+    check(P + "summaries: refused in words, no step -- Total of text, a binary field, a calculation's name, a field's, "
+              "no table, no field, deleting one that isn't there; a calculation can't take a summary's name",
+          !r1 && r1.error().message.find("needs a number") != std::string::npos && !r2 && !r3 && !r4 && !r5 && !r6 && !r7 &&
+          !r8 && j.undo_label() == lbl,
+          (r1 ? std::string("kept!") : r1.error().message) + " | " + (r8 ? std::string("kept!") : r8.error().message));
+
+    // Worked out by the database -- each against the same sum done in C++ over every record.
+    auto sch = g.introspect();
+    const Table* t = sch ? sch->table("customers") : nullptr;
+    if (!t) { check(P + "summaries: the fixture's table", false, ""); return; }
+    std::map<std::string, core::Summary> sums = {
+        {"n", {"customers", "n", SummaryOp::Count, "email"}},
+        {"tot", {"customers", "tot", SummaryOp::Total, "balance"}},
+        {"avg", {"customers", "avg", SummaryOp::Average, "balance"}},
+        {"low", {"customers", "low", SummaryOp::Min, "name"}},
+        {"high", {"customers", "high", SummaryOp::Max, "joined"}},
+        {"gone", {"customers", "gone", SummaryOp::Count, "nosuch"}},
+    };
+    auto all = read_page(g, *t, PageRequest{0, 10000});
+    auto got = read_summaries(g, *t, sums);
+    std::size_t ie = 0, ib = 0, in = 0, ij = 0;
+    for (std::size_t i = 0; i < t->columns.size(); ++i) {
+        if (t->columns[i].name == "email") ie = i;
+        if (t->columns[i].name == "balance") ib = i;
+        if (t->columns[i].name == "name") in = i;
+        if (t->columns[i].name == "joined") ij = i;
+    }
+    double n = 0, tot = 0, nb = 0;
+    std::string low, high;
+    bool first = true;
+    for (const auto& row : all ? all->rows : std::vector<Row>{}) {
+        if (!row[ie].is_null()) ++n;
+        if (auto v = num(row[ib])) { tot += *v; ++nb; }
+        const std::string nm = row[in].as_text() ? *row[in].as_text() : "";
+        const std::string jd = row[ij].as_text() ? row[ij].as_text()->substr(0, 10) : "";
+        if (first || nm < low) low = nm;
+        if (!jd.empty() && jd > high) high = jd;
+        first = false;
+    }
+    const auto near = [](const core::CalcValue& v, double want) {
+        const auto* d = std::get_if<double>(&v);
+        return d && std::fabs(*d - want) < 1e-6;
+    };
+    std::string why;
+    if (got) why = core::calc_text((*got)["n"]) + " " + core::calc_text((*got)["tot"]) + " " + core::calc_text((*got)["avg"]) +
+                   " " + core::calc_text((*got)["low"]) + " " + core::calc_text((*got)["high"]);
+    check(P + "summaries: Count / Total / Average / Minimum / Maximum over every record -- as C++ adds them up; "
+              "a field gone is left out",
+          got && near((*got)["n"], n) && near((*got)["tot"], tot) && nb > 0 && near((*got)["avg"], tot / nb) &&
+          core::calc_text((*got)["low"]) == low && core::calc_text((*got)["high"]).substr(0, 10) == high &&
+          !got->contains("gone"), got ? why + " want " + std::to_string(n) + " " + std::to_string(tot) + " " + low + " " + high
+                                      : got.error().message);
+    // Over a found set: the same WHERE as Find.
+    const std::vector<Criterion> crit = {{"name", low}};
+    auto found = read_found(g, *t, crit, PageRequest{0, 10000});
+    auto fs = read_summaries(g, *t, sums, crit);
+    double fn = 0;
+    for (const auto& row : found ? found->rows : std::vector<Row>{}) if (!row[ie].is_null()) ++fn;
+    const std::vector<Criterion> nothing = {{"name", "=no such name at all"}};
+    auto empty = read_summaries(g, *t, sums, nothing);
+    check(P + "summaries: over a found set (the Find's WHERE); over none -- Count 0, Total / Minimum empty",
+          found && fs && near((*fs)["n"], fn) && empty && near((*empty)["n"], 0) &&
+          std::holds_alternative<std::monostate>((*empty)["tot"]) && std::holds_alternative<std::monostate>((*empty)["low"]),
+          fs ? core::calc_text((*fs)["n"]) + " vs " + std::to_string(fn) : fs.error().message);
+    check(P + "summaries: the database untouched throughout", g.strays() == 0, std::to_string(g.strays()));
+}
+
 // ── s009b: the Address Book starter ──────────────────────────────────────────
 void test_starter(Journal& j, Gate& g, const std::string& P) {
     auto count = [&](const std::string& t) {
@@ -3044,6 +3203,7 @@ void test_server(Engine* e, const char* env_name, const char* admin_db) {
     test_boxes(e, T.ro, std::string(e->id()) + ": ");   // s009
     test_layouts(e, T.ro, std::string(e->id()) + ": "); // s010
     test_calcs(e, T.ro, std::string(e->id()) + ": ");   // s014a
+    test_summaries(e, T.ro, std::string(e->id()) + ": ");   // s014b
 
     auto a2 = e->open(admin);
     std::string why = a2 ? "" : a2.error().message;
@@ -3097,6 +3257,8 @@ void db_tests(CheckFn fn, int& skip_count) {
         test_layouts(e, T.ro, "sqlite: ");    // s010: layouts kept on a read-only connection
         test_calc_pure(tmp.p);                // s014a
         test_calcs(e, T.ro, "sqlite: ");      // s014a: calculations kept on a read-only connection
+        test_summary_pure(tmp.p);             // s014b
+        test_summaries(e, T.ro, "sqlite: ");  // s014b: summaries kept read-only, worked out by the database
         {   // s005b: the door, on its own fresh fixture file
             Target J = T;
             J.rw.path = (tmp.p / "journal.sqlite").string();

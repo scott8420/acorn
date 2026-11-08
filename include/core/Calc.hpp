@@ -42,6 +42,25 @@ struct Calc {
     bool operator==(const Calc&) const = default;
 };
 
+// s014b: a SUMMARY -- one value over many records (the found set, or every
+// record): Count / Total / Average / Minimum / Maximum of one of the table's
+// own fields. Kept in the solution beside the calculations; worked out by
+// the DATABASE (one aggregate SELECT), shown the same on every record, and a
+// calculation may read it like a field ("share = balance / total_balance").
+enum class SummaryOp { Count, Total, Average, Min, Max };
+const char* summary_op_name(SummaryOp op);    // "count" "total" "average" "min" "max" -- the file's word
+const char* summary_op_label(SummaryOp op);   // "Count" "Total" "Average" "Minimum" "Maximum"
+std::optional<SummaryOp> parse_summary_op(const std::string& s);
+struct Summary {
+    std::string table;
+    std::string name;
+    SummaryOp   op = SummaryOp::Count;
+    std::string field;   // a field of the table (not a calculation: the database works it out)
+    bool operator==(const Summary&) const = default;
+};
+// "Total of balance"
+std::string summary_says(const Summary& s);
+
 // A worked-out value: empty, a number, or text.
 using CalcValue = std::variant<std::monostate, double, std::string>;
 // The value, or why it couldn't be worked out (in words).
@@ -72,6 +91,13 @@ std::string check_calc_name(const std::string& name);
 // "" = fine.
 std::string check_calc(const Calc& c, const std::vector<std::string>& fields,
                        const std::map<std::string, Calc>& calcs);
+
+// s014b: a summary's check: its name (as a calculation's -- it is read by
+// name), not a field's / calculation's / another summary's name, and `field`
+// one of the table's `fields`. Whether the field can be totalled is the
+// database's to say (db::verbs::save_summary). "" = fine.
+std::string check_summary(const Summary& s, const std::vector<std::string>& fields,
+                          const std::vector<std::string>& taken);
 
 // One record's value of a field, by name -- nullopt: no such field.
 using CalcLookup = std::function<std::optional<CalcValue>(const std::string&)>;

@@ -372,6 +372,17 @@ Gtk::Fixed* Shell::layout_part(const core::Layout& L, core::Part part, bool edit
             l->set_xalign(o.align == core::Align::Left ? 0.0f : o.align == core::Align::Center ? 0.5f : 1.0f);
             l->set_tooltip_text(o.text);
             w = l;
+        } else if (!t->column(o.field) && m_solution.summary(t->name, o.field)) {   // s014b: the same on every record
+            const auto oc = browse_summary(o.field).value_or(core::CalcOutcome{});
+            auto l = calc_label(oc, 200);
+            l->add_css_class("acorn-form-static");
+            l->add_css_class("acorn-summary-value");
+            l->set_selectable(true);
+            l->set_name("form.summary." + o.field);
+            if (oc.ok()) l->set_tooltip_text(core::summary_says(*m_solution.summary(t->name, o.field)) +
+                                             (found_here() ? " -- over the found records" : " -- over every record"));
+            m_calc_shown.push_back({l, -2, o.field, m_view_gen});
+            w = l;
         } else if (!t->column(o.field) && m_solution.calc(t->name, o.field)) {   // s014a: worked out, never typed in
             const auto oc = browse_calc(o.field).value_or(core::CalcOutcome{});
             auto l = calc_label(oc, 200);

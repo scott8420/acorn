@@ -217,14 +217,65 @@ core::CalcValue calc_value(const Value& v, FieldType t) {
 
 std::map<std::string, core::CalcOutcome> row_calcs(const Table& t, const Row& row,
                                                    const std::map<std::string, core::Calc>& calcs,
-                                                   const std::string& today) {
+                                                   const std::string& today,
+                                                   const std::map<std::string, core::CalcValue>* extra) {
     if (calcs.empty()) return {};
     core::CalcLookup look = [&](const std::string& name) -> std::optional<core::CalcValue> {
         for (std::size_t i = 0; i < t.columns.size() && i < row.size(); ++i)
             if (t.columns[i].name == name) return calc_value(row[i], t.columns[i].type);
+        if (extra)
+            if (auto it = extra->find(name); it != extra->end()) return it->second;
         return std::nullopt;
     };
     return core::evaluate_all(calcs, look, today);
+}
+
+std::string summary_sql(const Connection& c, const Table& t, const std::vector<core::Summary>& sums,
+                        const std::string& where) {
+    std::string s = "SELECT ";
+    for (std::size_t i = 0; i < sums.size(); ++i) {
+        const auto f = c.quote_ident(sums[i].field);
+        const char* fn = "COUNT";
+        switch (sums[i].op) {
+            case core::SummaryOp::Count:   fn = "COUNT"; break;
+            case core::SummaryOp::Total:   fn = "SUM"; break;
+            case core::SummaryOp::Average: fn = "AVG"; break;
+            case core::SummaryOp::Min:     fn = "MIN"; break;
+            case core::SummaryOp::Max:     fn = "MAX"; break;
+        }
+        s += (i ? ", " : "") + std::string(fn) + "(" + f + ")";
+    }
+    return s + " FROM " + c.quote_ident(t.name) + where;
+}
+
+std::expected<std::map<std::string, core::CalcValue>, Error>
+read_summaries(Connection& c, const Table& t, const std::map<std::string, core::Summary>& sums,
+               const std::vector<Criterion>& crit, const Schema* sch) {
+    std::map<std::string, core::CalcValue> out;
+    std::vector<core::Summary> asked;
+    for (const auto& [n, x] : sums) {
+        const Column* col = t.column(x.field);
+        if (col && col->type != FieldType::Container) asked.push_back(x);
+    }
+    if (asked.empty()) return out;
+    FindQuery q;
+    if (!crit.empty()) {
+        auto fq = find_query(c, t, crit, sch);
+        if (!fq) return std::unexpected(Error{Error::Code::Unsupported, fq.error()});
+        q = std::move(*fq);
+    }
+    auto r = c.query(summary_sql(c, t, asked, q.where), q.values);
+    if (!r) return std::unexpected(r.error());
+    if (r->rows.empty()) return out;
+    const auto& row = r->rows.front();
+    for (std::size_t i = 0; i < asked.size() && i < row.size(); ++i) {
+        const auto& x = asked[i];
+        const bool counted = x.op == core::SummaryOp::Count || x.op == core::SummaryOp::Total ||
+                             x.op == core::SummaryOp::Average;
+        // A server's SUM / AVG of an exact number comes as text ("12.50"): a number.
+        out[x.name] = calc_value(row[i], counted ? FieldType::Number : t.column(x.field)->type);
+    }
+    return out;
 }
 
 std::string cell_text(const Value& v, FieldType t) {

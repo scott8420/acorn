@@ -270,3 +270,8 @@ popover.acorn-graph-pop label.error { color: #ff9a8a; }
 .acorn-calc-error  { color: #ff9a8a; }
 label.acorn-grid-heading { padding: 4px 10px; font-weight: 700; color: @acorn_amber_dim; }
 .acorn-calc-editor { padding-top: 4px; }
+/* s014b: summaries -- one value over the records: a calm strip above Cards /
+   Grid, the value in amber where a layout shows it. */
+.acorn-summary-strip { padding: 8px 14px; border-radius: 10px; background: alpha(@acorn_amber, 0.08);
+                       border: 1px solid @acorn_panel_edge; }
+.acorn-summary-value { color: @acorn_amber; font-feature-settings: "tnum"; }

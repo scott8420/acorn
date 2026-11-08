@@ -118,9 +118,25 @@ std::expected<Value, std::string> parse_field(const std::string& typed, const Co
 core::CalcValue calc_value(const Value& v, FieldType t);
 // Every calculation of `t` for one of its records (`row` in the table's column
 // order), by name.
+// s014b: `extra` -- the table's summaries' values, read like fields.
 std::map<std::string, core::CalcOutcome> row_calcs(const Table& t, const Row& row,
                                                    const std::map<std::string, core::Calc>& calcs,
-                                                   const std::string& today);
+                                                   const std::string& today,
+                                                   const std::map<std::string, core::CalcValue>* extra = nullptr);
+
+// s014b -- SUMMARIES, worked out by the database: ONE SELECT of every
+// summary of `t` (COUNT(f) / SUM / AVG / MIN / MAX) over the records the
+// criteria find (none: every record) -- the same WHERE as the found set,
+// values bound. A summary whose field the table no longer has is left out
+// (its value: "?" with the words, by the caller). Count counts the records
+// whose field holds something; an empty set's Total / Average / Min / Max is
+// empty. The values as the language sees them: Count / Total / Average a
+// number; Min / Max as the field is (a date stays ISO text).
+std::string summary_sql(const Connection& c, const Table& t, const std::vector<core::Summary>& sums,
+                        const std::string& where);
+std::expected<std::map<std::string, core::CalcValue>, Error>
+read_summaries(Connection& c, const Table& t, const std::map<std::string, core::Summary>& sums,
+               const std::vector<Criterion>& crit = {}, const Schema* s = nullptr);
 
 // "51–100 of 312" (en dash); "No records" when empty.
 std::string page_range(const Page& p);

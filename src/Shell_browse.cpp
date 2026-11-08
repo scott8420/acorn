@@ -283,6 +283,7 @@ void Shell::load_browse_page(bool keep_panel) {  // browse: read the page, repai
         return;
     }
     m_browse_data = std::move(*p);
+    read_browse_summaries();   // s014b: over the same found set
     const auto why = db::Store::why_not_writable(*t);
     std::string where = "“" + t->name + "” -- " + std::to_string(m_browse_data.total) + " record" +
                         (m_browse_data.total == 1 ? "" : "s");
@@ -437,7 +438,7 @@ void Shell::paint_cards() {  // browse: one calm card per record
     if (m_browse_sel_index >= 0)
         if (auto* ch = flow->get_child_at_index(m_browse_sel_index)) flow->select_child(*ch);
     m_browse_painting = false;
-    m_browse_scroll.set_child(*flow);
+    browse_show(*flow);   // s014b: the summaries above
 }
 
 void Shell::paint_grid() {  // browse: the dense grid, sortable headers
@@ -541,7 +542,7 @@ void Shell::paint_grid() {  // browse: the dense grid, sortable headers
         if (auto* r = list->get_row_at_index(m_browse_sel_index)) list->select_row(*r);
     m_browse_painting = false;
     outer->append(*list);
-    m_browse_scroll.set_child(*outer);
+    browse_show(*outer);   // s014b: the summaries above
 }
 
 void Shell::browse_select(int index) {  // browse: the picked record

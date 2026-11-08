@@ -550,6 +550,46 @@ std::variant<CalcExpr, std::string> parse_calc(const std::string& src) {
     return CalcExpr{std::get<NodeP>(r), std::move(p.names)};
 }
 
+const char* summary_op_name(SummaryOp op) {
+    switch (op) {
+        case SummaryOp::Count:   return "count";
+        case SummaryOp::Total:   return "total";
+        case SummaryOp::Average: return "average";
+        case SummaryOp::Min:     return "min";
+        case SummaryOp::Max:     return "max";
+    }
+    return "count";
+}
+const char* summary_op_label(SummaryOp op) {
+    switch (op) {
+        case SummaryOp::Count:   return "Count";
+        case SummaryOp::Total:   return "Total";
+        case SummaryOp::Average: return "Average";
+        case SummaryOp::Min:     return "Minimum";
+        case SummaryOp::Max:     return "Maximum";
+    }
+    return "Count";
+}
+std::optional<SummaryOp> parse_summary_op(const std::string& s) {
+    for (auto op : {SummaryOp::Count, SummaryOp::Total, SummaryOp::Average, SummaryOp::Min, SummaryOp::Max})
+        if (s == summary_op_name(op)) return op;
+    return std::nullopt;
+}
+std::string summary_says(const Summary& s) { return std::string(summary_op_label(s.op)) + " of " + s.field; }
+
+std::string check_summary(const Summary& s, const std::vector<std::string>& fields, const std::vector<std::string>& taken) {
+    if (auto why = check_calc_name(s.name); !why.empty())
+        return why.find("A calculation") == 0 ? "A summary" + why.substr(13) : why;
+    if (std::find(fields.begin(), fields.end(), s.name) != fields.end())
+        return curly(s.table) + " already has a field " + curly(s.name);
+    if (std::find(taken.begin(), taken.end(), s.name) != taken.end())
+        return curly(s.table) + " already has a calculation or summary " + curly(s.name);
+    if (s.field.empty()) return "Pick the field to summarise";
+    if (std::find(fields.begin(), fields.end(), s.field) == fields.end())
+        return "there's no field " + curly(s.field) + " in " + curly(s.table);
+    return "";
+}
+
 std::string check_calc_name(const std::string& name) {
     if (name.empty()) return "A calculation needs a name";
     if (name.size() > 64) return "A name can be at most 64 bytes";

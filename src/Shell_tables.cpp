@@ -257,7 +257,7 @@ void Shell::show_table(const std::string& name) {  // tables: paint one table's 
     // s014a: calculations -- the solution's, worked out by Acorn (views too).
     {
         auto placeholder = Gtk::make_managed<Gtk::Box>();
-        m_calc_box = section("Calculations", *placeholder);
+        m_calc_box = section("Calculations and summaries", *placeholder);
         m_table_detail.append(*m_calc_box);
         calc_section(*t);
     }
