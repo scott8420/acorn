@@ -55,6 +55,7 @@ Shell::Shell()
       m_browse_find("shell.browse.find_btn"),
       m_browse_show_all("shell.browse.show_all"),
       m_browse_scripts("shell.browse.scripts"),
+      m_browse_export("shell.browse.export"),
       m_record_scroll("shell.browse.record"),
       m_graph_page("shell.graph.page", Gtk::Orientation::VERTICAL, 12),
       m_graph_where("shell.graph.where"),

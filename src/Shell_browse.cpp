@@ -157,6 +157,13 @@ void Shell::build_browse_page() {  // browse: the Browse area
     m_browse_scripts_pop.add_css_class("acorn-graph-pop");   // the skin's popover ground
     m_browse_scripts.set_create_popup_func([this] { fill_scripts_menu(); });   // filled before each opening
     bar->append(m_browse_scripts);
+    // s018a: Export -- the records shown (all or the found set) to a file.
+    m_browse_export.set_label("Export");
+    m_browse_export.set_tooltip_text("Write these records to a CSV or tab-separated file -- the database is only read");
+    m_browse_export.set_popover(m_browse_export_pop);
+    m_browse_export_pop.add_css_class("acorn-graph-pop");
+    m_browse_export.set_create_popup_func([this] { fill_export_menu(); });
+    bar->append(m_browse_export);
     auto spacer = Gtk::make_managed<Gtk::Box>();
     spacer->set_hexpand(true);
     bar->append(*spacer);
@@ -361,6 +368,7 @@ void Shell::paint_browse() {  // browse: cards or grid
     m_browse_list_btn.set_sensitive(browse_info() != nullptr);
     m_browse_preview_btn.set_sensitive(browse_info() != nullptr);
     m_browse_scripts.set_sensitive(browse_info() != nullptr && m_journal != nullptr && !m_script_run);   // s017a
+    m_browse_export.set_sensitive(browse_info() != nullptr && m_conn != nullptr && !m_finding);   // s018a
     m_browse_show_all.set_visible(found_here());
     if (m_finding && browse_info()) {   // s013a: the Find screen
         m_browse_prev.set_sensitive(false);

@@ -11,6 +11,8 @@
 #include "db/Browse.hpp"
 #include "db/Print.hpp"
 #include "db/Script.hpp"
+#include "db/Export.hpp"
+#include <sstream>
 #include "core/Print.hpp"
 #include "db/Convert.hpp"
 #include "db/Loader.hpp"
@@ -3256,6 +3258,102 @@ void test_button_pure(const fs::path& dir) {
           back && *back == sol && text.find("\"button\"") != std::string::npos && scripts == 1, text.substr(0, 0));
 }
 
+// ── s018a: export ──────────────────────────────────────────────────────────
+void test_export_pure() {
+    check("export: a value quoted only when it must be -- the separator, a quote (doubled), a line break, a space at an end",
+          export_cell("plain", ',') == "plain" && export_cell("a,b", ',') == "\"a,b\"" && export_cell("a,b", '\t') == "a,b" &&
+          export_cell("say \"hi\"", ',') == "\"say \"\"hi\"\"\"" && export_cell("two\nlines", ',') == "\"two\nlines\"" &&
+          export_cell(" pad", ',') == "\" pad\"" && export_cell("a\tb", '\t') == "\"a\tb\"" && export_cell("", ',').empty() &&
+          export_line({"a", "", "c,d"}, ',') == "a,,\"c,d\"", export_cell("say \"hi\"", ','));
+    Table t;
+    t.name = "contacts";
+    auto col = [](const char* n, FieldType ty) { Column c; c.name = n; c.type = ty; return c; };
+    t.columns = {col("id", FieldType::Integer), col("name", FieldType::Text), col("photo", FieldType::Container), col("city", FieldType::Text)};
+    std::map<std::string, core::Calc> calcs{{"shout", core::Calc{"contacts", "shout", "Upper(name)"}}};
+    core::Layout l;
+    l.table = "contacts"; l.name = "Card"; l.width = 600; l.height = 200;
+    using K = core::ObjectKind;
+    l.objects = {{K::Text, "", "City", 16, 48, 100, 24}, {K::Field, "city", "", 120, 48, 100, 24},
+                 {K::Field, "name", "", 300, 16, 100, 24}, {K::Field, "id", "", 120, 16, 100, 24},
+                 {K::Field, "photo", "", 120, 80, 100, 24}, {K::Field, "gone", "", 120, 112, 100, 24},
+                 {K::Field, "shout", "", 300, 48, 100, 24}, {K::Field, "name", "", 120, 140, 100, 24},
+                 {K::Button, "", "Go", 16, 160, 100, 24}};
+    const auto lf = layout_export_fields(l, t, calcs);
+    const auto tf = table_export_fields(t, calcs);
+    check("export: a layout's fields in reading order (top, then left), each once -- no binary, no missing, calculations kept",
+          lf == std::vector<std::string>{"id", "name", "city", "shout"}, "");
+    check("export: every field of the table in order without binary ones, then its calculations",
+          tf == std::vector<std::string>{"id", "name", "city", "shout"} && export_ending(ExportFormat::Tab) == std::string(".tsv") &&
+          export_says({12, 5}, "c.csv") == "Exported 12 records (5 fields) to c.csv" &&
+          export_says({1, 1}, "c.csv") == "Exported 1 record (1 field) to c.csv", export_says({12, 5}, "c.csv"));
+}
+
+// On the sample Address Book: every record, a found set in its sort, a
+// calculation, a file put in place whole -- and nothing written to the database.
+void test_export_book(Gate& g, const std::string& P) {
+    auto sch = g.introspect();
+    const Table* ct = sch ? sch->table("contacts") : nullptr;
+    if (!ct) { check(P + "export: the sample's contacts", false, ""); return; }
+    const int strays0 = g.strays();
+    auto lines = [](const std::string& text) {
+        std::vector<std::string> out;
+        std::size_t at = 0;
+        for (std::size_t k; (k = text.find("\r\n", at)) != std::string::npos; at = k + 2) out.push_back(text.substr(at, k - at));
+        return out;
+    };
+    ExportRequest all;
+    all.fields = {"first_name", "last_name", "birthday"};
+    all.chunk = 5;   // three reads for twelve
+    std::ostringstream a;
+    auto ra = export_records(g, *sch, *ct, all, a);
+    const auto la = lines(a.str());
+    check(P + "export: every record, a header first, read a few at a time -- 12 records, CRLF lines",
+          ra && ra->records == 12 && ra->fields == 3 && la.size() == 13 && la[0] == "first_name,last_name,birthday" &&
+          a.str().size() >= 2 && a.str().substr(a.str().size() - 2) == "\r\n", ra ? a.str().substr(0, 80) : ra.error().message);
+    ExportRequest f;
+    f.fields = {"last_name", "shout"};
+    f.calcs["shout"] = core::Calc{"contacts", "shout", "Upper(last_name)"};
+    f.found = {{"last_name", "e"}};
+    f.sort = "last_name";
+    f.descending = true;
+    f.format = ExportFormat::Tab;
+    f.today = core::today_iso();
+    std::ostringstream b;
+    auto rb = export_records(g, *sch, *ct, f, b);
+    const auto lb = lines(b.str());
+    bool sorted = lb.size() >= 3, upper = lb.size() >= 2;
+    for (std::size_t i = 2; i < lb.size(); ++i) sorted = sorted && lb[i - 1].substr(0, lb[i - 1].find('\t')) >= lb[i].substr(0, lb[i].find('\t'));
+    for (std::size_t i = 1; i < lb.size(); ++i) {
+        const auto tab = lb[i].find('\t');
+        std::string up = lb[i].substr(0, tab);
+        for (auto& ch : up) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+        upper = upper && tab != std::string::npos && lb[i].substr(tab + 1) == up;
+    }
+    check(P + "export: the found set in its sort (descending), tab-separated, a calculation worked out per record",
+          rb && rb->records > 0 && rb->records < 12 && static_cast<std::size_t>(rb->records) + 1 == lb.size() &&
+          lb[0] == "last_name\tshout" && sorted && upper, rb ? b.str().substr(0, 120) : rb.error().message);
+    const auto dir = fs::temp_directory_path() / ("acorn-export-" + std::to_string(::getpid()));
+    fs::create_directories(dir);
+    const auto path = (dir / "contacts.csv").string();
+    { std::ofstream old(path); old << "old"; }
+    ExportRequest bad = all;
+    bad.fields = {"last_name", "nope"};
+    auto rbad = export_file(g, *sch, *ct, bad, path);
+    std::string kept;
+    { std::ifstream in(path); kept.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>()); }
+    check(P + "export: a field the table hasn't is refused in words; the file there is left as it was, no .part",
+          !rbad && rbad.error().message.find("no field “nope”") != std::string::npos && kept == "old" && !fs::exists(path + ".part"),
+          rbad ? "" : rbad.error().message);
+    auto rf = export_file(g, *sch, *ct, all, path);
+    std::string text;
+    { std::ifstream in(path, std::ios::binary); text.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>()); }
+    check(P + "export: the file put in place whole (the same text as the stream), no .part left",
+          rf && text == a.str() && !fs::exists(path + ".part"), rf ? "" : rf.error().message);
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    check(P + "export: reads only -- nothing went near the door", g.strays() == strays0, std::to_string(g.strays()));
+}
+
 // On the sample Address Book, writable: whole runs through ScriptRun.
 void test_scripts(Journal& j, Gate& g, core::Solution& sol, const std::string& P) {
     using core::Script; using K = core::StepKind;
@@ -3756,6 +3854,7 @@ void test_sample(Journal& j, Gate& g, const std::string& P) {
     check(P + "sample: arrives with nothing to undo (the caller clears the journal)", !j.can_undo() && !j.can_redo(), "");
     test_report_book(g, sol, P);   // s015b
     test_scripts(j, g, sol, P);    // s017a
+    test_export_book(g, P);        // s018a
     {   // s016
         const auto* lab = sol.layout("addresses", kSampleLabelsName);
         check(P + "labels: the sample's Mailing Labels kept beside the report", lab && *lab == sample_labels_layout(), "");
@@ -4063,6 +4162,7 @@ void db_tests(CheckFn fn, int& skip_count) {
         test_labels_pure(tmp.p);              // s016: labels
         test_script_pure(tmp.p);              // s017a: scripts
         test_button_pure(tmp.p);              // s017b: buttons
+        test_export_pure();                   // s018a: export
         {   // s005b: the door, on its own fresh fixture file
             Target J = T;
             J.rw.path = (tmp.p / "journal.sqlite").string();
