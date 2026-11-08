@@ -69,6 +69,13 @@ std::expected<Value, std::string> import_value(const std::string& cell, const Co
 struct ImportPlan {
     std::vector<std::string> fields;
     bool                     header = true;
+    // s024a -- FileMaker's "update matching records": `match` (one of the
+    // picked fields; "" = add every row) finds the records whose field holds
+    // exactly the row's value; each is UPDATED with the row's other fields.
+    // A row matching none is added -- unless `add_rest` is false (then it's
+    // counted, not added). An empty match value matches nothing.
+    std::string              match;
+    bool                     add_rest = true;
 };
 // "" when the plan can go; else why not, in words ("“email” is picked for two
 // columns", "Pick a field for at least one column").
@@ -83,6 +90,9 @@ struct ImportResult {
     std::int64_t               rows = 0;      // the file's records looked at (not counting the names, nor empty lines)
     std::vector<ImportRefusal> refused;
     std::size_t                stopped_at = 0;   // s020c: Stop -- the line it stopped before (0: it ran to the end)
+    bool                       matching = false; // s024a: the plan matched by a field
+    std::int64_t               updated = 0;      // s024a: records changed by a matching row
+    std::int64_t               unmatched = 0;    // s024a: rows matching none, left out (add_rest off)
 };
 
 // The rows that would go in, and the ones a field refuses (the database isn't
@@ -101,6 +111,8 @@ std::expected<ImportResult, Error> import_records(Journal& j, const Table& t, co
 
 // "Import 40 records into “contacts”"
 std::string import_label(std::int64_t n, const std::string& table);
+// s024a: "Import into “contacts” -- 3 updated, 2 added"
+std::string import_label(const ImportResult& r, const std::string& table);
 // "Imported 38 records into “contacts” -- 2 refused" (no refusals: no tail);
 // stopped: "... -- stopped before line 4201, the rest weren't read"
 std::string import_says(const ImportResult& r, const std::string& table);

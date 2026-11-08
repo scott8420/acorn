@@ -521,6 +521,12 @@ std::expected<Store::Id, Error> new_record(Journal& j, const std::string& table,
 // A key field is refused. Label: Edit “column”.
 std::expected<void, Error> set_field(Journal& j, const Store::Id& row, const std::string& column,
                                      const Value& v);
+// s024a: several fields of one record in ONE write (Import's update): each
+// column set to its value; a key field only if it already holds that value
+// (it's how the record is found). Nothing different: no step. Label: Edit
+// Record in “table”.
+std::expected<void, Error> set_fields(Journal& j, const Store::Id& row, const std::vector<std::string>& columns,
+                                      const std::vector<Value>& values);
 // Label: Delete Record from “table”. s008: records of other tables pointing
 // at it -- a Restrict link refuses in words ("2 “orders” point at this
 // record -- delete them first, or change the link"); Cascade deletes them and

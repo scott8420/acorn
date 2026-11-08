@@ -106,7 +106,7 @@ void Shell::import_records_from_file() {  // import: the open dialog, then the f
                                      r && r->stopped_at ? ", stopped before line " + std::to_string(r->stopped_at) : "");
                         return [this, r, done, table]() {
                             if (r)
-                                browse_note(db::import_says(*r, table) + (r->records > 0 ? ". Ctrl+Z takes it back." : "."),
+                                browse_note(db::import_says(*r, table) + (r->records > 0 || r->updated > 0 ? ". Ctrl+Z takes it back." : "."),
                                             r->refused.empty() && !r->stopped_at ? "ok" : "error");
                             if (r) load_browse_page();
                             done(r);

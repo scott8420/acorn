@@ -205,6 +205,8 @@ std::string check_import(const Table& t, const ImportPlan& p) {
         seen.push_back(f);
     }
     if (seen.empty()) return "Pick a field for at least one column";
+    if (!p.match.empty() && std::find(seen.begin(), seen.end(), p.match) == seen.end())   // s024a
+        return "Matching by " + curly(p.match) + " needs a column going to it";
     return {};
 }
 
@@ -254,6 +256,9 @@ std::expected<ImportResult, Error> import_records(Journal& j, const Table& t, co
         return std::unexpected(Error{Error::Code::Unsupported, why});
     if (j.in_batch()) return std::unexpected(Error{Error::Code::Internal, "another batch is running"});
     ImportResult r;
+    r.matching = !p.match.empty();
+    std::size_t mcol = 0;   // s024a: the file's column the match field comes from
+    for (std::size_t i = 0; i < p.fields.size(); ++i) if (r.matching && p.fields[i] == p.match) mcol = i;
     j.begin_batch(import_label(0, t.name));
     for (std::size_t i = p.header ? 1 : 0; i < d.rows.size(); ++i) {
         if (blank(d.rows[i])) continue;
@@ -261,11 +266,36 @@ std::expected<ImportResult, Error> import_records(Journal& j, const Table& t, co
         ++r.rows;
         auto v = row_values(t, d.rows[i], p);
         if (!v) { r.refused.push_back({d.lines[i], v.error()}); continue; }
+        if (r.matching) {   // s024a: the records whose match field holds this row's value
+            const std::string cell = trim(mcol < d.rows[i].size() ? d.rows[i][mcol] : std::string{});
+            std::vector<Store::Id> ids;
+            if (!cell.empty()) {
+                auto found = read_found(j.store().connection(), t, {Criterion{p.match, "=" + cell}}, PageRequest{0, 100000});
+                if (!found) { r.refused.push_back({d.lines[i], found.error().message}); continue; }
+                ids = found->ids;
+            }
+            if (!ids.empty()) {
+                std::vector<std::string> cols;
+                std::vector<Value> vals;
+                for (std::size_t k = 0; k < v->first.size(); ++k)
+                    if (v->first[k] != p.match) { cols.push_back(v->first[k]); vals.push_back(v->second[k]); }
+                bool ok = true;
+                for (const auto& id : ids) {
+                    if (cols.empty()) { ++r.updated; continue; }
+                    auto u = verbs::set_fields(j, id, cols, vals);
+                    if (!u) { r.refused.push_back({d.lines[i], u.error().message}); ok = false; break; }
+                    ++r.updated;
+                }
+                (void)ok;
+                continue;
+            }
+            if (!p.add_rest) { ++r.unmatched; continue; }
+        }
         auto made = verbs::new_record(j, t.name, v->first, v->second);
         if (!made) { r.refused.push_back({d.lines[i], made.error().message}); continue; }
         ++r.records;
     }
-    j.name_batch(import_label(r.records, t.name));
+    j.name_batch(r.matching ? import_label(r, t.name) : import_label(r.records, t.name));
     (void)j.end_batch();
     return r;
 }
@@ -274,8 +304,16 @@ std::string import_label(std::int64_t n, const std::string& table) {
     return "Import " + std::to_string(n) + (n == 1 ? " record" : " records") + " into " + curly(table);
 }
 
+std::string import_label(const ImportResult& r, const std::string& table) {
+    return "Import into " + curly(table) + " -- " + std::to_string(r.updated) + " updated, " + std::to_string(r.records) + " added";
+}
+
 std::string import_says(const ImportResult& r, const std::string& table) {
-    std::string s = "Imported " + std::to_string(r.records) + (r.records == 1 ? " record" : " records") + " into " + curly(table);
+    std::string s = r.matching
+        ? "Updated " + std::to_string(r.updated) + (r.updated == 1 ? " record" : " records") + " and added " +
+              std::to_string(r.records) + " in " + curly(table)
+        : "Imported " + std::to_string(r.records) + (r.records == 1 ? " record" : " records") + " into " + curly(table);
+    if (r.unmatched) s += " -- " + std::to_string(r.unmatched) + (r.unmatched == 1 ? " row matched" : " rows matched") + " none (not added)";
     if (!r.refused.empty()) s += " -- " + std::to_string(r.refused.size()) + " refused";
     if (r.stopped_at) s += " -- stopped before line " + std::to_string(r.stopped_at) + ", the rest weren't read";
     return s;

@@ -1,4 +1,5 @@
 #pragma once
+#include <gtkmm/checkbutton.h>
 #include "db/Import.hpp"
 #include "widgets/Widgets.hpp"
 
@@ -61,6 +62,9 @@ private:
     std::vector<Gtk::Widget*>   m_first;     // the first line's cells (names when the box is ticked)
     bool                        m_resetting = false;
     Gtk::Label*                 m_hint = nullptr;   // the plan's how-to line (hidden in the report)
+    Gtk::Box*                   m_match_row = nullptr;   // s024a: Match by ... / add the rest
+    Gtk::DropDown*              m_match = nullptr;       // "-- add every row --" then the fields
+    Gtk::CheckButton*           m_add_rest = nullptr;
     std::int64_t                m_rows = 0;         // rows Import will look at (the live line's count)
     bool                        m_running = false;  // s020c: the worker has it
     std::function<std::int64_t()> m_count;

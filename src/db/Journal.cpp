@@ -2012,6 +2012,37 @@ std::expected<void, Error> set_field(Journal& j, const Store::Id& row, const std
     });
 }
 
+std::expected<void, Error> set_fields(Journal& j, const Store::Id& row, const std::vector<std::string>& columns,
+                                      const std::vector<Value>& values) {
+    std::string table;
+    std::vector<std::string> kf;
+    std::vector<Value> key;
+    if (!Store::parse_row_id(row, table, kf, key) || columns.size() != values.size())
+        return std::unexpected(Error{Error::Code::Internal, "not a record: " + row});
+    return j.run("Edit Record in " + curly(table), {row}, [&](Store& s) {
+        auto got = s.get(row);
+        if (s.failed()) return;
+        if (!got) { s.refuse(Error{Error::Code::Changed, Store::describe(row) + " is not there any more"}); return; }
+        RowDef d = std::get<RowDef>(*got);
+        const Table* t = s.table_info(d.table);
+        for (std::size_t k = 0; k < columns.size(); ++k) {
+            bool found = false;
+            for (std::size_t i = 0; i < d.columns.size(); ++i) {
+                if (d.columns[i] != columns[k]) continue;
+                found = true;
+                const Column* c = t ? t->column(columns[k]) : nullptr;
+                if (c && c->pk_position > 0 && d.values[i] != values[k]) {
+                    s.refuse(Error{Error::Code::Unsupported, curly(columns[k]) + " is the record's key -- it isn't changed here"});
+                    return;
+                }
+                d.values[i] = values[k];
+            }
+            if (!found) { s.refuse(Error{Error::Code::NotFound, curly(d.table) + " has no column " + curly(columns[k])}); return; }
+        }
+        s.put(row, d);
+    });
+}
+
 namespace {
 // s008: what deleting `row` does to the records pointing at it, through every
 // link into its table -- read before the step, so the step can declare them.
@@ -3067,6 +3098,11 @@ const std::vector<Verb>& all() {
              auto row = newest_row(j);
              if (!row) return std::unexpected(row.error());
              return set_field(j, *row, "title", Value("edited by the walk"));
+         }, rows_fixture},
+        {"Edit Record", [](Journal& j) -> std::expected<void, Error> {   // s024a: several fields, one write
+             auto row = newest_row(j);
+             if (!row) return std::unexpected(row.error());
+             return set_fields(j, *row, {"title", "n"}, {Value("both by the walk"), Value(42)});
          }, rows_fixture},
         {"Delete Record", [](Journal& j) -> std::expected<void, Error> {
              auto row = newest_row(j);

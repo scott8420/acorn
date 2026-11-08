@@ -3,6 +3,8 @@
 
 #include <gtkmm/eventcontrollerkey.h>
 #include <gtkmm/headerbar.h>
+#include <gtkmm/checkbutton.h>
+#include <gtkmm/dropdown.h>
 #include <glibmm/main.h>
 #include <gtkmm/label.h>
 #include <gtkmm/stringlist.h>
@@ -75,6 +77,29 @@ ImportWindow::ImportWindow(Gtk::Window& parent)
         refresh();
     });
     page->append(m_header);
+
+    // s024a: update matching records (FileMaker's "update matching").
+    m_match_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+    m_match_row->set_name("import.match_row");
+    auto* mlab = Gtk::make_managed<Gtk::Label>("Match records by");
+    m_match = Gtk::make_managed<Gtk::DropDown>(Gtk::StringList::create({"-- none: add every row --"}));
+    m_match->set_name("import.match");
+    m_match->set_tooltip_text("A field: a row whose value is in that field of a record UPDATES that record with its other "
+                              "columns, instead of adding one");
+    m_add_rest = Gtk::make_managed<Gtk::CheckButton>("Add the rows that match none");
+    m_add_rest->set_name("import.add_rest");
+    m_add_rest->set_active(true);
+    m_add_rest->set_tooltip_text("Unticked: a row whose value is in no record is left out");
+    m_match->property_selected().signal_changed().connect([this] {
+        if (m_resetting) return;
+        m_add_rest->set_visible(m_match->get_selected() > 0);
+        refresh();
+    });
+    m_add_rest->signal_toggled().connect([this] { if (!m_resetting) refresh(); });
+    m_match_row->append(*mlab);
+    m_match_row->append(*m_match);
+    m_match_row->append(*m_add_rest);
+    page->append(*m_match_row);
 
     auto* hint = m_hint = Gtk::make_managed<Gtk::Label>("Pick the field each column goes to -- or “-- skip --”. "
                                                "A field left out gets its default.");
@@ -167,6 +192,14 @@ void ImportWindow::start(const db::Table& t, const std::string& file_name, db::D
     const bool names = db::looks_like_header(first, t);
     m_resetting = true;
     m_header.set_active(names);
+    {   // s024a: none picked, the rest added
+        std::vector<Glib::ustring> ms{"-- none: add every row --"};
+        for (std::size_t i = 1; i < m_choices.size(); ++i) ms.push_back(m_choices[i]);
+        m_match->set_model(Gtk::StringList::create(ms));
+        m_match->set_selected(0);
+        m_add_rest->set_active(true);
+        m_add_rest->set_visible(false);
+    }
     m_resetting = false;
     std::size_t lines = 0;
     for (const auto& r : m_data.rows) if (!r.empty()) ++lines;
@@ -176,6 +209,7 @@ void ImportWindow::start(const db::Table& t, const std::string& file_name, db::D
     build_grid();
     // Plan mode.
     m_header.set_visible(true);
+    m_match_row->set_visible(true);
     m_hint->set_visible(true);
     m_scroll.set_visible(true);
     m_says.set_visible(true);
@@ -234,6 +268,8 @@ void ImportWindow::build_grid() {
 db::ImportPlan ImportWindow::plan() const {
     db::ImportPlan p;
     p.header = m_header.get_active();
+    if (const guint k = m_match->get_selected(); k > 0 && k < m_choices.size()) p.match = m_choices[k];   // s024a
+    p.add_rest = m_add_rest->get_active();
     for (auto* dd : m_picks) {
         const guint k = dd->get_selected();
         p.fields.push_back(k < m_choices.size() ? m_choices[k] : std::string{});
@@ -255,7 +291,10 @@ void ImportWindow::refresh() {
         return;
     }
     const auto pv = db::import_preview(m_table, m_data, p);
-    std::string s = "Will add " + std::to_string(pv.records) + (pv.records == 1 ? " record" : " records") + " to " + curly(m_table.name);
+    std::string s = p.match.empty()
+        ? "Will add " + std::to_string(pv.records) + (pv.records == 1 ? " record" : " records") + " to " + curly(m_table.name)
+        : "Will look at " + std::to_string(pv.records) + (pv.records == 1 ? " row" : " rows") + ": one whose " + curly(p.match) +
+              " is already in a record updates that record" + (p.add_rest ? "; the rest are added" : "; the rest are left out");
     std::size_t skipped = 0;
     for (const auto& f : p.fields) if (f.empty()) ++skipped;
     if (skipped) s += " (" + std::to_string(skipped) + (skipped == 1 ? " column" : " columns") + " skipped)";
@@ -292,6 +331,7 @@ void ImportWindow::set_running(bool on) {
     m_running = on;
     set_deletable(!on);
     m_header.set_sensitive(!on);
+    m_match_row->set_sensitive(!on);
     m_scroll.set_sensitive(!on);
     m_cancel.set_label(on ? "Stop" : "Cancel");
     m_cancel.set_tooltip_text(on ? "Stop after the row going in -- what went in is kept as one step (Esc)" : "");
@@ -312,6 +352,7 @@ void ImportWindow::finish(const std::expected<db::ImportResult, db::Error>& r) {
     }
     // The report.
     m_header.set_visible(false);
+    m_match_row->set_visible(false);
     m_hint->set_visible(false);
     m_scroll.set_visible(false);
     m_says.set_visible(false);
@@ -321,7 +362,8 @@ void ImportWindow::finish(const std::expected<db::ImportResult, db::Error>& r) {
     m_close.set_visible(true);
     set_default_widget(m_close);
     std::string head = db::import_says(*r, m_table.name) + ".";
-    if (r->records > 0) head += r->stopped_at ? " Ctrl+Z takes back what went in." : " Ctrl+Z takes the whole import back.";
+    if (r->records > 0 || r->updated > 0)
+        head += r->stopped_at ? " Ctrl+Z takes back what went in." : " Ctrl+Z takes the whole import back.";
     if (!r->refused.empty()) head += "\nThese rows weren't imported -- nothing of them went in:";
     m_done.set_text(head);
     m_done.set_visible(true);

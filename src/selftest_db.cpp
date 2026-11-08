@@ -3609,6 +3609,56 @@ void test_import_book(Journal& j, Gate& g, const std::string& P) {
           u5 && count("contacts") == n0 && im6 && im6->records == 0 && im6->stopped_at == 1 && j.undo_label() == top5 &&
               !j.in_batch(),
           im6 ? std::to_string(im6->stopped_at) : im6.error().message);
+    // s024a: update matching records.
+    {
+        auto val = [&](const std::string& col, const std::string& where_col, const std::string& is) -> std::string {
+            auto r = g.query("SELECT " + g.quote_ident(col) + " FROM " + g.quote_ident("contacts") + " WHERE " +
+                             g.quote_ident(where_col) + " = ?", {Value(is)});
+            if (!r || r->rows.empty() || r->rows[0][0].is_null()) return "(none)";
+            if (auto t = r->rows[0][0].as_text()) return *t;
+            if (auto i = r->rows[0][0].as_int()) return std::to_string(*i);
+            return "?";
+        };
+        const std::string em = "imogen@valesurvey.example";
+        const std::string co0 = val("company", "email", em);
+        auto du = read_delimited("email,company\n" + em + ",Vale Mapping\nnobody@x.example,New Co\n,Blank Co\n", ',');
+        ImportPlan pu{{"email", "company"}, true, "email", true};
+        auto iu = du ? import_records(j, *ct, *du, pu) : std::unexpected(Error{Error::Code::Internal, ""});
+        check(P + "import: update matching by email -- Imogen's company changed, the two rows matching none added; ONE step",
+              iu && iu->updated == 1 && iu->records == 2 && iu->refused.empty() && val("company", "email", em) == "Vale Mapping" &&
+                  count("contacts") == n0 + 2 && j.undo_label() == "Import into “contacts” -- 1 updated, 2 added" &&
+                  import_says(*iu, "contacts") == "Updated 1 record and added 2 in “contacts”",
+              iu ? import_says(*iu, "contacts") + " / " + j.undo_label() : iu.error().message);
+        auto uu = j.undo();
+        check(P + "import: Ctrl+Z puts the company back and takes the added ones away",
+              uu && val("company", "email", em) == co0 && count("contacts") == n0, val("company", "email", em));
+        pu.add_rest = false;
+        auto io = du ? import_records(j, *ct, *du, pu) : std::unexpected(Error{Error::Code::Internal, ""});
+        check(P + "import: update only -- the rows matching none counted, not added",
+              io && io->updated == 1 && io->records == 0 && io->unmatched == 2 && count("contacts") == n0 &&
+                  import_says(*io, "contacts") == "Updated 1 record and added 0 in “contacts” -- 2 rows matched none (not added)",
+              io ? import_says(*io, "contacts") : io.error().message);
+        (void)j.undo();
+        const std::string id3 = val("id", "email", em);
+        auto dk = read_delimited("id,notes\n" + id3 + ",by key\n", ',');
+        ImportPlan pk{{"id", "notes"}, true, "id", false};
+        auto ik = dk ? import_records(j, *ct, *dk, pk) : std::unexpected(Error{Error::Code::Internal, ""});
+        check(P + "import: match by the key -- that record's notes updated, its key as it was",
+              ik && ik->updated == 1 && val("notes", "email", em) == "by key" && val("id", "email", em) == id3,
+              ik ? val("notes", "email", em) : ik.error().message);
+        (void)j.undo();
+        const std::string top = j.undo_label();
+        auto dx = read_delimited("email,id\n" + em + ",99999\n", ',');
+        ImportPlan px{{"email", "id"}, true, "email", false};
+        auto ix = dx ? import_records(j, *ct, *dx, px) : std::unexpected(Error{Error::Code::Internal, ""});
+        check(P + "import: a matching row that would change the key -- refused with its line, nothing written, no step",
+              ix && ix->updated == 0 && ix->refused.size() == 1 && ix->refused[0].line == 2 &&
+                  ix->refused[0].why.find("key") != std::string::npos && j.undo_label() == top && val("id", "email", em) == id3,
+              ix && !ix->refused.empty() ? refusal_says(ix->refused[0]) : "");
+        ImportPlan pn{{"email", "company"}, true, "notes", true};
+        check(P + "import: matching by a field no column goes to -- refused in words",
+              check_import(*ct, pn).find("needs a column going to it") != std::string::npos, check_import(*ct, pn));
+    }
     check(P + "import: every write through the door -- no strays", j.strays() == strays0 && count("contacts") == n0,
           std::to_string(j.strays()));
 }
