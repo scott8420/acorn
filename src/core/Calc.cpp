@@ -104,8 +104,10 @@ std::variant<std::vector<Tok>, std::string> lex(const std::string& src) {
             t.k = Tok::K::Op;
             t.s = os == "\u2260" ? "<>" : os == "\u2264" ? "<=" : ">=";
             i += 3;
-        } else if (name_start(c)) {
-            std::size_t j = i;
+        } else if (name_start(c) ||
+                   (c == '$' && i + 1 < src.size() && name_start(static_cast<unsigned char>(src[i + 1])))) {
+            // s023a: a script's variable is a name led by $ ($count).
+            std::size_t j = i + 1;
             while (j < src.size() && name_char(static_cast<unsigned char>(src[j]))) ++j;
             t.k = Tok::K::Name;
             t.s = src.substr(i, j - i);
@@ -697,5 +699,8 @@ std::string today_iso() {
     std::strftime(buf, sizeof buf, "%Y-%m-%d", &tm);
     return buf;
 }
+
+// s023a: a script's If -- the language's own truth (empty, 0 and "" are false).
+bool calc_truthy(const CalcValue& v) { return truthy(v); }
 
 }  // namespace acorn::core

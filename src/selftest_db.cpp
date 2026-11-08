@@ -3135,9 +3135,9 @@ void test_report_pure(const fs::path& dir) {
 // ── s017a: scripts ─────────────────────────────────────────────────────────
 void test_script_pure(const fs::path& dir) {
     using core::Script; using core::ScriptStep; using K = core::StepKind;
-    bool names = core::step_kinds().size() == 10;
+    bool names = core::step_kinds().size() == 15;   // s023a: + If, Else If, Else, End If, Set Variable
     for (auto k : core::step_kinds()) names = names && core::parse_step_kind(core::step_name(k)) == k;
-    check("scripts: ten kinds of step, each name read back; an unknown one isn't one; only three write",
+    check("scripts: fifteen kinds of step, each name read back; an unknown one isn't one; only three write",
           names && !core::parse_step_kind("loop") && core::step_writes(K::SetField) && core::step_writes(K::NewRecord) &&
           core::step_writes(K::DeleteRecord) && !core::step_writes(K::Find) && !core::step_writes(K::Print), "");
     auto a = core::parse_assignments("first_name = \"Ada\"\n\n  last_name=Upper(\"x\")  \n");
@@ -3182,6 +3182,41 @@ void test_script_pure(const fs::path& dir) {
           r5.find("Step 2 (Set Field)") == 0 && r6.find("no field “nope”") != std::string::npos &&
           r7.find("words") != std::string::npos && r8.find("already has a script") != std::string::npos && !r9.empty(),
           ok + " | " + r5);
+    // s023a: steps that decide -- words, structure, depth, $names.
+    check("scripts: If / Else If / Else / End If / Set Variable say themselves",
+          core::step_says({K::If, "", "$n > 3"}) == "If $n > 3" && core::step_says({K::ElseIf, "", "x = 1"}) == "Else If x = 1" &&
+          core::step_says({K::Else}) == "Else" && core::step_says({K::EndIf}) == "End If" &&
+          core::step_says({K::SetVariable, "$n", "$n + 1"}) == "Set Variable $n to $n + 1", core::step_says({K::SetVariable, "$n", "1"}));
+    const auto good = chk({{K::SetVariable, "$n", "0"}, {K::If, "", "$n = 0"}, {K::If, "", "id > 1"}, {K::ShowAll}, {K::EndIf},
+                           {K::ElseIf, "", "$n = 1"}, {K::ShowAll}, {K::Else}, {K::SetField, "last_name", "$n"}, {K::EndIf}});
+    const auto i1 = chk({{K::If, "", "id > 1"}, {K::ShowAll}});
+    const auto i2 = chk({{K::Else}});
+    const auto i3 = chk({{K::EndIf}});
+    const auto i4 = chk({{K::If, "", "1"}, {K::Else}, {K::Else}, {K::EndIf}});
+    const auto i5 = chk({{K::If, "", "1"}, {K::Else}, {K::ElseIf, "", "2"}, {K::EndIf}});
+    const auto i6 = chk({{K::If, "", "  "}, {K::EndIf}});
+    const auto i7 = chk({{K::If, "", "(1"}, {K::EndIf}});
+    const auto v1 = chk({{K::SetVariable, "n", "1"}});
+    const auto v2 = chk({{K::SetVariable, "$1n", "1"}});
+    const auto v3 = chk({{K::SetVariable, "$n", ""}});
+    check("scripts: Ifs nest and close; refused in words -- no End If (naming the If), Else / End If with no If, two Elses, "
+          "Else If after Else, no condition, a condition that doesn't parse; a variable named without $ / with a digit first / "
+          "set to nothing",
+          good.empty() && i1 == "Step 1 (If) has no End If" && i2.find("no If before it") != std::string::npos &&
+              i3.find("no If to end") != std::string::npos && i4.find("Step 3 (Else)") == 0 && i5.find("after the Else") != std::string::npos &&
+              i6.find("needs a condition") != std::string::npos && i7.find("Step 1 (If)") == 0 &&
+              v1.find("starts with $") != std::string::npos && v2.find("isn't") != std::string::npos && v3.find("needs what") != std::string::npos,
+          good + " | " + i1 + " | " + i4);
+    const std::vector<ScriptStep> nest{{K::If, "", "1"}, {K::If, "", "1"}, {K::ShowAll}, {K::Else}, {K::ShowAll}, {K::EndIf}, {K::EndIf}, {K::ShowAll}};
+    std::vector<int> depth;
+    for (std::size_t i = 0; i < nest.size(); ++i) depth.push_back(core::step_depth(nest, i));
+    check("scripts: how deep each step sits -- the editor's indent (an Else / End If at its If's depth)",
+          depth == std::vector<int>{0, 1, 2, 1, 2, 1, 0, 0}, "");
+    check("scripts: a $variable reads in the calculation language; a lone $ doesn't",
+          std::holds_alternative<core::CalcExpr>(core::parse_calc("$n + 1")) &&
+              std::get<core::CalcExpr>(core::parse_calc("$n + 1")).names == std::vector<std::string>{"$n"} &&
+              !std::holds_alternative<core::CalcExpr>(core::parse_calc("$ + 1")), "");
+
     std::string ti, na;
     check("scripts: ids round-trip; a script is the solution's",
           Store::parse_script_id(Store::script_id("a/b", "tidy up"), ti, na) && ti == "a/b" && na == "tidy up" &&
@@ -4216,6 +4251,47 @@ void test_scripts(Journal& j, Gate& g, core::Solution& sol, const std::string& P
     }
     check(P + "scripts: ... and leaves no step", j.size() == steps2 && g.strays() == strays0,
           std::to_string(steps2) + " -> " + std::to_string(j.size()) + " " + std::to_string(g.strays()));
+    {   // s023a: steps that decide -- on Thorne's record (company kept as read above)
+        ScriptRun f(j, sol, Script{"contacts", "F", {{K::Find, "last_name", "=Thorne"}}}, ScriptState{"contacts"});
+        (void)f.go();
+        ScriptState at{"contacts"};
+        at.record = f.state().record;
+        Script decide{"contacts", "Decide", {
+            {K::SetVariable, "$n", "2"},
+            {K::SetVariable, "$n", "$n * 10 + 1"},                    // 21: a variable reads itself
+            {K::If, "", "last_name = \"Nobody\""},
+                {K::SetField, "notes", "\"wrong: if\""},
+            {K::ElseIf, "", "$n > 20"},
+                {K::If, "", "Length($never) = 0"},                       // an unset variable is empty
+                    {K::SetVariable, "$path", "\"elseif-inner\""},
+                {K::Else},
+                    {K::SetVariable, "$path", "\"wrong: inner else\""},
+                {K::EndIf},
+            {K::ElseIf, "", "1"},
+                {K::SetField, "notes", "\"wrong: second else if\""},
+            {K::Else},
+                {K::SetField, "notes", "\"wrong: else\""},
+            {K::EndIf},
+            {K::If, "", "0"},
+                {K::SetField, "notes", "\"wrong: false if\""},
+            {K::Else},
+                {K::SetField, "notes", "$path & \" \" & $n"},
+            {K::EndIf},
+        }};
+        const auto chk2 = core::check_script(decide, {}, {"id", "first_name", "last_name", "company", "email", "birthday", "notes"}, {});
+        ScriptRun run(j, sol, decide, at);
+        const auto p = run.go();
+        const std::string notes = one("SELECT " + g.quote_ident("notes") + " FROM " + C + " WHERE " + ln + " = 'Thorne'");
+        check(P + "scripts: If / Else If / Else / End If, nested, with $variables -- only the right branches run; one write, "
+                  "one step",
+              chk2.empty() && p == ScriptPause::Done && run.writes() == 1 && notes == "elseif-inner 21" && j.undo_label() == "Script “Decide”" &&
+                  run.variables().size() == 2, chk2 + " | " + notes + " | " + run.words());
+        if (j.undo_label() == "Script “Decide”") (void)j.undo();
+        ScriptRun bad(j, sol, Script{"contacts", "Bad", {{K::If, "", "Nope(1)"}, {K::EndIf}}}, at);
+        const auto pb = bad.go();
+        check(P + "scripts: a condition that can't be worked out stops the run, naming the If",
+              pb == ScriptPause::Stopped && bad.words().find("Step 1 (If)") == 0, bad.words());
+    }
     {
         ScriptRun run(j, sol, Script{"contacts", "None", {{K::Find, "last_name", "zzzz"}, {K::ShowAll}}}, st0);
         const auto p = run.go();

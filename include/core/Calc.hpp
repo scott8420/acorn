@@ -116,6 +116,9 @@ std::map<std::string, CalcOutcome> evaluate_all(const std::map<std::string, Calc
 std::string calc_text(const CalcValue& v);
 std::string calc_text(const CalcOutcome& o);
 
+// s023a: true unless empty, 0 or "" -- what a script's If takes.
+bool calc_truthy(const CalcValue& v);
+
 // Today's date, local, "YYYY-MM-DD".
 std::string today_iso();
 

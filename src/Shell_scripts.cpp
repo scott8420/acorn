@@ -216,6 +216,7 @@ void Shell::script_section(const db::Table& t) {  // scripts: the Scripts sectio
                 m_sc_focus = id + ".kind";   // the repaint gives the focus back here, not to the name
                 Glib::signal_idle().connect_once(repaint);
             });
+            kind_dd->set_margin_start(18 * core::step_depth(m_sc_typed.steps, static_cast<std::size_t>(i)));   // s023a: nested Ifs indent
             steps->attach(*kind_dd, 1, i);
 
             // What the step needs.
@@ -298,6 +299,29 @@ void Shell::script_section(const db::Table& t) {  // scripts: the Scripts sectio
             case K::DeleteRecord: what->append(*cell("the picked record -- asks first; No stops the script", "acorn-status")); break;
             case K::Preview:      what->append(*cell("Browse -> Preview of the picked layout", "acorn-status")); break;
             case K::Print:        what->append(*cell("the print dialog over the preview's pages", "acorn-status")); break;
+            // s023a -- steps that decide.
+            case K::If:
+            case K::ElseIf:
+                text_box("a condition: last_name = \"Thorne\", $n > 3, Length(email) = 0", 28);
+                break;
+            case K::Else:  what->append(*cell("when nothing above it was true", "acorn-status")); break;
+            case K::EndIf: what->append(*cell("the end of the If", "acorn-status")); break;
+            case K::SetVariable: {
+                if (st.field.empty() || st.field[0] != '$') m_sc_typed.steps[static_cast<std::size_t>(i)].field = "$n";
+                auto nm = Gtk::make_managed<Gtk::Entry>();
+                nm->set_name(id + ".field");
+                nm->set_width_chars(10);
+                nm->set_text(m_sc_typed.steps[static_cast<std::size_t>(i)].field);
+                nm->set_tooltip_text("$ then a name -- kept for this run; later steps read it as $name");
+                nm->signal_changed().connect([this, nm, i, check] {
+                    m_sc_typed.steps[static_cast<std::size_t>(i)].field = nm->get_text();
+                    check();
+                });
+                what->append(*nm);
+                what->append(*cell("to", "acorn-status"));
+                text_box("a calculation: 0, $n + 1, Upper(last_name)", 24);
+                break;
+            }
             }
             steps->attach(*what, 2, i);
 

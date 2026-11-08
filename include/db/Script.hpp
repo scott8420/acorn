@@ -20,11 +20,14 @@
 //   * when a step can't go on (a Find that finds nothing, No to Delete
 //     Record, a step with no record to work on) -- what the run wrote so far
 //     is kept, as the one step; Ctrl+Z puts it back.
+#include "core/Calc.hpp"
 #include "core/Script.hpp"
 #include "core/Solution.hpp"
 #include "db/Browse.hpp"
 #include "db/Journal.hpp"
 
+#include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -79,6 +82,12 @@ private:
     // The expression `e` against the picked record, as the field `col` would
     // hold it. "" error = fine.
     std::expected<Value, std::string> work_out(const std::string& e, const Column& col);
+    // s023a: the expression's value (the record's fields, calculations and
+    // the run's $variables).
+    std::expected<core::CalcValue, std::string> value_of(const std::string& e);
+    std::size_t next_branch(std::size_t i) const;   // the If's next Else If / Else / End If (steps().size(): none)
+    std::size_t end_of(std::size_t i) const;        // the End If closing the block step i is in
+    bool        branch(std::size_t i, ScriptPause& pause);   // If i was false: on to the branch that runs
     std::string first_found();   // the first record of the found set in the state's order ("" none)
     bool        still_there(const Store::Id& id);
 
@@ -93,6 +102,10 @@ private:
     bool                 m_finished = false;
     bool                 m_put_back = false;
     int                  m_writes = 0;
+    std::map<std::string, core::CalcValue> m_vars;   // s023a: $name -> its value, for this run
+    std::optional<std::size_t> m_next;               // s023a: a jump -- the step to go on at
+public:
+    const std::map<std::string, core::CalcValue>& variables() const { return m_vars; }
 };
 
 // The label a run's step has on Ctrl+Z: Script “name”.

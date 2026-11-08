@@ -3,6 +3,7 @@
 #include "core/Calc.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <variant>
 
 namespace acorn::core {
@@ -29,6 +30,11 @@ const KindRow kKinds[] = {
     {StepKind::Preview,      "preview",       "Preview",       false},
     {StepKind::Print,        "print",         "Print...",      false},
     {StepKind::Message,      "show_message",  "Show Message",  false},
+    {StepKind::If,           "if",            "If",            false},   // s023a
+    {StepKind::ElseIf,       "else_if",       "Else If",       false},
+    {StepKind::Else,         "else",          "Else",          false},
+    {StepKind::EndIf,        "end_if",        "End If",        false},
+    {StepKind::SetVariable,  "set_variable",  "Set Variable",  false},
 };
 const KindRow& row_of(StepKind k) {
     for (const auto& r : kKinds) if (r.k == k) return r;
@@ -80,6 +86,11 @@ std::string step_says(const ScriptStep& s) {
     case StepKind::Preview:      return "Preview";
     case StepKind::Print:        return "Print...";
     case StepKind::Message:      return "Show Message " + curly(first_line(s.text));
+    case StepKind::If:           return "If " + first_line(s.text);
+    case StepKind::ElseIf:       return "Else If " + first_line(s.text);
+    case StepKind::Else:         return "Else";
+    case StepKind::EndIf:        return "End If";
+    case StepKind::SetVariable:  return "Set Variable " + s.field + " to " + first_line(s.text);
     }
     return "?";
 }
@@ -109,6 +120,30 @@ parse_assignments(const std::string& text) {
     return out;
 }
 
+std::string check_variable_name(const std::string& name) {
+    if (name.size() < 2 || name[0] != '$') return "A variable's name starts with $ -- $count";
+    for (std::size_t i = 1; i < name.size(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(name[i]);
+        const bool ok = std::isalpha(c) || c == '_' || c >= 0x80 || (i > 1 && std::isdigit(c));
+        if (!ok) return "A variable's name is $ then letters, digits and _ -- " + curly(name) + " isn't";
+    }
+    if (name.size() > 64) return "A variable's name is at most 64 letters";
+    return {};
+}
+
+int step_depth(const std::vector<ScriptStep>& steps, std::size_t i) {
+    int d = 0;
+    for (std::size_t j = 0; j < i && j < steps.size(); ++j) {
+        if (steps[j].kind == StepKind::If) ++d;
+        else if (steps[j].kind == StepKind::EndIf && d > 0) --d;
+    }
+    if (i < steps.size()) {
+        const auto k = steps[i].kind;
+        if ((k == StepKind::EndIf || k == StepKind::Else || k == StepKind::ElseIf) && d > 0) --d;
+    }
+    return d;
+}
+
 std::string check_script_name(const std::string& name) {
     if (name.empty()) return "A script needs a name";
     if (name.find('\n') != std::string::npos || name.find('\r') != std::string::npos) return "A script's name is one line";
@@ -124,6 +159,8 @@ std::string check_script(const Script& s, const std::vector<std::string>& taken,
     if (s.steps.empty()) return "A script needs a step";
     if (s.steps.size() > static_cast<std::size_t>(kScriptStepsMax))
         return "A script has at most " + std::to_string(kScriptStepsMax) + " steps";
+    struct Open { std::size_t at; bool seen_else; };
+    std::vector<Open> ifs;   // s023a: the Ifs still open
     for (std::size_t i = 0; i < s.steps.size(); ++i) {
         const auto& st = s.steps[i];
         const std::string at = "Step " + std::to_string(i + 1) + " (" + step_label(st.kind) + ")";
@@ -168,8 +205,34 @@ std::string check_script(const Script& s, const std::vector<std::string>& taken,
             break;
         case StepKind::ShowAll: case StepKind::DeleteRecord: case StepKind::Preview: case StepKind::Print:
             break;
+        case StepKind::If:
+        case StepKind::ElseIf:
+            if (st.kind == StepKind::ElseIf) {
+                if (ifs.empty()) return at + " has no If before it";
+                if (ifs.back().seen_else) return at + " comes after the Else -- it would never be asked";
+            }
+            if (trim(st.text).empty()) return at + " needs a condition -- last_name = \"Thorne\", $n > 3";
+            if (auto w = expr_ok(st.text); !w.empty()) return w;
+            if (st.kind == StepKind::If) ifs.push_back({i, false});
+            break;
+        case StepKind::Else:
+            if (ifs.empty()) return at + " has no If before it";
+            if (ifs.back().seen_else) return at + ": its If already has an Else";
+            ifs.back().seen_else = true;
+            break;
+        case StepKind::EndIf:
+            if (ifs.empty()) return at + " has no If to end";
+            ifs.pop_back();
+            break;
+        case StepKind::SetVariable:
+            if (auto w = check_variable_name(st.field); !w.empty()) return at + ": " + w;
+            if (trim(st.text).empty()) return at + " needs what to set it to (\"\" makes it empty)";
+            if (auto w = expr_ok(st.text); !w.empty()) return w;
+            break;
         }
     }
+    if (!ifs.empty())
+        return "Step " + std::to_string(ifs.back().at + 1) + " (If) has no End If";
     return {};
 }
 

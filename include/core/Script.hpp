@@ -16,6 +16,13 @@
 //   Preview                        -- Browse -> Preview of the picked layout
 //   Print...                       -- the print dialog over those pages
 //   Show Message “text”            -- waits for OK
+// s023a -- steps that decide:
+//   If  condition / Else If  condition / Else / End If
+//                                  -- the steps between run when the
+//                                     condition is true (not empty, 0 or "");
+//                                     nest freely; every If has its End If
+//   Set Variable  $name = expression -- kept for the run; any expression
+//                                     after it reads $name (empty until set)
 // An expression is the calculation language (s014a), worked out against the
 // picked record: `"Ada"`, `Upper(last_name)`, `Today`, `n + 1`.
 // GTK-free, headless-testable.
@@ -27,11 +34,13 @@
 
 namespace acorn::core {
 
-enum class StepKind { GoToLayout, Find, ShowAll, Sort, NewRecord, SetField, DeleteRecord, Preview, Print, Message };
+enum class StepKind { GoToLayout, Find, ShowAll, Sort, NewRecord, SetField, DeleteRecord, Preview, Print, Message,
+                      If, ElseIf, Else, EndIf, SetVariable };   // s023a
 
 struct ScriptStep {
     StepKind    kind = StepKind::ShowAll;
-    std::string field;    // Find / Sort / Set Field: the field; Go to Layout: the layout's name
+    std::string field;    // Find / Sort / Set Field: the field; Go to Layout: the layout's name;
+                          // Set Variable: the variable ($name)
     std::string text;     // Find: what; Set Field: the expression; New Record: the lines;
                           // Show Message: the words
     bool        descending = false;   // Sort
@@ -62,6 +71,13 @@ std::string step_says(const ScriptStep& s);
 // nothing after it.
 std::variant<std::vector<std::pair<std::string, std::string>>, std::string>
 parse_assignments(const std::string& text);
+
+// s023a: a variable's name: "" = fine, else why. $ then a letter or _, then
+// letters, digits, _ ($count, $last_seen).
+std::string check_variable_name(const std::string& name);
+// s023a: how deep step i sits inside If blocks (its own If / Else / End If
+// count as the outer depth) -- the editor indents by it.
+int step_depth(const std::vector<ScriptStep>& steps, std::size_t i);
 
 // A script's name: "" = fine, else why. Any words, one line, no spaces at
 // either end, at most 64 characters.

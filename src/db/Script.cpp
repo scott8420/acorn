@@ -78,6 +78,16 @@ std::string ScriptRun::first_found() {
 }
 
 std::expected<Value, std::string> ScriptRun::work_out(const std::string& e, const Column& col) {
+    auto out = value_of(e);
+    if (!out) return std::unexpected(out.error());
+    const std::string text = core::calc_text(*out);
+    if (text.empty()) return Value();   // empty -> the field emptied
+    auto v = parse_field(text, col);
+    if (!v) return std::unexpected(curly(col.name) + ": " + v.error());
+    return *v;
+}
+
+std::expected<core::CalcValue, std::string> ScriptRun::value_of(const std::string& e) {
     auto parsed = core::parse_calc(e);
     if (auto* err = std::get_if<std::string>(&parsed)) return std::unexpected(*err);
     const Table* t = table();
@@ -98,6 +108,10 @@ std::expected<Value, std::string> ScriptRun::work_out(const std::string& e, cons
     };
     const auto calcs = core::evaluate_all(m_sol.calcs_of(m_state.table), fields, today);
     core::CalcLookup with_calcs = [&](const std::string& n) -> std::optional<core::CalcValue> {
+        if (!n.empty() && n[0] == '$') {   // s023a: a variable -- empty until set
+            auto it = m_vars.find(n);
+            return it == m_vars.end() ? core::CalcValue{} : it->second;
+        }
         if (auto v = fields(n)) return v;
         if (auto it = calcs.find(n); it != calcs.end()) {
             return it->second.value;   // a calculation that failed reads as empty
@@ -106,11 +120,39 @@ std::expected<Value, std::string> ScriptRun::work_out(const std::string& e, cons
     };
     const auto out = core::evaluate(std::get<core::CalcExpr>(parsed), with_calcs, today);
     if (!out.ok()) return std::unexpected(out.error);
-    const std::string text = core::calc_text(out);
-    if (text.empty()) return Value();   // empty -> the field emptied
-    auto v = parse_field(text, col);
-    if (!v) return std::unexpected(curly(col.name) + ": " + v.error());
-    return *v;
+    return out.value;
+}
+
+std::size_t ScriptRun::next_branch(std::size_t i) const {
+    using K = core::StepKind;
+    int depth = 0;
+    for (std::size_t j = i + 1; j < m_script.steps.size(); ++j) {
+        const auto k = m_script.steps[j].kind;
+        if (k == K::If) ++depth;
+        else if (k == K::EndIf) { if (depth == 0) return j; --depth; }
+        else if ((k == K::ElseIf || k == K::Else) && depth == 0) return j;
+    }
+    return m_script.steps.size();
+}
+
+std::size_t ScriptRun::end_of(std::size_t i) const {
+    std::size_t j = i;
+    while (j < m_script.steps.size() && m_script.steps[j].kind != core::StepKind::EndIf) j = next_branch(j);
+    return j;
+}
+
+bool ScriptRun::branch(std::size_t i, ScriptPause& pause) {
+    using K = core::StepKind;
+    std::size_t j = next_branch(i);
+    while (j < m_script.steps.size() && m_script.steps[j].kind == K::ElseIf) {
+        m_at = j;   // a refusal names the Else If
+        auto c = value_of(m_script.steps[j].text);
+        if (!c) { pause = stop(c.error(), false); return false; }
+        if (core::calc_truthy(*c)) { m_next = j + 1; return true; }
+        j = next_branch(j);
+    }
+    m_next = j < m_script.steps.size() ? j + 1 : j;   // past the Else / End If
+    return true;
 }
 
 bool ScriptRun::step(std::size_t i, ScriptPause& pause) {
@@ -206,6 +248,24 @@ bool ScriptRun::step(std::size_t i, ScriptPause& pause) {
         m_words = st.text;
         pause = ScriptPause::Message;
         return false;
+    case K::If: {   // s023a
+        auto c = value_of(st.text);
+        if (!c) { pause = stop(c.error(), false); return false; }
+        if (core::calc_truthy(*c)) return true;
+        return branch(i, pause);
+    }
+    case K::ElseIf:
+    case K::Else:   // reached by running the branch before it: that branch ran, so past the End If
+        m_next = std::min(end_of(i) + 1, m_script.steps.size());
+        return true;
+    case K::EndIf:
+        return true;
+    case K::SetVariable: {
+        auto v = value_of(st.text);
+        if (!v) { pause = stop(v.error(), false); return false; }
+        m_vars[st.field] = *v;
+        return true;
+    }
     }
     return true;
 }
@@ -215,8 +275,9 @@ ScriptPause ScriptRun::go() {
     if (m_asking) return ScriptPause::Ask;
     while (m_at < m_script.steps.size()) {
         ScriptPause p = ScriptPause::Done;
+        m_next.reset();
         if (!step(m_at, p)) return p;
-        ++m_at;
+        m_at = m_next ? *m_next : m_at + 1;   // s023a: a branch jumps
     }
     return done();
 }
