@@ -689,6 +689,28 @@ void Shell::draw_layout(const Cairo::RefPtr<Cairo::Context>& cr, int w, int h) {
             cr->stroke();
             cr->unset_dash();
             text_in(o.from + "." + o.shows + "  ·  via " + o.field, o, Pango::Alignment::LEFT, 0.80);
+        } else if (o.kind == core::ObjectKind::Button) {   // s017b: a button -- shaded, its words centred
+            std::vector<std::string> scripts;
+            for (const auto& [n, sc] : m_solution.scripts_of(m_lay_table)) scripts.push_back(n);
+            const bool gone = core::missing_script(o, scripts);
+            cr->set_line_width(1);
+            if (gone || o.script.empty()) {
+                set(0.50);
+                cr->set_dash(std::vector<double>{5, 4}, 0);
+                cr->rectangle(x, y, ow, oh);
+                cr->stroke();
+                cr->unset_dash();
+                text_in(o.text + (gone ? "  ·  missing script " + curly(o.script) : std::string("  ·  no script")), o,
+                        Pango::Alignment::CENTER, 0.55);
+                continue;
+            }
+            set(0.12);
+            cr->rectangle(x, y, ow, oh);
+            cr->fill();
+            set(0.45);
+            cr->rectangle(x, y, ow, oh);
+            cr->stroke();
+            text_in(o.text, o, Pango::Alignment::CENTER, 0.9);
         } else if (o.kind == core::ObjectKind::Text) {
             cr->set_line_width(1);
             set(0.18);
@@ -752,7 +774,7 @@ void Shell::paint_inspector() {  // layouts: the picked object's field / words /
 
     if (m_lay_picks.size() > 1) {   // s010e: several -- how many, what, and Remove
         m_lay_inspector.append(*side_label(std::to_string(m_lay_picks.size()) + " objects", "acorn-field-name"));
-        int f = 0, w = 0, ln = 0, bx = 0, pt = 0, rl = 0;
+        int f = 0, w = 0, ln = 0, bx = 0, pt = 0, rl = 0, bt = 0;
         for (int i : m_lay_picks) {
             if (i < 0 || static_cast<std::size_t>(i) >= m_lay.objects.size()) continue;
             switch (m_lay.objects[static_cast<std::size_t>(i)].kind) {
@@ -762,6 +784,7 @@ void Shell::paint_inspector() {  // layouts: the picked object's field / words /
                 case core::ObjectKind::Box:   ++bx; break;
                 case core::ObjectKind::Portal: ++pt; break;
                 case core::ObjectKind::Related: ++rl; break;
+                case core::ObjectKind::Button: ++bt; break;   // s017b
             }
         }
         std::string kinds;
@@ -776,6 +799,7 @@ void Shell::paint_inspector() {  // layouts: the picked object's field / words /
         add(bx, "box", "boxes");
         add(pt, "portal", "portals");
         add(rl, "related field", "related fields");
+        add(bt, "button", "buttons");
         m_lay_inspector.append(*side_label(kinds, "acorn-status"));
         m_lay_inspector.append(*side_label(
             "Drag any of them to move them all; the arrows nudge them all; Delete removes them all -- one step each. "
@@ -856,6 +880,37 @@ void Shell::paint_inspector() {  // layouts: the picked object's field / words /
             row->append(*b);
         }
         m_lay_inspector.append(*row);
+        // s017b: a button -- runs one of the table's scripts (picked here; the
+        // words start as its name). Offered only when the table has scripts.
+        {
+            std::vector<std::string> scripts;
+            for (const auto& [n, sc] : m_solution.scripts_of(m_lay_table)) scripts.push_back(n);
+            auto snames = std::make_shared<std::vector<std::string>>(scripts);
+            std::vector<Glib::ustring> sshown(scripts.begin(), scripts.end());
+            auto bdd = Gtk::make_managed<Gtk::DropDown>(Gtk::StringList::create(sshown));
+            bdd->set_name("layouts.add_button_pick");
+            bdd->set_tooltip_text("The script the button runs -- the table's own");
+            bdd->set_sensitive(can && !scripts.empty());
+            bdd->set_margin_top(6);
+            auto addb = Gtk::make_managed<Gtk::Button>(scripts.empty() ? "Add Button (make a script first)" : "Add Button");
+            addb->set_name("layouts.add_button");
+            addb->set_sensitive(can && !scripts.empty());
+            addb->set_tooltip_text(scripts.empty()
+                ? "A button runs a script -- make one in Tables -> " + m_lay_table + " -> Scripts first"
+                : "A button that runs the script on the shown record (a List row's: on that row's), under everything");
+            addb->signal_clicked().connect([this, bdd, snames, gen] {
+                if (gen != m_lay_gen) return;
+                const auto i = bdd->get_selected();
+                if (i == GTK_INVALID_LIST_POSITION || i >= snames->size()) return;
+                auto l = m_lay;
+                core::add_button(l, (*snames)[i], (*snames)[i]);
+                m_lay_picks = {static_cast<int>(l.objects.size()) - 1};
+                const std::string what = "Added " + core::object_label(l.objects.back());
+                Glib::signal_idle().connect_once([this, l, what] { m_lay_focus.clear(); keep_layout(l, what); m_lay_canvas.grab_focus(); });
+            });
+            if (!scripts.empty()) m_lay_inspector.append(*bdd);
+            m_lay_inspector.append(*addb);
+        }
         // s011a: a portal -- offered only when something links INTO this table.
         if (const auto links = portal_links(m_lay_table); !links.empty()) {
             auto lk = std::make_shared<std::vector<core::PortalLink>>(links);
@@ -1042,7 +1097,8 @@ void Shell::paint_inspector() {  // layouts: the picked object's field / words /
                                        : o.kind == core::ObjectKind::Text ? "Words"
                                        : o.kind == core::ObjectKind::Line ? "Line"
                                        : o.kind == core::ObjectKind::Portal ? "Portal"
-                                       : o.kind == core::ObjectKind::Related ? "Related field" : "Box", "acorn-field-name"));
+                                       : o.kind == core::ObjectKind::Related ? "Related field"
+                                       : o.kind == core::ObjectKind::Button ? "Button" : "Box", "acorn-field-name"));
 
     if (o.kind == core::ObjectKind::Field) {
         // The field it shows -- a missing one listed first, so it can be
@@ -1233,6 +1289,66 @@ void Shell::paint_inspector() {  // layouts: the picked object's field / words /
         m_lay_inspector.append(*side_label("Shows", "acorn-status"));
         m_lay_inspector.append(*dd);
         if (m_lay_focus == "layouts.related") focus_back = dd;
+    } else if (o.kind == core::ObjectKind::Button) {   // s017b: its words and the script it runs -- one step each
+        auto e = Gtk::make_managed<Gtk::Entry>();
+        e->set_text(o.text);
+        e->set_sensitive(can);
+        e->set_tooltip_text("The button's words -- Enter (or leaving the box) keeps them");
+        remember(*e, "layouts.button_words");
+        auto keep = [this, e, idx, gen] {
+            if (gen != m_lay_gen || idx >= m_lay.objects.size()) return;
+            const std::string words = e->get_text();
+            if (words == m_lay.objects[idx].text) return;
+            auto l = m_lay;
+            l.objects[idx].text = words;
+            const std::string what = "Changed the button's words to " + curly(words);
+            Glib::signal_idle().connect_once([this, l, what] { keep_layout(l, what); });
+        };
+        e->signal_activate().connect(keep);
+        auto leave = Gtk::EventControllerFocus::create();
+        leave->signal_leave().connect(keep);
+        e->add_controller(leave);
+        m_lay_inspector.append(*side_label("Says", "acorn-status"));
+        m_lay_inspector.append(*e);
+        if (m_lay_focus == "layouts.button_words") focus_back = e;
+        // The script: the table's own -- a missing one listed first (so it can
+        // be pointed at a real one), and "none".
+        std::vector<std::string> scripts;
+        for (const auto& [n, sc] : m_solution.scripts_of(m_lay_table)) scripts.push_back(n);
+        const bool gone = core::missing_script(o, scripts);
+        auto snames = std::make_shared<std::vector<std::string>>();
+        std::vector<Glib::ustring> sshown;
+        snames->push_back({});
+        sshown.push_back("none -- runs nothing");
+        if (gone) { snames->push_back(o.script); sshown.push_back(o.script + " (missing)"); }
+        for (const auto& n : scripts) { snames->push_back(n); sshown.push_back(n); }
+        auto sd = Gtk::make_managed<Gtk::DropDown>(Gtk::StringList::create(sshown));
+        guint sat = 0;
+        for (std::size_t i = 0; i < snames->size(); ++i) if ((*snames)[i] == o.script) sat = static_cast<guint>(i);
+        sd->set_selected(sat);
+        sd->set_sensitive(can);
+        sd->set_tooltip_text("The script a click runs -- on the Form's record, or a List row's");
+        remember(*sd, "layouts.button_script");
+        sd->property_selected().signal_changed().connect([this, sd, snames, idx, gen] {
+            if (gen != m_lay_gen || idx >= m_lay.objects.size()) return;
+            const auto i = sd->get_selected();
+            if (i == GTK_INVALID_LIST_POSITION || i >= snames->size() || (*snames)[i] == m_lay.objects[idx].script) return;
+            auto l = m_lay;
+            l.objects[idx].script = (*snames)[i];
+            const std::string what = (*snames)[i].empty()
+                                         ? "Took the script off the button " + curly(l.objects[idx].text)
+                                         : "Pointed the button " + curly(l.objects[idx].text) + " at " + curly((*snames)[i]);
+            Glib::signal_idle().connect_once([this, l, what] { keep_layout(l, what); });
+        });
+        m_lay_inspector.append(*side_label("Runs", "acorn-status"));
+        m_lay_inspector.append(*sd);
+        if (m_lay_focus == "layouts.button_script") focus_back = sd;
+        if (gone)
+            m_lay_inspector.append(*side_label("There's no script " + curly(o.script) + " now -- the button is greyed in "
+                                               "Browse until it's back (Ctrl+Z) or another is picked.", "acorn-mark"));
+        else if (const auto* sc = o.script.empty() ? nullptr : m_solution.script(m_lay_table, o.script))
+            m_lay_inspector.append(*side_label(core::script_says(*sc) + ". Clicked in the Form it runs on the shown record; "
+                                               "in a List row, on that row's. Dim in Find; never printed.", "acorn-status"));
     } else if (o.kind == core::ObjectKind::Text) {
         auto e = Gtk::make_managed<Gtk::Entry>();
         e->set_text(o.text);

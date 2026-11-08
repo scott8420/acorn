@@ -167,9 +167,11 @@ std::optional<Solution> load_solution(const std::string& file) {
                             else if (kind == "box")  o.kind = ObjectKind::Box;
                             else if (kind == "portal") o.kind = ObjectKind::Portal;   // s011a
                             else if (kind == "related") o.kind = ObjectKind::Related; // s011d
+                            else if (kind == "button") o.kind = ObjectKind::Button;   // s017b
                             else continue;   // a kind this Acorn doesn't know: not drawn, not invented
                             o.field = str_or_empty(oj, "field");
                             if (o.kind == ObjectKind::Field) o.list = str_or_empty(oj, "list");   // s014c
+                            if (o.kind == ObjectKind::Button) o.script = str_or_empty(oj, "script");   // s017b
                             o.text = str_or_empty(oj, "text");
                             o.align = parse_align(str_or_empty(oj, "align"));   // s012b: missing -> right
                             o.x = num_or_0(oj, "x");
@@ -285,6 +287,10 @@ bool save_solution(const std::string& file, const Solution& s) {
                 }
                 else if (o.kind == ObjectKind::Related) {   // s011d
                     oj["kind"] = "related"; oj["field"] = o.field; oj["from"] = o.from; oj["shows"] = o.shows;
+                }
+                else if (o.kind == ObjectKind::Button) {   // s017b
+                    oj["kind"] = "button"; oj["text"] = o.text;
+                    if (!o.script.empty()) oj["script"] = o.script;   // only when it runs one
                 }
                 else oj["kind"] = o.kind == ObjectKind::Line ? "line" : "box";   // s010c: drawing has only a place
                 oj["x"] = o.x; oj["y"] = o.y; oj["w"] = o.w; oj["h"] = o.h;

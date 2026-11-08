@@ -266,6 +266,7 @@ private:
     std::vector<std::string> fields_of(const std::string& table) const;  // category: layouts: the live table's fields, in order
     std::vector<core::PortalLink> portal_links(const std::string& table) const;  // category: layouts: s011a -- one-field links INTO the table
     std::vector<core::RelatedLink> related_links(const std::string& table) const;  // category: layouts: s011d -- one-field links OUT of the table
+    Gtk::Widget* form_button(const core::LayoutObject& o, const db::Table& t, int row);  // category: form: s017b -- a button that runs its script (row: a List row's record, -1 the picked)
     Gtk::Widget* form_related(const core::LayoutObject& o, const db::Table& child);  // category: form: s011d -- a parent's field, shown
     Gtk::Widget* form_portal(const core::LayoutObject& o, const db::Table& parent, Gtk::Widget*& focus_back, bool edit = true);  // category: form: s011a -- the related records, listed (s011b: edited)
     bool commit_related(const std::string& table, const std::string& row, const std::string& column,

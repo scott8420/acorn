@@ -2812,9 +2812,21 @@ std::expected<void, Error> save_script(Journal& j, const core::Script& sc, const
         return j.run((now ? "Change Script " : "New Script ") + curly(sc.name), {id}, [&](Store& s) { s.put(id, sc); });
     }
     const auto old = Store::script_id(sc.table, was);
-    return j.run("Change Script " + curly(was), {old, id}, [&](Store& s) {
+    // s017b: the table's buttons that ran `was` run the new name -- in the
+    // same step, so Ctrl+Z puts the name and the buttons back together.
+    std::vector<Store::Id> ids{old, id};
+    std::vector<core::Layout> moved;
+    if (auto ls = st.solution()->layouts.find(sc.table); ls != st.solution()->layouts.end())
+        for (const auto& [n, l] : ls->second) {
+            core::Layout c = l;
+            if (core::rename_script_on(c, was, sc.name) == 0) continue;
+            ids.push_back(Store::layout_id(sc.table, n));
+            moved.push_back(std::move(c));
+        }
+    return j.run("Change Script " + curly(was), ids, [&](Store& s) {
         s.put(old, std::nullopt);
         s.put(id, sc);
+        for (const auto& l : moved) s.put(Store::layout_id(l.table, l.name), l);
     });
 }
 

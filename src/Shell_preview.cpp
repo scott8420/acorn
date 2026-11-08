@@ -119,6 +119,7 @@ void draw_part(const Cairo::RefPtr<Cairo::Context>& cr, const PreviewDoc& d, con
             continue;
         }
         switch (o.kind) {
+        case core::ObjectKind::Button: break;   // s017b: a button is for the screen -- never printed
         case core::ObjectKind::Line:
             cr->set_source_rgb(0.45, 0.45, 0.45);
             if (w >= h) { cr->move_to(x, y + h / 2); cr->line_to(x + w, y + h / 2); }

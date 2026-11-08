@@ -227,6 +227,7 @@ std::string object_label(const LayoutObject& o) {
         case ObjectKind::Box:   return "a box";
         case ObjectKind::Portal: return "the portal to “" + o.from + "”";
         case ObjectKind::Related: return "“" + o.from + "." + o.shows + "”";
+        case ObjectKind::Button: return "the button “" + o.text + "”";
         default:                return "the words “" + o.text + "”";
     }
 }
@@ -242,7 +243,8 @@ int next_row_y(const Layout& l) {   // s010d: in the body -- under its objects, 
 int add_object(Layout& l, ObjectKind kind, const std::string& what) {
     const int y = next_row_y(l);
     if (kind != ObjectKind::Portal)
-        room_in_body(l, y, kind == ObjectKind::Box ? 8 * kLayoutGrid : kind == ObjectKind::Line ? kLayoutGrid : kFormRowH);
+        room_in_body(l, y, kind == ObjectKind::Box ? 8 * kLayoutGrid : kind == ObjectKind::Line ? kLayoutGrid
+                           : kind == ObjectKind::Button ? kButtonH : kFormRowH);
     const int boxx = kFormMargin + kFormLabelW + kFormGap;
     int n = 1;
     switch (kind) {
@@ -261,6 +263,9 @@ int add_object(Layout& l, ObjectKind kind, const std::string& what) {
         }
         case ObjectKind::Box:
             l.objects.push_back({ObjectKind::Box, "", "", kFormMargin, y, 20 * kLayoutGrid, 8 * kLayoutGrid});
+            break;
+        case ObjectKind::Button:    // s017b: words, no script yet (add_button names one)
+            l.objects.push_back({ObjectKind::Button, "", what, kFormMargin, y, kButtonW, kButtonH});
             break;
         case ObjectKind::Portal:    // add_portal / add_related know their link; a bare one would be invalid
         case ObjectKind::Related:
@@ -643,6 +648,30 @@ std::vector<ReportBlock> label_blocks(const Layout& l, int records) {
 std::string labels_label(const Layout& l) {
     if (!is_labels(l)) return "one per row";
     return std::to_string(l.across) + " across, " + std::to_string(l.gap) + " px apart";
+}
+
+// ── s017b: buttons ──────────────────────────────────────────────────────────
+
+bool missing_script(const LayoutObject& o, const std::vector<std::string>& scripts) {
+    return o.kind == ObjectKind::Button && !o.script.empty() &&
+           std::find(scripts.begin(), scripts.end(), o.script) == scripts.end();
+}
+
+void add_button(Layout& l, const std::string& words, const std::string& script) {
+    add_object(l, ObjectKind::Button, words);
+    l.objects.back().script = script;
+}
+
+int rename_script_on(Layout& l, const std::string& from, const std::string& to) {
+    int n = 0;
+    if (from.empty() || from == to) return 0;
+    for (auto& o : l.objects)
+        if (o.kind == ObjectKind::Button && o.script == from) { o.script = to; ++n; }
+    return n;
+}
+
+std::string button_says(const LayoutObject& o) {
+    return o.script.empty() ? std::string("runs no script") : "runs “" + o.script + "”";
 }
 
 }  // namespace acorn::core

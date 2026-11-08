@@ -233,6 +233,13 @@ void Shell::paint_find() {  // find: the layout's boxes, empty
                 cr->stroke();
             });
             w = da;
+        } else if (o.kind == core::ObjectKind::Button) {   // s017b: shown, dim -- a button doesn't run in Find
+            auto b = Gtk::make_managed<Gtk::Button>(o.text);
+            b->add_css_class("acorn-layout-button");
+            b->set_sensitive(false);
+            b->set_can_target(false);
+            b->set_name("find.button." + (o.script.empty() ? o.text : o.script));
+            w = b;
         } else if (o.kind == core::ObjectKind::Text) {
             auto l = find_label(o.text, "acorn-field-name");
             l->set_xalign(o.align == core::Align::Left ? 0.0f : o.align == core::Align::Center ? 0.5f : 1.0f);

@@ -3216,6 +3216,46 @@ void test_script_pure(const fs::path& dir) {
     check("scripts: a solution without any never writes the key", !ptext.empty() && ptext.find("scripts") == std::string::npos, "");
 }
 
+// ── s017b: buttons ─────────────────────────────────────────────────────────
+void test_button_pure(const fs::path& dir) {
+    using core::ObjectKind;
+    core::Layout l = core::default_layout("contacts", {"id", "last_name"});
+    const int y = core::next_row_y(l);
+    core::add_button(l, "Tidy", "Tidy");
+    const auto& b = l.objects.back();
+    check("buttons: Add Button lands under everything, button-sized, on the grid, with its words and script",
+          b.kind == ObjectKind::Button && b.text == "Tidy" && b.script == "Tidy" && b.y == y && b.x == core::kFormMargin &&
+          b.w == core::kButtonW && b.h == core::kButtonH && b.y % core::kLayoutGrid == 0 && l.height >= b.y + b.h &&
+          core::check_layout(l).empty(), core::check_layout(l));
+    core::LayoutObject none{ObjectKind::Button, "", "Go"};
+    check("buttons: how one is named and says itself; a missing script (not “none”)",
+          core::object_label(b) == "the button “Tidy”" && core::button_says(b) == "runs “Tidy”" &&
+          core::button_says(none) == "runs no script" && core::missing_script(b, {"Other"}) && !core::missing_script(b, {"Tidy"}) &&
+          !core::missing_script(none, {}) && !core::missing_script(l.objects.front(), {}), "");
+    core::Layout r = l;
+    core::add_button(r, "Again", "Tidy");
+    core::add_button(r, "Else", "Other");
+    const int n = core::rename_script_on(r, "Tidy", "Tidy Up");
+    int up = 0, other = 0;
+    for (const auto& o : r.objects) { up += o.script == "Tidy Up"; other += o.script == "Other"; }
+    check("buttons: a script renamed -- every button that ran it follows, the rest left be; the same name or none: nothing",
+          n == 2 && up == 2 && other == 1 && core::rename_script_on(r, "Tidy Up", "Tidy Up") == 0 &&
+          core::rename_script_on(r, "", "x") == 0, std::to_string(n));
+    core::Solution sol;
+    sol.points_at.engine = "sqlite";
+    sol.points_at.path = (dir / "bt.sqlite").string();
+    core::add_button(l, "Nothing yet", "");
+    sol.layouts["contacts"][l.name] = l;
+    const auto file = (dir / "bt.acorn").string();
+    auto back = core::save_solution(file, sol) ? core::load_solution(file) : std::nullopt;
+    std::ifstream in(file);
+    const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    std::size_t scripts = 0;
+    for (std::size_t at = text.find("\"script\""); at != std::string::npos; at = text.find("\"script\"", at + 1)) ++scripts;
+    check("buttons: round-trip in the .acorn (\"kind\": \"button\"), the script's key only when it runs one",
+          back && *back == sol && text.find("\"button\"") != std::string::npos && scripts == 1, text.substr(0, 0));
+}
+
 // On the sample Address Book, writable: whole runs through ScriptRun.
 void test_scripts(Journal& j, Gate& g, core::Solution& sol, const std::string& P) {
     using core::Script; using K = core::StepKind;
@@ -3329,6 +3369,51 @@ void test_scripts(Journal& j, Gate& g, core::Solution& sol, const std::string& P
         check(P + "scripts: Preview and Print... pause for the screen; Set Field with no record picked stops in words",
               a1 == ScriptPause::Preview && a2 == ScriptPause::Print && a3 == ScriptPause::Stopped &&
               run.words().find("no record") != std::string::npos, run.words());
+    }
+    {   // s017b: a button's way in -- the run starts on the record it was clicked for
+        ScriptRun f(j, sol, Script{"contacts", "F", {{K::Find, "last_name", "kettle"}}}, ScriptState{"contacts"});
+        (void)f.go();
+        const std::string kettle = f.state().record;
+        ScriptState at{"contacts"};
+        at.record = kettle;
+        ScriptRun run(j, sol, Script{"contacts", "Mark", {{K::SetField, "notes", "\"by button\""}}}, at);
+        const auto p = run.go();
+        const std::string notes = one("SELECT " + g.quote_ident("notes") + " FROM " + C + " WHERE " + ln + " = 'Kettle'");
+        check(P + "buttons: a run given the clicked record writes that record (one step); Ctrl+Z puts it back",
+              !kettle.empty() && p == ScriptPause::Done && notes == "by button" && j.undo_label() == "Script “Mark”" && j.undo() &&
+              one("SELECT " + g.quote_ident("notes") + " FROM " + C + " WHERE " + ln + " = 'Kettle'") != "by button",
+              kettle + " " + notes + " " + j.undo_label());
+    }
+    {   // s017b: renaming a script carries the table's buttons with it, in the same step
+        const core::Layout* card0 = sol.layout("contacts", kSampleLayoutName);
+        const core::Layout* list0 = sol.layout("contacts", kSampleListName);
+        bool laid = card0 && list0;
+        if (laid) {
+            core::Layout a = *card0, b = *list0;
+            core::add_button(a, "Tidy", "Tidy");
+            core::add_button(b, "Tidy row", "Tidy");
+            core::add_button(b, "Other", "");
+            laid = verbs::save_layout(j, a).has_value() && verbs::save_layout(j, b).has_value();
+        }
+        auto runs = [&](const char* layout, const std::string& script) {
+            const auto* l = sol.layout("contacts", layout);
+            int n = 0;
+            if (l) for (const auto& o : l->objects) if (o.kind == core::ObjectKind::Button && o.script == script) ++n;
+            return n;
+        };
+        Script renamed = *sol.script("contacts", "Tidy");
+        renamed.name = "Tidy Up";
+        auto rn = verbs::save_script(j, renamed, "Tidy");
+        const bool moved = rn && runs(kSampleLayoutName, "Tidy Up") == 1 &&
+                           runs(kSampleListName, "Tidy Up") == 1 && runs(kSampleListName, "") == 1 &&
+                           runs(kSampleLayoutName, "Tidy") == 0 && j.undo_label() == "Change Script “Tidy”";
+        const bool back = j.undo() && sol.script("contacts", "Tidy") && !sol.script("contacts", "Tidy Up") &&
+                          runs(kSampleLayoutName, "Tidy") == 1 && runs(kSampleListName, "Tidy") == 1;
+        check(P + "buttons: Rename a script -- the buttons that ran it run the new name (one step, the rest left be); "
+                  "Ctrl+Z puts the name and the buttons back",
+              laid && moved && back, rn ? j.undo_label() : rn.error().message);
+        (void)j.undo();   // the two layouts as they were
+        (void)j.undo();
     }
     auto del = verbs::delete_script(j, "contacts", "Tidy");
     check(P + "scripts: Delete Script; Ctrl+Z brings it back",
@@ -3977,6 +4062,7 @@ void db_tests(CheckFn fn, int& skip_count) {
         test_report_pure(tmp.p);              // s015b: sub-summary parts
         test_labels_pure(tmp.p);              // s016: labels
         test_script_pure(tmp.p);              // s017a: scripts
+        test_button_pure(tmp.p);              // s017b: buttons
         {   // s005b: the door, on its own fresh fixture file
             Target J = T;
             J.rw.path = (tmp.p / "journal.sqlite").string();

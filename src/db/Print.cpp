@@ -21,7 +21,8 @@ PrintedRecord print_record(Connection& c, const Schema& s, const Table& t, const
         switch (o.kind) {
         case core::ObjectKind::Text: p.text = o.text; break;
         case core::ObjectKind::Line:
-        case core::ObjectKind::Box: break;
+        case core::ObjectKind::Box:
+        case core::ObjectKind::Button: break;   // s017b: never printed
         case core::ObjectKind::Field: {
             if (const int k = col_at(t, o.field); k >= 0 && static_cast<std::size_t>(k) < row.size()) {
                 p.text = t.columns[static_cast<std::size_t>(k)].type == FieldType::Container

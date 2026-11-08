@@ -38,6 +38,8 @@ namespace acorn {
 
 namespace {
 
+std::string curly(const std::string& s) { return "“" + s + "”"; }
+
 Gtk::Label* form_label(const std::string& s, const char* css) {
     auto l = Gtk::make_managed<Gtk::Label>(s);
     l->set_xalign(0.0f);
@@ -366,6 +368,8 @@ Gtk::Fixed* Shell::layout_part(const core::Layout& L, core::Part part, bool edit
             w = form_portal(o, *t, focus_back, edit && m_paint_row < 0);   // s012c: a List row's portal is shown
         } else if (o.kind == core::ObjectKind::Related) {  // s011d
             w = form_related(o, *t);
+        } else if (o.kind == core::ObjectKind::Button) {   // s017b: runs its script on this record
+            w = form_button(o, *t, part == core::Part::Body ? m_paint_row : -1);   // a List header / footer's: the picked record
         } else if (o.kind == core::ObjectKind::Text) {
             auto l = form_label(o.text, "acorn-field-name");
             // s012b: as the layout says -- right (toward its box) unless told otherwise
@@ -486,6 +490,33 @@ Gtk::Fixed* Shell::layout_part(const core::Layout& L, core::Part part, bool edit
         fixed->put(*w, o.x, o.y - top);
     }
     return fixed;
+}
+
+// s017b: a BUTTON -- its words; a click runs its script (s017a's run) on
+// the record it is drawn for: the Form's, or the List row's (picked first,
+// so the run starts there). Greyed while a run waits, with no journal (not
+// connected), or when its script is gone / it runs none -- the tooltip says
+// why. The run is on idle: a box that had the focus saves on leaving first.
+Gtk::Widget* Shell::form_button(const core::LayoutObject& o, const db::Table& t, int row) {  // form: a button that runs a script
+    const unsigned gen = m_view_gen;
+    auto b = Gtk::make_managed<Gtk::Button>(o.text);
+    b->add_css_class("acorn-layout-button");
+    b->set_name("form.button." + (o.script.empty() ? o.text : o.script));
+    if (auto* l = dynamic_cast<Gtk::Label*>(b->get_child())) l->set_ellipsize(Pango::EllipsizeMode::END);
+    const core::Script* s = o.script.empty() ? nullptr : m_solution.script(t.name, o.script);
+    if (o.script.empty()) b->set_tooltip_text("This button runs no script -- pick one for it in Layouts");
+    else if (!s) b->set_tooltip_text("There's no script " + curly(o.script) + " now -- make it in Tables, or point the button at another in Layouts");
+    else b->set_tooltip_text("Runs " + curly(o.script) + " (" + core::script_says(*s) + ")" +
+                             (row >= 0 ? " on this row's record" : "") + " -- Ctrl+Z undoes what it wrote, in one step");
+    b->set_sensitive(s && m_journal && !m_script_run);
+    const std::string table = t.name, name = o.script;
+    b->signal_clicked().connect([this, table, name, row, gen] {
+        if (gen != m_view_gen || m_script_run) return;
+        if (row >= 0 && row != m_browse_sel_index) browse_select(row);   // the run starts on this row's record
+        if (auto lg = log::get(log::Area::App)) lg->info("button: run '{}' of '{}' (row {})", name, table, row);
+        Glib::signal_idle().connect_once([this, table, name] { run_script(table, name); });
+    });
+    return b;
 }
 
 // s011a: a PORTAL -- the records of o.from whose o.field points at the shown

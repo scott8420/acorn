@@ -36,7 +36,12 @@ inline constexpr int kLayoutGrid = 8;
 // points at (an address showing its contact's last_name): `field` is this
 // table's link field (addresses.contact_id), `from` the table it points at
 // (contacts), `shows` that table's field (last_name). Shown, not edited.
-enum class ObjectKind { Field, Text, Line, Box, Portal, Related };
+// s017b: + Button -- words (`text`) that run one of the table's scripts
+// (`script`, its name; "" runs nothing) when clicked in the Form or a List
+// row (on that row's record). Dim in Find; never printed. A button whose
+// script is gone is drawn dashed in Layouts and greyed in Browse, never
+// dropped.
+enum class ObjectKind { Field, Text, Line, Box, Portal, Related, Button };
 
 // s012b: how words sit in their place. Right is the default -- toward the
 // box beside them, as the default layout's labels; in the .acorn only when
@@ -53,6 +58,7 @@ struct LayoutObject {
     std::string shows;                 // Related: the field of `from` it shows
     Align align = Align::Right;        // s012b: Text -- how the words sit
     std::string list;                  // s014c: Field -- the table's value list its box offers ("" none)
+    std::string script;                // s017b: Button -- the table's script it runs ("" none)
     bool operator==(const LayoutObject&) const = default;
 };
 
@@ -300,6 +306,21 @@ struct ReportBlock {
     bool operator==(const ReportBlock&) const = default;
 };
 std::vector<ReportBlock> report_blocks(const Layout& l, const std::vector<std::vector<std::string>>& keys);
+
+// ── s017b: buttons ──────────────────────────────────────────────────────────
+inline constexpr int kButtonW = 128;   // a new button's size
+inline constexpr int kButtonH = 32;
+// A button whose script isn't among `scripts` (the table's script names).
+// A button that runs nothing ("") is not missing.
+bool missing_script(const LayoutObject& o, const std::vector<std::string>& scripts);
+// `l` with a button added under everything, last: `words`, running `script`.
+// The body is fitted.
+void add_button(Layout& l, const std::string& words, const std::string& script);
+// Every button of `l` that runs `from` made to run `to` (a script renamed).
+// Returns how many changed.
+int rename_script_on(Layout& l, const std::string& from, const std::string& to);
+// "runs “Tidy”" / "runs no script" -- how the inspector and tooltips say it.
+std::string button_says(const LayoutObject& o);
 
 // ── s016: labels ────────────────────────────────────────────────────────────
 inline constexpr int kLabelsMax = 8;   // the most across
