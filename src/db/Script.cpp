@@ -14,7 +14,7 @@ std::string curly(const std::string& s) { return "“" + s + "”"; }
 std::string script_label(const core::Script& s) { return "Script " + curly(s.name); }
 
 ScriptRun::ScriptRun(Journal& j, const core::Solution& sol, core::Script s, ScriptState st)
-    : m_j(j), m_sol(sol), m_script(std::move(s)), m_state(std::move(st)) {
+    : m_j(j), m_sol(sol), m_script(std::move(s)), m_state(std::move(st)), m_top(m_script) {
     m_j.begin_batch(script_label(m_script));
 }
 
@@ -33,7 +33,8 @@ const Table* ScriptRun::table() {
 
 ScriptPause ScriptRun::stop(const std::string& why, bool refused) {
     m_finished = true;
-    m_words = "Step " + std::to_string(m_at + 1) + " (" + core::step_label(m_script.steps[m_at].kind) + "): " + why;
+    m_words = (m_calls.empty() ? std::string("Step ") : "In " + curly(m_script.name) + " (performed), step ") +
+              std::to_string(m_at + 1) + " (" + core::step_label(m_script.steps[m_at].kind) + "): " + why;
     if (refused && m_writes > 0) {
         if (auto r = m_j.cancel_batch(); r) {
             m_put_back = true;
@@ -139,6 +140,38 @@ std::size_t ScriptRun::end_of(std::size_t i) const {
     std::size_t j = i;
     while (j < m_script.steps.size() && m_script.steps[j].kind != core::StepKind::EndIf) j = next_branch(j);
     return j;
+}
+
+std::size_t ScriptRun::loop_end(std::size_t i) const {
+    int depth = 0;
+    for (std::size_t j = i + 1; j < m_script.steps.size(); ++j) {
+        const auto k = m_script.steps[j].kind;
+        if (k == core::StepKind::Loop) ++depth;
+        else if (k == core::StepKind::EndLoop) { if (depth == 0) return j; --depth; }
+    }
+    return m_script.steps.size();
+}
+
+std::size_t ScriptRun::loop_start(std::size_t e) const {
+    int depth = 0;
+    for (std::size_t j = e; j-- > 0;) {
+        const auto k = m_script.steps[j].kind;
+        if (k == core::StepKind::EndLoop) ++depth;
+        else if (k == core::StepKind::Loop) { if (depth == 0) return j; --depth; }
+    }
+    return m_script.steps.size();
+}
+
+std::vector<Store::Id> ScriptRun::found_ids() {
+    const Table* t = table();
+    if (!t) return {};
+    PageRequest r;
+    r.limit = 100000;
+    r.sort = m_state.sort;
+    r.descending = m_state.descending;
+    Connection& c = m_j.store().connection();
+    auto p = m_state.found.empty() ? read_page(c, *t, r) : read_found(c, *t, m_state.found, r, &*m_schema);
+    return p ? p->ids : std::vector<Store::Id>{};
 }
 
 bool ScriptRun::branch(std::size_t i, ScriptPause& pause) {
@@ -266,6 +299,73 @@ bool ScriptRun::step(std::size_t i, ScriptPause& pause) {
         m_vars[st.field] = *v;
         return true;
     }
+    // s023b
+    case K::Loop:
+        m_passes[i] = 0;   // entered from above: a fresh count
+        return true;
+    case K::EndLoop: {
+        const std::size_t s = loop_start(i);
+        if (s >= m_script.steps.size()) return true;
+        if (++m_passes[s] >= core::kLoopMax) {
+            pause = stop("the Loop at step " + std::to_string(s + 1) + " went round " + std::to_string(core::kLoopMax) +
+                         " times -- stopped there (an Exit Loop If that never comes true?)", false);
+            return false;
+        }
+        m_next = s + 1;
+        return true;
+    }
+    case K::ExitLoopIf: {
+        auto c = value_of(st.text);
+        if (!c) { pause = stop(c.error(), false); return false; }
+        if (core::calc_truthy(*c)) m_next = std::min(loop_end(i) + 1, m_script.steps.size());
+        return true;
+    }
+    case K::GoToRecord: {
+        const auto ids = found_ids();
+        if (ids.empty()) { pause = stop("there are no records to go to", false); return false; }
+        const auto here = std::find(ids.begin(), ids.end(), m_state.record);
+        const long n = static_cast<long>(ids.size());
+        const long at = here == ids.end() ? -1 : static_cast<long>(here - ids.begin());
+        long to = 0;
+        if (st.field == "first") to = 0;
+        else if (st.field == "last") to = n - 1;
+        else if (st.field == "next" || st.field == "previous") {
+            to = st.field == "next" ? at + 1 : (at < 0 ? -1 : at - 1);
+            if (to < 0 || to >= n) {   // off the end: out of the Loop it's in, else the run stops
+                const std::size_t e = loop_end(i);
+                if (e < m_script.steps.size()) { m_next = e + 1; return true; }
+                pause = stop(std::string("there's no ") + (st.field == "next" ? "next record -- this is the last"
+                                                                               : "previous record -- this is the first"), false);
+                return false;
+            }
+        } else {   // number
+            auto v = value_of(st.text);
+            if (!v) { pause = stop(v.error(), false); return false; }
+            const auto* d = std::get_if<double>(&*v);
+            if (!d || *d < 1 || *d > static_cast<double>(n) || *d != static_cast<double>(static_cast<long>(*d))) {
+                pause = stop("there's no record number " + core::calc_text(*v) + " -- the found set has " + std::to_string(n), false);
+                return false;
+            }
+            to = static_cast<long>(*d) - 1;
+        }
+        m_state.record = ids[static_cast<std::size_t>(to)];
+        return true;
+    }
+    case K::PerformScript: {
+        const core::Script* sub = m_sol.script(m_state.table, st.field);
+        if (!sub) { pause = stop(curly(m_state.table) + " has no script " + curly(st.field), false); return false; }
+        if (static_cast<int>(m_calls.size()) >= core::kPerformDepth) {
+            pause = stop("scripts performed " + std::to_string(core::kPerformDepth) + " deep -- stopped there (a script "
+                         "that performs itself without end?)", false);
+            return false;
+        }
+        m_calls.push_back(Frame{m_script, i + 1, std::move(m_vars), std::move(m_passes)});
+        m_script = *sub;
+        m_vars.clear();     // its own $variables
+        m_passes.clear();
+        m_next = 0;
+        return true;
+    }
     }
     return true;
 }
@@ -273,7 +373,17 @@ bool ScriptRun::step(std::size_t i, ScriptPause& pause) {
 ScriptPause ScriptRun::go() {
     if (m_finished) return m_put_back || !m_words.empty() ? ScriptPause::Stopped : ScriptPause::Done;
     if (m_asking) return ScriptPause::Ask;
-    while (m_at < m_script.steps.size()) {
+    for (;;) {
+        if (m_at >= m_script.steps.size()) {   // s023b: a performed script ended -- back to the one that performed it
+            if (m_calls.empty()) break;
+            Frame f = std::move(m_calls.back());
+            m_calls.pop_back();
+            m_script = std::move(f.script);
+            m_at = f.back;
+            m_vars = std::move(f.vars);
+            m_passes = std::move(f.passes);
+            continue;
+        }
         ScriptPause p = ScriptPause::Done;
         m_next.reset();
         if (!step(m_at, p)) return p;

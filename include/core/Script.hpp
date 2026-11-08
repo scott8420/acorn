@@ -23,6 +23,16 @@
 //                                     nest freely; every If has its End If
 //   Set Variable  $name = expression -- kept for the run; any expression
 //                                     after it reads $name (empty until set)
+// s023b:
+//   Loop / Exit Loop If  condition / End Loop
+//                                  -- the steps between run again and again
+//                                     until an Exit Loop If is true (or a Go
+//                                     to Record next / previous runs off the
+//                                     end); at most kLoopMax passes
+//   Go to Record  first|next|previous|last|number [expression]
+//                                  -- the found set, in its sort
+//   Perform Script “name”          -- the table's script, then on; its own
+//                                     $variables; at most kPerformDepth deep
 // An expression is the calculation language (s014a), worked out against the
 // picked record: `"Ada"`, `Upper(last_name)`, `Today`, `n + 1`.
 // GTK-free, headless-testable.
@@ -35,12 +45,14 @@
 namespace acorn::core {
 
 enum class StepKind { GoToLayout, Find, ShowAll, Sort, NewRecord, SetField, DeleteRecord, Preview, Print, Message,
-                      If, ElseIf, Else, EndIf, SetVariable };   // s023a
+                      If, ElseIf, Else, EndIf, SetVariable,                    // s023a
+                      Loop, ExitLoopIf, EndLoop, GoToRecord, PerformScript };  // s023b
 
 struct ScriptStep {
     StepKind    kind = StepKind::ShowAll;
     std::string field;    // Find / Sort / Set Field: the field; Go to Layout: the layout's name;
-                          // Set Variable: the variable ($name)
+                          // Set Variable: the variable ($name); Go to Record: first / next /
+                          // previous / last / number; Perform Script: the script's name
     std::string text;     // Find: what; Set Field: the expression; New Record: the lines;
                           // Show Message: the words
     bool        descending = false;   // Sort
@@ -95,5 +107,9 @@ std::string check_script(const Script& s, const std::vector<std::string>& taken,
 std::string script_says(const Script& s);
 
 inline constexpr int kScriptStepsMax = 200;
+inline constexpr int kLoopMax = 10000;       // s023b: passes of one Loop before the run stops
+inline constexpr int kPerformDepth = 20;     // s023b: scripts performing scripts
+// s023b: Go to Record's choices, in the editor's order.
+const std::vector<std::string>& go_to_record_whats();
 
 }  // namespace acorn::core

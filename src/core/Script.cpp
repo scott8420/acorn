@@ -35,6 +35,11 @@ const KindRow kKinds[] = {
     {StepKind::Else,         "else",          "Else",          false},
     {StepKind::EndIf,        "end_if",        "End If",        false},
     {StepKind::SetVariable,  "set_variable",  "Set Variable",  false},
+    {StepKind::Loop,         "loop",          "Loop",          false},   // s023b
+    {StepKind::ExitLoopIf,   "exit_loop_if",  "Exit Loop If",  false},
+    {StepKind::EndLoop,      "end_loop",      "End Loop",      false},
+    {StepKind::GoToRecord,   "go_to_record",  "Go to Record",  false},
+    {StepKind::PerformScript, "perform_script", "Perform Script", false},
 };
 const KindRow& row_of(StepKind k) {
     for (const auto& r : kKinds) if (r.k == k) return r;
@@ -91,6 +96,11 @@ std::string step_says(const ScriptStep& s) {
     case StepKind::Else:         return "Else";
     case StepKind::EndIf:        return "End If";
     case StepKind::SetVariable:  return "Set Variable " + s.field + " to " + first_line(s.text);
+    case StepKind::Loop:         return "Loop";
+    case StepKind::ExitLoopIf:   return "Exit Loop If " + first_line(s.text);
+    case StepKind::EndLoop:      return "End Loop";
+    case StepKind::GoToRecord:   return "Go to Record " + s.field + (s.field == "number" ? " " + first_line(s.text) : "");
+    case StepKind::PerformScript: return "Perform Script " + curly(s.field);
     }
     return "?";
 }
@@ -131,15 +141,21 @@ std::string check_variable_name(const std::string& name) {
     return {};
 }
 
+const std::vector<std::string>& go_to_record_whats() {
+    static const std::vector<std::string> w{"first", "next", "previous", "last", "number"};
+    return w;
+}
+
 int step_depth(const std::vector<ScriptStep>& steps, std::size_t i) {
     int d = 0;
     for (std::size_t j = 0; j < i && j < steps.size(); ++j) {
-        if (steps[j].kind == StepKind::If) ++d;
-        else if (steps[j].kind == StepKind::EndIf && d > 0) --d;
+        const auto k = steps[j].kind;
+        if (k == StepKind::If || k == StepKind::Loop) ++d;   // s023b: a Loop indents too
+        else if ((k == StepKind::EndIf || k == StepKind::EndLoop) && d > 0) --d;
     }
     if (i < steps.size()) {
         const auto k = steps[i].kind;
-        if ((k == StepKind::EndIf || k == StepKind::Else || k == StepKind::ElseIf) && d > 0) --d;
+        if ((k == StepKind::EndIf || k == StepKind::Else || k == StepKind::ElseIf || k == StepKind::EndLoop) && d > 0) --d;
     }
     return d;
 }
@@ -159,8 +175,8 @@ std::string check_script(const Script& s, const std::vector<std::string>& taken,
     if (s.steps.empty()) return "A script needs a step";
     if (s.steps.size() > static_cast<std::size_t>(kScriptStepsMax))
         return "A script has at most " + std::to_string(kScriptStepsMax) + " steps";
-    struct Open { std::size_t at; bool seen_else; };
-    std::vector<Open> ifs;   // s023a: the Ifs still open
+    struct Open { std::size_t at; bool seen_else; bool loop = false; };
+    std::vector<Open> ifs;   // s023a: the Ifs (s023b: and Loops) still open, innermost last
     for (std::size_t i = 0; i < s.steps.size(); ++i) {
         const auto& st = s.steps[i];
         const std::string at = "Step " + std::to_string(i + 1) + " (" + step_label(st.kind) + ")";
@@ -208,7 +224,7 @@ std::string check_script(const Script& s, const std::vector<std::string>& taken,
         case StepKind::If:
         case StepKind::ElseIf:
             if (st.kind == StepKind::ElseIf) {
-                if (ifs.empty()) return at + " has no If before it";
+                if (ifs.empty() || ifs.back().loop) return at + " has no If before it";
                 if (ifs.back().seen_else) return at + " comes after the Else -- it would never be asked";
             }
             if (trim(st.text).empty()) return at + " needs a condition -- last_name = \"Thorne\", $n > 3";
@@ -216,13 +232,41 @@ std::string check_script(const Script& s, const std::vector<std::string>& taken,
             if (st.kind == StepKind::If) ifs.push_back({i, false});
             break;
         case StepKind::Else:
-            if (ifs.empty()) return at + " has no If before it";
+            if (ifs.empty() || ifs.back().loop) return at + " has no If before it";
             if (ifs.back().seen_else) return at + ": its If already has an Else";
             ifs.back().seen_else = true;
             break;
         case StepKind::EndIf:
             if (ifs.empty()) return at + " has no If to end";
+            if (ifs.back().loop) return at + " comes before the End Loop of step " + std::to_string(ifs.back().at + 1);
             ifs.pop_back();
+            break;
+        case StepKind::Loop:   // s023b
+            ifs.push_back({i, false, true});
+            break;
+        case StepKind::EndLoop:
+            if (ifs.empty()) return at + " has no Loop to end";
+            if (!ifs.back().loop) return at + " comes before the End If of step " + std::to_string(ifs.back().at + 1);
+            ifs.pop_back();
+            break;
+        case StepKind::ExitLoopIf: {
+            const bool in_loop = std::any_of(ifs.begin(), ifs.end(), [](const Open& o) { return o.loop; });
+            if (!in_loop) return at + " isn't inside a Loop";
+            if (trim(st.text).empty()) return at + " needs a condition -- $n > 10";
+            if (auto w = expr_ok(st.text); !w.empty()) return w;
+            break;
+        }
+        case StepKind::GoToRecord:
+            if (!has(go_to_record_whats(), st.field)) return at + " needs first, next, previous, last or number";
+            if (st.field == "number") {
+                if (trim(st.text).empty()) return at + " needs which number -- 1, $n";
+                if (auto w = expr_ok(st.text); !w.empty()) return w;
+            }
+            break;
+        case StepKind::PerformScript:
+            if (st.field.empty()) return at + " needs a script";
+            if (st.field != s.name && !has(taken, st.field))
+                return at + ": " + curly(s.table) + " has no script " + curly(st.field);
             break;
         case StepKind::SetVariable:
             if (auto w = check_variable_name(st.field); !w.empty()) return at + ": " + w;
@@ -232,7 +276,7 @@ std::string check_script(const Script& s, const std::vector<std::string>& taken,
         }
     }
     if (!ifs.empty())
-        return "Step " + std::to_string(ifs.back().at + 1) + " (If) has no End If";
+        return "Step " + std::to_string(ifs.back().at + 1) + (ifs.back().loop ? " (Loop) has no End Loop" : " (If) has no End If");
     return {};
 }
 

@@ -322,6 +322,41 @@ void Shell::script_section(const db::Table& t) {  // scripts: the Scripts sectio
                 text_box("a calculation: 0, $n + 1, Upper(last_name)", 24);
                 break;
             }
+            // s023b
+            case K::Loop:    what->append(*cell("the steps down to End Loop, again and again", "acorn-status")); break;
+            case K::EndLoop: what->append(*cell("back to the Loop", "acorn-status")); break;
+            case K::ExitLoopIf:
+                text_box("a condition: $n > 10, Length(notes) > 0", 26);
+                break;
+            case K::GoToRecord: {
+                const auto& whats = core::go_to_record_whats();
+                if (std::find(whats.begin(), whats.end(), st.field) == whats.end())
+                    m_sc_typed.steps[static_cast<std::size_t>(i)].field = "next";
+                std::vector<Glib::ustring> ws(whats.begin(), whats.end());
+                auto dd = Gtk::make_managed<Gtk::DropDown>(Gtk::StringList::create(ws));
+                dd->set_name(id + ".field");
+                const auto& cur = m_sc_typed.steps[static_cast<std::size_t>(i)].field;
+                dd->set_selected(static_cast<guint>(std::find(whats.begin(), whats.end(), cur) - whats.begin()));
+                dd->set_tooltip_text("In the found set, in its sort -- next / previous off the end leaves the Loop it's in");
+                dd->property_selected().signal_changed().connect([this, dd, i, repaint, id] {
+                    const auto& w = core::go_to_record_whats();
+                    if (dd->get_selected() >= w.size()) return;
+                    m_sc_typed.steps[static_cast<std::size_t>(i)].field = w[dd->get_selected()];
+                    m_sc_focus = id + ".field";
+                    Glib::signal_idle().connect_once(repaint);   // number shows its box
+                });
+                what->append(*dd);
+                if (cur == "number") text_box("which: 1, $n", 10);
+                break;
+            }
+            case K::PerformScript: {
+                std::vector<std::string> names = taken;
+                if (!m_sc_typed.name.empty() && std::find(names.begin(), names.end(), m_sc_typed.name) == names.end())
+                    names.push_back(m_sc_typed.name);
+                if (names.empty()) what->append(*cell("(this table has no other scripts yet)", "acorn-calc-error"));
+                else field_pick(names, "missing");
+                break;
+            }
             }
             steps->attach(*what, 2, i);
 

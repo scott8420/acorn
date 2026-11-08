@@ -3135,10 +3135,10 @@ void test_report_pure(const fs::path& dir) {
 // ── s017a: scripts ─────────────────────────────────────────────────────────
 void test_script_pure(const fs::path& dir) {
     using core::Script; using core::ScriptStep; using K = core::StepKind;
-    bool names = core::step_kinds().size() == 15;   // s023a: + If, Else If, Else, End If, Set Variable
+    bool names = core::step_kinds().size() == 20;   // s023a: + If .. Set Variable; s023b: + Loop .. Perform Script
     for (auto k : core::step_kinds()) names = names && core::parse_step_kind(core::step_name(k)) == k;
-    check("scripts: fifteen kinds of step, each name read back; an unknown one isn't one; only three write",
-          names && !core::parse_step_kind("loop") && core::step_writes(K::SetField) && core::step_writes(K::NewRecord) &&
+    check("scripts: twenty kinds of step, each name read back; an unknown one isn't one; only three write",
+          names && !core::parse_step_kind("nope") && core::step_writes(K::SetField) && core::step_writes(K::NewRecord) &&
           core::step_writes(K::DeleteRecord) && !core::step_writes(K::Find) && !core::step_writes(K::Print), "");
     auto a = core::parse_assignments("first_name = \"Ada\"\n\n  last_name=Upper(\"x\")  \n");
     auto b = core::parse_assignments("first_name \"Ada\"");
@@ -3207,11 +3207,42 @@ void test_script_pure(const fs::path& dir) {
               i6.find("needs a condition") != std::string::npos && i7.find("Step 1 (If)") == 0 &&
               v1.find("starts with $") != std::string::npos && v2.find("isn't") != std::string::npos && v3.find("needs what") != std::string::npos,
           good + " | " + i1 + " | " + i4);
+    // s023b: loops, records, performing.
+    check("scripts: Loop / Exit Loop If / End Loop / Go to Record / Perform Script say themselves",
+          core::step_says({K::Loop}) == "Loop" && core::step_says({K::ExitLoopIf, "", "$n > 3"}) == "Exit Loop If $n > 3" &&
+              core::step_says({K::EndLoop}) == "End Loop" && core::step_says({K::GoToRecord, "next"}) == "Go to Record next" &&
+              core::step_says({K::GoToRecord, "number", "$n"}) == "Go to Record number $n" &&
+              core::step_says({K::PerformScript, "Tidy"}) == "Perform Script “Tidy”", "");
+    const auto lgood = chk({{K::GoToRecord, "first"}, {K::Loop}, {K::If, "", "id > 3"}, {K::ExitLoopIf, "", "1"}, {K::EndIf},
+                            {K::GoToRecord, "next"}, {K::EndLoop}, {K::GoToRecord, "number", "2"}, {K::PerformScript, "other"},
+                            {K::PerformScript, "s"}}, {"other"});
+    const auto l1 = chk({{K::Loop}, {K::ShowAll}});
+    const auto l2 = chk({{K::EndLoop}});
+    const auto l3 = chk({{K::ExitLoopIf, "", "1"}});
+    const auto l4 = chk({{K::Loop}, {K::If, "", "1"}, {K::EndLoop}, {K::EndIf}});
+    const auto l5 = chk({{K::If, "", "1"}, {K::Loop}, {K::EndIf}, {K::EndLoop}});
+    const auto l6 = chk({{K::GoToRecord, "sideways"}});
+    const auto l7 = chk({{K::GoToRecord, "number", ""}});
+    const auto l8 = chk({{K::PerformScript, "nope"}});
+    const auto l9 = chk({{K::Loop}, {K::Else}, {K::EndLoop}});
+    check("scripts: Loops nest with Ifs; refused in words -- no End Loop, End Loop / Exit Loop If with no Loop, an If and a "
+          "Loop crossed (either way), Go to Record sideways / number with none, a script the table hasn't, an Else in a Loop",
+          lgood.empty() && l1 == "Step 1 (Loop) has no End Loop" && l2.find("no Loop to end") != std::string::npos &&
+              l3.find("isn't inside a Loop") != std::string::npos && l4.find("Step 3 (End Loop)") == 0 &&
+              l5.find("Step 3 (End If)") == 0 && l6.find("first, next") != std::string::npos &&
+              l7.find("which number") != std::string::npos && l8.find("no script “nope”") != std::string::npos &&
+              l9.find("no If before it") != std::string::npos,
+          lgood + " | " + l4 + " | " + l5);
+
     const std::vector<ScriptStep> nest{{K::If, "", "1"}, {K::If, "", "1"}, {K::ShowAll}, {K::Else}, {K::ShowAll}, {K::EndIf}, {K::EndIf}, {K::ShowAll}};
     std::vector<int> depth;
     for (std::size_t i = 0; i < nest.size(); ++i) depth.push_back(core::step_depth(nest, i));
     check("scripts: how deep each step sits -- the editor's indent (an Else / End If at its If's depth)",
           depth == std::vector<int>{0, 1, 2, 1, 2, 1, 0, 0}, "");
+    const std::vector<ScriptStep> lnest{{K::Loop}, {K::If, "", "1"}, {K::ExitLoopIf, "", "1"}, {K::EndIf}, {K::EndLoop}};
+    std::vector<int> ld;
+    for (std::size_t i = 0; i < lnest.size(); ++i) ld.push_back(core::step_depth(lnest, i));
+    check("scripts: a Loop indents as an If does", ld == std::vector<int>{0, 1, 2, 1, 0}, "");
     check("scripts: a $variable reads in the calculation language; a lone $ doesn't",
           std::holds_alternative<core::CalcExpr>(core::parse_calc("$n + 1")) &&
               std::get<core::CalcExpr>(core::parse_calc("$n + 1")).names == std::vector<std::string>{"$n"} &&
@@ -3238,7 +3269,7 @@ void test_script_pure(const fs::path& dir) {
     {
         std::ofstream o(dir / "sc_half.acorn");
         o << R"({"acorn": 1, "scripts": {"t": {"good": [{"step": "show_all"}, {"step": "sort", "field": "x"}],)"
-             R"( "none": [], "odd": [{"step": "show_all"}, {"step": "loop"}], "notalist": {"step": "show_all"}}}})";
+             R"( "none": [], "odd": [{"step": "show_all"}, {"step": "teleport"}], "notalist": {"step": "show_all"}}}})";
     }
     auto half = core::load_solution((dir / "sc_half.acorn").string());
     check("scripts: a broken one is skipped (no steps, a step this Acorn doesn't know), the rest reads",
@@ -4291,6 +4322,86 @@ void test_scripts(Journal& j, Gate& g, core::Solution& sol, const std::string& P
         const auto pb = bad.go();
         check(P + "scripts: a condition that can't be worked out stops the run, naming the If",
               pb == ScriptPause::Stopped && bad.words().find("Step 1 (If)") == 0, bad.words());
+
+        // s023b -- Loop, Go to Record, Perform Script.
+        const std::string N = g.quote_ident("notes");
+        const double total = count("contacts");
+        {   // number every record, in id order
+            ScriptState s0{"contacts"};
+            s0.sort = "id";
+            ScriptRun run(j, sol, Script{"contacts", "Number", {{K::GoToRecord, "first"}, {K::SetVariable, "$i", "0"}, {K::Loop},
+                                                               {K::SetVariable, "$i", "$i + 1"}, {K::SetField, "notes", "$i"},
+                                                               {K::GoToRecord, "next"}, {K::EndLoop}}}, s0);
+            const auto p = run.go();
+            const std::string first = one("SELECT " + N + " FROM " + C + " ORDER BY " + g.quote_ident("id") + " LIMIT 1");
+            const std::string last = one("SELECT " + N + " FROM " + C + " ORDER BY " + g.quote_ident("id") + " DESC LIMIT 1");
+            check(P + "scripts: Loop + Go to Record next numbers every record -- off the end leaves the Loop; one step",
+                  p == ScriptPause::Done && run.writes() == static_cast<int>(total) && first == "1" &&
+                      last == std::to_string(static_cast<int>(total)) && j.undo_label() == "Script “Number”",
+                  run.words() + " " + first + ".." + last);
+            if (j.undo_label() == "Script “Number”") (void)j.undo();
+        }
+        {
+            ScriptRun run(j, sol, Script{"contacts", "Five", {{K::SetVariable, "$n", "0"}, {K::Loop}, {K::SetVariable, "$n", "$n + 1"},
+                                                             {K::ExitLoopIf, "", "$n = 5"}, {K::EndLoop}, {K::SetField, "notes", "$n"}}}, at);
+            const auto p = run.go();
+            const std::string notes = one("SELECT " + N + " FROM " + C + " WHERE " + ln + " = 'Thorne'");
+            check(P + "scripts: Exit Loop If -- out after the fifth pass", p == ScriptPause::Done && notes == "5", notes + " " + run.words());
+            if (j.undo_label() == "Script “Five”") (void)j.undo();
+        }
+        {
+            ScriptRun run(j, sol, Script{"contacts", "Forever", {{K::SetVariable, "$n", "0"}, {K::Loop}, {K::SetVariable, "$n", "$n + 1"}, {K::EndLoop}}}, at);
+            const auto p = run.go();
+            check(P + "scripts: a Loop that never ends stops after " + std::to_string(core::kLoopMax) + " passes, saying so",
+                  p == ScriptPause::Stopped && run.words().find("went round 10000 times") != std::string::npos &&
+                      run.variables().contains("$n") && core::calc_text(run.variables().at("$n")) == std::to_string(core::kLoopMax),
+                  run.variables().contains("$n") ? "$n = " + core::calc_text(run.variables().at("$n")) : run.words());
+        }
+        {
+            ScriptState s0{"contacts"};
+            s0.sort = "id";
+            ScriptRun a(j, sol, Script{"contacts", "Third", {{K::GoToRecord, "number", "1 + 2"}}}, s0);
+            (void)a.go();
+            ScriptRun b(j, sol, Script{"contacts", "Past", {{K::GoToRecord, "last"}, {K::GoToRecord, "next"}}}, s0);
+            const auto pb2 = b.go();
+            ScriptRun c(j, sol, Script{"contacts", "Far", {{K::GoToRecord, "number", "999"}}}, s0);
+            const auto pc = c.go();
+            ScriptRun d(j, sol, Script{"contacts", "Back", {{K::GoToRecord, "first"}, {K::GoToRecord, "previous"}}}, s0);
+            const auto pd = d.go();
+            const std::string third = one("SELECT " + g.quote_ident("id") + " FROM " + C + " ORDER BY " + g.quote_ident("id") +
+                                          " LIMIT 1 OFFSET 2");
+            check(P + "scripts: Go to Record number 1 + 2 is the third; next past the last / previous before the first / "
+                      "number 999 stop in words",
+                  Store::describe(a.state().record).find(third) != std::string::npos && pb2 == ScriptPause::Stopped &&
+                      b.words().find("no next record") != std::string::npos && pc == ScriptPause::Stopped &&
+                      c.words().find("no record number 999") != std::string::npos && pd == ScriptPause::Stopped &&
+                      d.words().find("no previous record") != std::string::npos,
+                  Store::describe(a.state().record) + " / " + third + " | " + c.words());
+        }
+        {   // Perform Script: the sub runs, with its own $variables; then back
+            Script sub{"contacts", "Sub", {{K::SetVariable, "$x", "7"}, {K::SetField, "notes", "\"sub \" & $x & $outer"}}};
+            Script self{"contacts", "Self", {{K::PerformScript, "Self"}}};
+            auto k1 = verbs::save_script(j, sub);
+            auto k2 = verbs::save_script(j, self);
+            Script main{"contacts", "Main", {{K::SetVariable, "$outer", "\"o\""}, {K::PerformScript, "Sub"},
+                                             {K::If, "", "Length($x) = 0 and $outer = \"o\""}, {K::SetVariable, "$ok", "1"}, {K::EndIf}}};
+            ScriptRun run(j, sol, main, at);
+            const auto p = run.go();
+            const std::string notes = one("SELECT " + N + " FROM " + C + " WHERE " + ln + " = 'Thorne'");
+            check(P + "scripts: Perform Script -- the sub runs on the same record with its own $variables, then the caller "
+                      "goes on with its own; one step named for the caller",
+                  k1 && k2 && p == ScriptPause::Done && notes == "sub 7" && run.variables().contains("$ok") &&
+                      !run.variables().contains("$x") && j.undo_label() == "Script “Main”" && run.script().name == "Main",
+                  notes + " | " + run.words());
+            if (j.undo_label() == "Script “Main”") (void)j.undo();
+            ScriptRun loop(j, sol, self, at);
+            const auto pl = loop.go();
+            check(P + "scripts: a script that performs itself stops " + std::to_string(core::kPerformDepth) + " deep, saying so",
+                  pl == ScriptPause::Stopped && loop.words().find("20 deep") != std::string::npos &&
+                      loop.words().find("In “Self” (performed)") == 0, loop.words());
+            (void)verbs::delete_script(j, "contacts", "Self");
+            (void)verbs::delete_script(j, "contacts", "Sub");
+        }
     }
     {
         ScriptRun run(j, sol, Script{"contacts", "None", {{K::Find, "last_name", "zzzz"}, {K::ShowAll}}}, st0);

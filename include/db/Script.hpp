@@ -68,7 +68,7 @@ public:
     const std::string&  words() const { return m_words; }
     // The step the run paused / stopped at (0-based), or steps().size() when done.
     std::size_t         at() const { return m_at; }
-    const core::Script& script() const { return m_script; }
+    const core::Script& script() const { return m_top; }   // the script that was run (not one it performs)
     bool finished() const { return m_finished; }
     // Writes made (and kept) by the run -- a step on Ctrl+Z when > 0.
     int  writes() const { return m_writes; }
@@ -88,6 +88,9 @@ private:
     std::size_t next_branch(std::size_t i) const;   // the If's next Else If / Else / End If (steps().size(): none)
     std::size_t end_of(std::size_t i) const;        // the End If closing the block step i is in
     bool        branch(std::size_t i, ScriptPause& pause);   // If i was false: on to the branch that runs
+    std::size_t loop_end(std::size_t i) const;     // s023b: the End Loop of the Loop step i is in (size(): none)
+    std::size_t loop_start(std::size_t e) const;   // s023b: the Loop End Loop e closes
+    std::vector<Store::Id> found_ids();            // s023b: the found set's records, in the state's sort
     std::string first_found();   // the first record of the found set in the state's order ("" none)
     bool        still_there(const Store::Id& id);
 
@@ -104,6 +107,16 @@ private:
     int                  m_writes = 0;
     std::map<std::string, core::CalcValue> m_vars;   // s023a: $name -> its value, for this run
     std::optional<std::size_t> m_next;               // s023a: a jump -- the step to go on at
+    // s023b: Perform Script -- the scripts waiting for the one performed to end.
+    struct Frame {
+        core::Script script;
+        std::size_t back;
+        std::map<std::string, core::CalcValue> vars;
+        std::map<std::size_t, int> passes;
+    };
+    core::Script               m_top;
+    std::vector<Frame>         m_calls;
+    std::map<std::size_t, int> m_passes;            // s023b: a Loop's passes, by its step
 public:
     const std::map<std::string, core::CalcValue>& variables() const { return m_vars; }
 };
