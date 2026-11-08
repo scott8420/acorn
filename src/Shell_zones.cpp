@@ -64,7 +64,8 @@ void Shell::build_pages() {  // zone: Acorn's areas
         if (m_stack.get_visible_child_name() == "graph") paint_graph();
         // s010b: Layouts and the Form follow the solution as it is now.
         if (m_stack.get_visible_child_name() == "layouts") paint_layouts();
-        if (m_stack.get_visible_child_name() == "browse" && m_browse_view == BrowseView::Form) paint_browse();
+        if (m_stack.get_visible_child_name() == "browse" &&
+            (m_browse_view == BrowseView::Form || m_browse_view == BrowseView::List)) paint_browse();   // s012a: + List
     });
 }
 

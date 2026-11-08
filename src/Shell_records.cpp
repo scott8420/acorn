@@ -58,9 +58,10 @@ void Shell::browse_note(const std::string& text, const char* kind) {  // records
 }
 
 const db::Value* Shell::browse_value(const std::string& column) const {  // records: the picked field
-    if (m_browse_sel_index < 0 || static_cast<std::size_t>(m_browse_sel_index) >= m_browse_data.rows.size())
+    const int at = m_paint_row >= 0 ? m_paint_row : m_browse_sel_index;   // s012a: a List row being drawn
+    if (at < 0 || static_cast<std::size_t>(at) >= m_browse_data.rows.size())
         return nullptr;
-    const auto& row = m_browse_data.rows[static_cast<std::size_t>(m_browse_sel_index)];
+    const auto& row = m_browse_data.rows[static_cast<std::size_t>(at)];
     for (std::size_t i = 0; i < m_browse_data.columns.size() && i < row.size(); ++i)
         if (m_browse_data.columns[i] == column) return &row[i];
     return nullptr;

@@ -10,7 +10,10 @@
 #include <gtkmm/eventcontrollerfocus.h>
 #include <gtkmm/drawingarea.h>
 #include <gtkmm/fixed.h>
+#include <gtkmm/adjustment.h>
 #include <gtkmm/label.h>
+#include <gtkmm/listbox.h>
+#include <gtkmm/viewport.h>
 #include <gtkmm/menubutton.h>
 #include <gtkmm/popover.h>
 #include <gtkmm/scrolledwindow.h>
@@ -70,7 +73,6 @@ core::Layout Shell::form_layout(bool* kept) const {  // form: the picked layout 
 
 void Shell::paint_form() {  // form: the picked record through its layout
     const db::Table* t = browse_info();
-    const unsigned gen = m_view_gen;
     auto outer = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 8);
     outer->set_halign(Gtk::Align::START);
     outer->set_valign(Gtk::Align::START);
@@ -86,11 +88,137 @@ void Shell::paint_form() {  // form: the picked record through its layout
 
     bool kept = false;
     const core::Layout L = form_layout(&kept);
-    std::vector<std::string> fields;
-    for (const auto& c : t->columns) fields.push_back(c.name);
     const bool can = browse_writable();
     const std::string row_id = m_browse_sel;
 
+    form_caption(*outer, *t, L, kept, row_id);
+    Gtk::Widget* focus_back = nullptr;
+    // s010d: the Form shows the body -- the header / footer are the List's (s012a).
+    auto fixed = layout_part(L, core::Part::Body, can, focus_back);
+    fixed->set_name("shell.browse.form");
+    outer->append(*fixed);
+
+    m_browse_painting = true;
+    m_browse_scroll.set_child(*outer);
+    m_browse_painting = false;
+    if (focus_back) focus_back->grab_focus();
+}
+
+// s012a: the LIST view -- the picked layout drawn as rows: the header once
+// at the top, the body once per record of the page, the footer once at the
+// bottom; the header and footer stay put while the rows scroll. Rows are
+// SHOWN, not edited (s012b): a click picks the record (the panel beside
+// edits it, as with Cards and Grid); a double-click or Enter opens it in the
+// Form. Fields in the header / footer show the picked record.
+void Shell::paint_list() {  // form: the page through its layout, a row each
+    const db::Table* t = browse_info();
+    const unsigned gen = m_view_gen;
+    bool kept = false;
+    const core::Layout L = form_layout(&kept);
+    auto outer = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 8);
+    outer->set_halign(Gtk::Align::START);
+    outer->set_name("shell.browse.list_view");
+    form_caption(*outer, *t, L, kept, {});
+    auto sheet = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 0);   // the parts butt together: one sheet
+    sheet->set_vexpand(true);
+    outer->append(*sheet);
+
+    struct Row { int& r; int was; ~Row() { r = was; } };   // m_paint_row back as it was, however we leave
+    Gtk::Widget* unused = nullptr;
+    auto part = [&](core::Part p, int row) -> Gtk::Fixed* {
+        Row keep{m_paint_row, m_paint_row};
+        m_paint_row = row;
+        return layout_part(L, p, false, unused);
+    };
+    const int picked = m_browse_sel_index >= 0 && static_cast<std::size_t>(m_browse_sel_index) < m_browse_data.rows.size()
+                           ? m_browse_sel_index : 0;
+    if (core::part_height(L, core::Part::Header) > 0) {
+        auto h = part(core::Part::Header, picked);
+        h->add_css_class("acorn-list-header");
+        h->set_name("shell.browse.list_header");
+        h->set_tooltip_text("The layout's header -- drawn once, above the records");
+        sheet->append(*h);
+    }
+
+    auto list = Gtk::make_managed<Gtk::ListBox>();
+    list->set_selection_mode(Gtk::SelectionMode::SINGLE);
+    list->set_activate_on_single_click(false);   // a click picks; a double-click (or Enter) opens the Form
+    list->add_css_class("acorn-list");
+    list->set_name("shell.browse.list_rows");
+    for (std::size_t r = 0; r < m_browse_data.rows.size(); ++r) {
+        auto body = part(core::Part::Body, static_cast<int>(r));
+        body->add_css_class("acorn-list-body");
+        const std::string mark = r < m_browse_data.ids.size() ? mark_of(t->name, m_browse_data.ids[r]) : std::string{};
+        if (!mark.empty()) {   // s008b: an amber edge and a hint
+            body->add_css_class("acorn-marked");
+            body->set_tooltip_text("⚠ " + mark);
+        }
+        list->append(*body);
+    }
+    auto rows = Gtk::make_managed<Gtk::ScrolledWindow>();
+    rows->set_policy(Gtk::PolicyType::NEVER, Gtk::PolicyType::AUTOMATIC);
+    rows->set_vexpand(true);
+    // Nothing scrolls under the pointer on a click: a tall row's top scrolled
+    // into view would move the second click of a double-click elsewhere (no
+    // activation). The picked row is brought into view below, by hand.
+    auto port = Gtk::make_managed<Gtk::Viewport>(Glib::RefPtr<Gtk::Adjustment>{}, Glib::RefPtr<Gtk::Adjustment>{});
+    port->set_scroll_to_focus(false);
+    port->set_child(*list);
+    rows->set_child(*port);
+    // ...and the list's own: once parented, GtkListBox clamps a clicked row's
+    // top into view through the viewport's adjustment (312 -> 336 between the
+    // two clicks of a double-click: the drive). Let go of it.
+    list->set_adjustment(Glib::RefPtr<Gtk::Adjustment>{});
+    // The row in view: `whole` -- its top must show (a fresh paint); else only
+    // when none of it shows (the arrows walked off the end).
+    auto show_row = [this, rows, list, gen](int index, bool whole) {
+        Glib::signal_idle().connect_once([this, rows, list, gen, index, whole] {
+            if (gen != m_view_gen) return;
+            auto* r = list->get_row_at_index(index);
+            if (!r) return;
+            graphene_point_t p{0, 0}, q{0, 0};
+            if (!gtk_widget_compute_point(GTK_WIDGET(r->gobj()), GTK_WIDGET(list->gobj()), &p, &q)) return;
+            auto adj = rows->get_vadjustment();
+            const double y = q.y, h = r->get_height(), page = adj->get_page_size(), at = adj->get_value();
+            const bool off = whole ? (y < at || y + std::min(h, page) > at + page) : (y + h <= at || y >= at + page);
+            if (off) adj->set_value(std::max(0.0, y));
+        });
+    };
+    list->signal_row_selected().connect([this, gen, show_row](Gtk::ListBoxRow* r) {
+        if (m_browse_painting || gen != m_view_gen) return;
+        browse_select(r ? r->get_index() : -1);
+        if (r) show_row(r->get_index(), false);
+    });
+    // A double-click or Enter: that record in the Form.
+    list->signal_row_activated().connect([this, gen](Gtk::ListBoxRow* r) {
+        if (gen != m_view_gen || !r) return;
+        browse_select(r->get_index());
+        Glib::signal_idle().connect_once([this] { m_browse_form_btn.set_active(true); });
+    });
+    sheet->append(*rows);
+
+    if (core::part_height(L, core::Part::Footer) > 0) {
+        auto f = part(core::Part::Footer, picked);
+        f->add_css_class("acorn-list-footer");
+        f->set_name("shell.browse.list_footer");
+        f->set_tooltip_text("The layout's footer -- drawn once, below the records");
+        sheet->append(*f);
+    }
+
+    m_browse_painting = true;
+    Gtk::ListBoxRow* sel = m_browse_sel_index >= 0 ? list->get_row_at_index(m_browse_sel_index) : nullptr;
+    if (sel) list->select_row(*sel);
+    m_browse_scroll.set_child(*outer);
+    m_browse_painting = false;
+    if (sel) show_row(m_browse_sel_index, true);   // the picked row in view, once it has its place
+}
+
+// The Form's and the List's caption: which layout, and where it came from;
+// a picker when the table has more than one (shared with Layouts); the
+// record's ⚠ mark (Form only -- `row_id` empty for the List).
+void Shell::form_caption(Gtk::Box& outer, const db::Table& tbl, const core::Layout& L, bool kept, const std::string& row_id) {  // form: caption + picker
+    const db::Table* t = &tbl;
+    const unsigned gen = m_view_gen;
     // The caption: which layout, and where it came from.
     auto cap = form_label(L.name + (kept ? "  ·  kept in the solution"
                                          : "  ·  the default layout -- the table's fields, in order"), "acorn-status");
@@ -102,7 +230,7 @@ void Shell::paint_form() {  // form: the picked record through its layout
         std::vector<Glib::ustring> shown(names.begin(), names.end());
         auto dd = Gtk::make_managed<Gtk::DropDown>(Gtk::StringList::create(shown));
         dd->set_name("shell.browse.form_layout");
-        dd->set_tooltip_text("Which layout the record is shown through");
+        dd->set_tooltip_text("Which layout the records are shown through (Layouts shares the pick)");
         for (std::size_t i = 0; i < names.size(); ++i) if (names[i] == L.name) dd->set_selected(static_cast<guint>(i));
         const std::string tn = t->name;
         dd->property_selected().signal_changed().connect([this, dd, names, tn, gen] {
@@ -117,9 +245,9 @@ void Shell::paint_form() {  // form: the picked record through its layout
         cap->set_text(kept ? "kept in the solution" : "the default -- the table's fields, in order");   // the picker names it
         cap->set_valign(Gtk::Align::CENTER);
         row->append(*cap);
-        outer->append(*row);
+        outer.append(*row);
     } else {
-        outer->append(*cap);
+        outer.append(*cap);
     }
     if (const std::string mark = mark_of(t->name, row_id); !mark.empty()) {   // s008b's marks, here too
         auto m = form_label("⚠ " + mark, "acorn-mark");
@@ -127,28 +255,28 @@ void Shell::paint_form() {  // form: the picked record through its layout
         m->set_wrap(true);
         m->set_single_line_mode(false);
         m->set_max_width_chars(60);
-        outer->append(*m);
+        outer.append(*m);
     }
 
+}
+
+// s012a: one part of a layout (header, body or footer) drawn for the record
+// browse_value reads -- the picked one, or the List's row (m_paint_row).
+// `edit`: fields are boxes that save (the Form); else shown, not edited.
+Gtk::Fixed* Shell::layout_part(const core::Layout& L, core::Part part, bool edit, Gtk::Widget*& focus_back) {  // form: a part, drawn
+    const db::Table* t = browse_info();
+    const unsigned gen = m_view_gen;
+    std::vector<std::string> fields;
+    for (const auto& c : t->columns) fields.push_back(c.name);
+    const std::string row_id = m_paint_row >= 0 && static_cast<std::size_t>(m_paint_row) < m_browse_data.ids.size()
+                                   ? m_browse_data.ids[static_cast<std::size_t>(m_paint_row)] : m_browse_sel;
     auto fixed = Gtk::make_managed<Gtk::Fixed>();
     fixed->add_css_class("acorn-form");
-    // s010d: the Form shows the body -- the header / footer wait for the list
-    // view and reports.
-    fixed->set_size_request(L.width, std::max(1, L.height - L.header - L.footer));
-    fixed->set_name("shell.browse.form");
-    Gtk::Widget* focus_back = nullptr;
-
+    const int top = core::part_top(L, part);
+    fixed->set_size_request(L.width, std::max(1, core::part_height(L, part)));
     // s010c: lines and boxes first -- drawn behind the fields and words.
-    std::vector<const core::LayoutObject*> order;
-    for (const auto& o : L.objects)
-        if ((o.kind == core::ObjectKind::Line || o.kind == core::ObjectKind::Box) && core::part_of(L, o) == core::Part::Body)
-            order.push_back(&o);
-    for (const auto& o : L.objects)
-        if (o.kind != core::ObjectKind::Line && o.kind != core::ObjectKind::Box && core::part_of(L, o) == core::Part::Body)
-            order.push_back(&o);
-
-    for (const auto* op : order) {
-        const auto& o = *op;
+    for (int oi : core::part_objects(L, part)) {
+        const auto& o = L.objects[static_cast<std::size_t>(oi)];
         Gtk::Widget* w = nullptr;
         if (o.kind == core::ObjectKind::Line || o.kind == core::ObjectKind::Box) {
             auto da = Gtk::make_managed<Gtk::DrawingArea>();
@@ -171,7 +299,7 @@ void Shell::paint_form() {  // form: the picked record through its layout
             });
             w = da;
         } else if (o.kind == core::ObjectKind::Portal) {   // s011a
-            w = form_portal(o, *t, focus_back);
+            w = form_portal(o, *t, focus_back, edit);
         } else if (o.kind == core::ObjectKind::Related) {  // s011d
             w = form_related(o, *t);
         } else if (o.kind == core::ObjectKind::Text) {
@@ -189,12 +317,12 @@ void Shell::paint_form() {  // form: the picked record through its layout
             const db::Value* v = browse_value(o.field);
             const std::string shown = v ? db::cell_text(*v, col->type) : std::string{};
             const bool key = col->pk_position > 0;
-            const bool boxed = can && !key && col->type != db::FieldType::Container;
+            const bool boxed = edit && !key && col->type != db::FieldType::Container;
             if (!boxed) {
                 auto l = form_label(shown, shown.empty() ? "acorn-null" : nullptr);
                 l->add_css_class("acorn-form-static");
                 l->set_selectable(true);
-                if (key && can) l->set_tooltip_text("The record's key -- Acorn finds the record by it, so it is not changed here");
+                if (key && edit) l->set_tooltip_text("The record's key -- Acorn finds the record by it, so it is not changed here");
                 else if (!shown.empty()) l->set_tooltip_text(shown);
                 w = l;
             } else if (col->type == db::FieldType::Boolean) {
@@ -255,14 +383,9 @@ void Shell::paint_form() {  // form: the picked record through its layout
             }
         }
         w->set_size_request(o.w, o.h);
-        fixed->put(*w, o.x, o.y - L.header);
+        fixed->put(*w, o.x, o.y - top);
     }
-    outer->append(*fixed);
-
-    m_browse_painting = true;
-    m_browse_scroll.set_child(*outer);
-    m_browse_painting = false;
-    if (focus_back) focus_back->grab_focus();
+    return fixed;
 }
 
 // s011a: a PORTAL -- the records of o.from whose o.field points at the shown
@@ -275,7 +398,7 @@ void Shell::paint_form() {  // form: the picked record through its layout
 // record's key). "New" at the foot adds a related record with the link filled
 // in; a row's trash deletes it, following its own links as Delete Record does.
 // Each one step.
-Gtk::Widget* Shell::form_portal(const core::LayoutObject& o, const db::Table& parent, Gtk::Widget*& focus_back) {  // form: the related records
+Gtk::Widget* Shell::form_portal(const core::LayoutObject& o, const db::Table& parent, Gtk::Widget*& focus_back, bool edit) {  // form: the related records
     constexpr std::int64_t kShown = 200;   // more than that: a line says how many, Browse has the rest
     constexpr int kTrashW = 28;            // the row's delete button, and the names' row's matching gap
     const unsigned gen = m_view_gen;
@@ -291,7 +414,7 @@ Gtk::Widget* Shell::form_portal(const core::LayoutObject& o, const db::Table& pa
                             parent.name + "”. Nothing is lost -- link them again in the Graph, or remove the portal in Layouts.");
         return l;
     }
-    const bool can = m_writable && m_journal && db::Store::why_not_writable(*ft).empty();
+    const bool can = edit && m_writable && m_journal && db::Store::why_not_writable(*ft).empty();
     auto box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL);
     box->add_css_class("acorn-portal");
     box->set_name("form.portal." + o.from);
@@ -472,7 +595,8 @@ Gtk::Widget* Shell::form_portal(const core::LayoutObject& o, const db::Table& pa
         box->append(*add);
     } else if (!can) {
         box->set_tooltip_text("“" + o.from + "” records whose “" + o.field + "” points at this one -- " +
-                              (m_writable ? "“" + o.from + "” has no key, so they are shown, not edited"
+                              (!edit ? std::string("shown here; open the record's Form to edit them") :
+                               m_writable ? "“" + o.from + "” has no key, so they are shown, not edited"
                                           : std::string("this connection is read-only")));
     }
     return box;

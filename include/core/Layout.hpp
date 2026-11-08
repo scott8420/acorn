@@ -200,4 +200,15 @@ std::vector<std::string> related_not_on(const Layout& l, const RelatedLink& link
 // body is fitted. Returns 2 (the words and the value).
 int add_related(Layout& l, const RelatedLink& link, const std::string& shows);
 
+// ── s012a: the list view ────────────────────────────────────────────────────
+// Browse -> List draws a layout as rows: the header once at the top, the body
+// once per record, the footer once at the bottom. Where a part starts on the
+// layout (Header 0, Body the header's height, Footer footer_top) and how tall
+// it is (0 for a part the layout hasn't).
+int part_top(const Layout& l, Part p);
+int part_height(const Layout& l, Part p);
+// The objects of one part, in drawing order: lines and boxes first (behind),
+// then the rest -- each group in the layout's own order.
+std::vector<int> part_objects(const Layout& l, Part p);
+
 }  // namespace acorn::core

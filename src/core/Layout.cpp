@@ -394,4 +394,32 @@ int add_related(Layout& l, const RelatedLink& link, const std::string& shows) {
     return 2;
 }
 
+// ── s012a: the list view ────────────────────────────────────────────────────
+int part_top(const Layout& l, Part p) {
+    switch (p) {
+        case Part::Header: return 0;
+        case Part::Body:   return l.header;
+        case Part::Footer: return footer_top(l);
+    }
+    return 0;
+}
+
+int part_height(const Layout& l, Part p) {
+    switch (p) {
+        case Part::Header: return std::max(0, l.header);
+        case Part::Body:   return std::max(0, footer_top(l) - l.header);
+        case Part::Footer: return std::max(0, l.footer);
+    }
+    return 0;
+}
+
+std::vector<int> part_objects(const Layout& l, Part p) {
+    std::vector<int> out;
+    auto behind = [](const LayoutObject& o) { return o.kind == ObjectKind::Line || o.kind == ObjectKind::Box; };
+    for (int pass = 0; pass < 2; ++pass)
+        for (std::size_t i = 0; i < l.objects.size(); ++i)
+            if (behind(l.objects[i]) == (pass == 0) && part_of(l, l.objects[i]) == p) out.push_back(static_cast<int>(i));
+    return out;
+}
+
 }  // namespace acorn::core

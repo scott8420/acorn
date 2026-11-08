@@ -90,6 +90,11 @@ void Shell::build_browse_page() {  // browse: the Browse area
     m_browse_form_btn.set_label("Form");
     m_browse_form_btn.set_tooltip_text("One record at a time, through its layout -- edit it in place");
     m_browse_form_btn.set_group(m_browse_cards_btn);
+    // s012a: List -- the page through the same layout, a row per record.
+    m_browse_list_btn.set_label("List");
+    m_browse_list_btn.set_tooltip_text("Every record of the page through its layout, a row each -- "
+                                       "the header above, the footer below. Double-click a row for its Form");
+    m_browse_list_btn.set_group(m_browse_cards_btn);
     m_browse_cards_btn.set_active(true);
     auto to_view = [this](Gtk::ToggleButton& b, BrowseView v) {
         b.signal_toggled().connect([this, &b, v] {
@@ -109,9 +114,11 @@ void Shell::build_browse_page() {  // browse: the Browse area
     to_view(m_browse_cards_btn, BrowseView::Cards);
     to_view(m_browse_grid_btn, BrowseView::Grid);
     to_view(m_browse_form_btn, BrowseView::Form);
+    to_view(m_browse_list_btn, BrowseView::List);
     views->append(m_browse_cards_btn);
     views->append(m_browse_grid_btn);
     views->append(m_browse_form_btn);
+    views->append(m_browse_list_btn);
     bar->append(*views);
     // s006c: the record verbs (greyed by sync_undo when the table can't take them).
     m_browse_new.set_label("New Record");
@@ -296,6 +303,7 @@ void Shell::paint_browse() {  // browse: cards or grid
     m_browse_cards_btn.set_sensitive(browse_info() != nullptr);
     m_browse_grid_btn.set_sensitive(browse_info() != nullptr);
     m_browse_form_btn.set_sensitive(browse_info() != nullptr);
+    m_browse_list_btn.set_sensitive(browse_info() != nullptr);
     if (!browse_info() || m_browse_data.rows.empty()) {
         auto empty = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 8);
         empty->add_css_class("acorn-panel");
@@ -308,6 +316,7 @@ void Shell::paint_browse() {  // browse: cards or grid
         case BrowseView::Cards: paint_cards(); break;
         case BrowseView::Grid:  paint_grid();  break;
         case BrowseView::Form:  paint_form();  break;
+        case BrowseView::List:  paint_list();  break;
     }
 }
 

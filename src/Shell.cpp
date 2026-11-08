@@ -43,6 +43,7 @@ Shell::Shell()
       m_browse_cards_btn("shell.browse.cards"),
       m_browse_grid_btn("shell.browse.grid"),
       m_browse_form_btn("shell.browse.form"),
+      m_browse_list_btn("shell.browse.list"),
       m_browse_prev("shell.browse.prev"),
       m_browse_next("shell.browse.next"),
       m_browse_range("shell.browse.range"),

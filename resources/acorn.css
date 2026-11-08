@@ -217,6 +217,14 @@ window.acorn button:not(.acorn-primary):not(.titlebutton):disabled { opacity: 0.
 .acorn-portal-row button.acorn-portal-trash { min-height: 22px; min-width: 22px; padding: 0; margin: 1px 3px; opacity: 0.6; }
 .acorn-portal-row button.acorn-portal-trash:hover { opacity: 1; }
 .acorn-portal button.acorn-portal-new { min-height: 24px; padding: 0 8px; border-top: 1px solid alpha(@acorn_ink, 0.12); border-radius: 0; }
+/* s012a: the List view -- the header and footer once, a body per record */
+.acorn-form.acorn-list-header { border-radius: 12px 12px 0 0; background: shade(@acorn_panel, 0.92); }
+.acorn-form.acorn-list-footer { border-radius: 0 0 12px 12px; background: shade(@acorn_panel, 0.92); }
+.acorn-list, .acorn-list row { background: transparent; color: @acorn_ink; padding: 0; }
+.acorn-list row .acorn-form.acorn-list-body { border-radius: 0; border-bottom: 1px solid alpha(@acorn_ink, 0.10); }
+.acorn-list row:selected .acorn-form.acorn-list-body { box-shadow: inset 0 0 0 2px @acorn_amber; }
+.acorn-list row:selected .acorn-form.acorn-list-body.acorn-marked { box-shadow: inset 0 0 0 2px @acorn_amber, inset 4px 0 0 0 @acorn_amber; }
+.acorn-list row:focus-visible { outline: none; }
 .acorn-missing {
     padding: 0 8px;
     border: 1px dashed alpha(@acorn_ink, 0.45);

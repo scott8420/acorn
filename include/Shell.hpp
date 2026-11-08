@@ -150,6 +150,10 @@ private:
     void paint_form();                           // category: form: the picked record, drawn from its layout, editable in place
     core::Layout form_layout(bool* kept = nullptr) const;  // category: form: the shown table's layout -- kept in the solution, else the default
     void form_step(int delta);                   // category: form: the previous / next record (across pages)
+    // s012a -- the List view: the page through the picked layout, a row each.
+    void paint_list();                           // category: form: the header once, the body per record, the footer once
+    void form_caption(Gtk::Box& outer, const db::Table& t, const core::Layout& L, bool kept, const std::string& row_id);  // category: form: which layout (+ the picker, the mark)
+    Gtk::Fixed* layout_part(const core::Layout& L, core::Part part, bool edit, Gtk::Widget*& focus_back);  // category: form: one part drawn for the record browse_value reads
     void browse_select(int index);               // category: browse: the picked record (kept across views / pages)
     const db::Table* browse_info() const;        // category: browse: the shown table in m_schema (nullptr: none)
 
@@ -215,7 +219,7 @@ private:
     std::vector<core::PortalLink> portal_links(const std::string& table) const;  // category: layouts: s011a -- one-field links INTO the table
     std::vector<core::RelatedLink> related_links(const std::string& table) const;  // category: layouts: s011d -- one-field links OUT of the table
     Gtk::Widget* form_related(const core::LayoutObject& o, const db::Table& child);  // category: form: s011d -- a parent's field, shown
-    Gtk::Widget* form_portal(const core::LayoutObject& o, const db::Table& parent, Gtk::Widget*& focus_back);  // category: form: s011a -- the related records, listed (s011b: edited)
+    Gtk::Widget* form_portal(const core::LayoutObject& o, const db::Table& parent, Gtk::Widget*& focus_back, bool edit = true);  // category: form: s011a -- the related records, listed (s011b: edited)
     bool commit_related(const std::string& table, const std::string& row, const std::string& column,
                         const std::string& typed, const std::string& saved);  // category: form: s011b -- a portal cell -> verbs::set_field
 
@@ -326,7 +330,7 @@ private:
     widgets::Label                  m_browse_where;   // "Connect to a database first" / "“people” -- 312 records"
     Glib::RefPtr<Gtk::StringList>   m_browse_names;
     Gtk::DropDown                   m_browse_pick;
-    widgets::Named<Gtk::ToggleButton> m_browse_cards_btn, m_browse_grid_btn, m_browse_form_btn;
+    widgets::Named<Gtk::ToggleButton> m_browse_cards_btn, m_browse_grid_btn, m_browse_form_btn, m_browse_list_btn;
     widgets::Button                 m_browse_prev, m_browse_next;
     widgets::Label                  m_browse_range;   // "51–100 of 312"
     widgets::ScrolledWindow         m_browse_scroll;
@@ -335,8 +339,9 @@ private:
     db::Page                        m_browse_data;
     std::string                     m_browse_sel;     // the picked record's journal id ("" = none)
     int                             m_browse_sel_index = -1;
-    enum class BrowseView { Cards, Grid, Form };
-    BrowseView                      m_browse_view = BrowseView::Cards;   // s010a: + Form
+    enum class BrowseView { Cards, Grid, Form, List };
+    BrowseView                      m_browse_view = BrowseView::Cards;   // s010a: + Form; s012a: + List
+    int                             m_paint_row = -1; // s012a: the List row being drawn -- browse_value reads it (-1: the picked record)
     std::string                     m_form_focus;     // s010a: the Form box last focused (kept across a repaint)
     bool                            m_browse_painting = false;
     // s006c -- the record panel and its verbs.

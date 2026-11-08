@@ -2155,6 +2155,37 @@ void test_layouts_pure(const fs::path& dir) {
         check("related: round-trip in the .acorn -- {\"kind\": \"related\", \"field\", \"from\", \"shows\"}",
               rb && *rb == rs && text.find("\"related\"") != std::string::npos && text.find("\"shows\"") != std::string::npos, "");
     }
+    // s012a: the list view -- a layout's parts, each drawn on its own.
+    {
+        const auto card = sample_layout();   // header 48, footer 40, 424 tall
+        const auto hs = core::part_objects(card, core::Part::Header);
+        const auto bs = core::part_objects(card, core::Part::Body);
+        const auto fs = core::part_objects(card, core::Part::Footer);
+        bool parts_right = hs.size() + bs.size() + fs.size() == card.objects.size() && !hs.empty() && !fs.empty();
+        for (int i : hs) parts_right = parts_right && core::part_of(card, card.objects[i]) == core::Part::Header;
+        for (int i : bs) parts_right = parts_right && core::part_of(card, card.objects[i]) == core::Part::Body;
+        for (int i : fs) parts_right = parts_right && core::part_of(card, card.objects[i]) == core::Part::Footer;
+        check("list: every object in exactly one part -- the Contact Card's header, body and footer",
+              parts_right, std::to_string(hs.size()) + "/" + std::to_string(bs.size()) + "/" + std::to_string(fs.size()));
+        bool behind_first = true, seen_front = false;
+        for (int i : bs) {
+            const auto k = card.objects[i].kind;
+            const bool behind = k == core::ObjectKind::Line || k == core::ObjectKind::Box;
+            if (!behind) seen_front = true;
+            else if (seen_front) behind_first = false;
+        }
+        check("list: a part draws its lines and boxes first (behind the fields)", behind_first, "");
+        check("list: the parts' places -- header 0 / 48, body 48 / 336, footer 384 / 40",
+              core::part_top(card, core::Part::Header) == 0 && core::part_height(card, core::Part::Header) == 48 &&
+              core::part_top(card, core::Part::Body) == 48 && core::part_height(card, core::Part::Body) == 336 &&
+              core::part_top(card, core::Part::Footer) == 384 && core::part_height(card, core::Part::Footer) == 40,
+              std::to_string(card.height));
+        const auto plain = core::default_layout("contacts", {"id", "first_name"});
+        check("list: a layout with no parts is all body -- no header, no footer to draw",
+              core::part_height(plain, core::Part::Header) == 0 && core::part_height(plain, core::Part::Footer) == 0 &&
+              core::part_height(plain, core::Part::Body) == plain.height &&
+              core::part_objects(plain, core::Part::Body).size() == plain.objects.size(), "");
+    }
     // s010e: several picked.
     {
         std::vector<int> pk;
