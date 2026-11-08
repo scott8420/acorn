@@ -13,6 +13,7 @@
 #pragma once
 
 #include "core/Calc.hpp"
+#include "core/ValueList.hpp"
 #include "db/Engine.hpp"
 #include "db/Journal.hpp"
 
@@ -137,6 +138,18 @@ std::string summary_sql(const Connection& c, const Table& t, const std::vector<c
 std::expected<std::map<std::string, core::CalcValue>, Error>
 read_summaries(Connection& c, const Table& t, const std::map<std::string, core::Summary>& sums,
                const std::vector<Criterion>& crit = {}, const Schema* s = nullptr);
+
+// s014c -- what a value list offers. Typed: its values. From a field: ONE
+// SELECT DISTINCT of the field (and the shown field) of `from`, empties left
+// out, in the database's order of what is shown, at most core::kValueListMax
+// (`more`: there were others). Each item's value is the field's as Browse
+// shows it (cell_text) -- what a pick types into the box.
+struct ListItems {
+    std::vector<core::ListItem> items;
+    bool more = false;
+};
+std::string value_list_sql(const Connection& c, const core::ValueList& v);
+std::expected<ListItems, Error> read_value_list(Connection& c, const Schema& s, const core::ValueList& v);
 
 // "51–100 of 312" (en dash); "No records" when empty.
 std::string page_range(const Page& p);

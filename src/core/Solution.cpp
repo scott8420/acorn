@@ -78,6 +78,19 @@ const std::map<std::string, Summary>& Solution::summaries_of(const std::string& 
     return t == summaries.end() ? none : t->second;
 }
 
+const ValueList* Solution::list(const std::string& table, const std::string& name) const {
+    auto t = lists.find(table);
+    if (t == lists.end()) return nullptr;
+    auto n = t->second.find(name);
+    return n == t->second.end() ? nullptr : &n->second;
+}
+
+const std::map<std::string, ValueList>& Solution::lists_of(const std::string& table) const {
+    static const std::map<std::string, ValueList> none;
+    auto t = lists.find(table);
+    return t == lists.end() ? none : t->second;
+}
+
 std::optional<Solution> load_solution(const std::string& file) {
     std::ifstream in(file);
     if (!in) return std::nullopt;
@@ -129,6 +142,7 @@ std::optional<Solution> load_solution(const std::string& file) {
                             else if (kind == "related") o.kind = ObjectKind::Related; // s011d
                             else continue;   // a kind this Acorn doesn't know: not drawn, not invented
                             o.field = str_or_empty(oj, "field");
+                            if (o.kind == ObjectKind::Field) o.list = str_or_empty(oj, "list");   // s014c
                             o.text = str_or_empty(oj, "text");
                             o.align = parse_align(str_or_empty(oj, "align"));   // s012b: missing -> right
                             o.x = num_or_0(oj, "x");
@@ -170,6 +184,19 @@ std::optional<Solution> load_solution(const std::string& file) {
                     s.summaries[table][name] = Summary{table, name, *op, of};
                 }
             }
+        if (auto it = j.find("value_lists"); it != j.end() && it->is_object())   // s014c
+            for (auto& [table, named] : it->items()) {
+                if (!named.is_object()) continue;
+                for (auto& [name, vj] : named.items()) {
+                    if (!vj.is_object() || !check_value_list_name(name).empty()) continue;
+                    ValueList v{table, name, {}, str_or_empty(vj, "from"), str_or_empty(vj, "field"), str_or_empty(vj, "shows")};
+                    if (auto vs = vj.find("values"); vs != vj.end() && vs->is_array())
+                        for (const auto& x : *vs) if (x.is_string() && !x.get<std::string>().empty()) v.values.push_back(x.get<std::string>());
+                    if (v.typed() ? v.values.empty() || !v.from.empty() : v.from.empty() || !v.values.empty())
+                        continue;   // never half a list (or two kinds at once)
+                    s.lists[table][name] = std::move(v);
+                }
+            }
         return s;
     } catch (const std::exception&) {
         return std::nullopt;
@@ -199,7 +226,10 @@ bool save_solution(const std::string& file, const Solution& s) {
             nlohmann::json objects = nlohmann::json::array();
             for (const auto& o : l.objects) {
                 nlohmann::json oj;
-                if (o.kind == ObjectKind::Field)     { oj["kind"] = "field"; oj["field"] = o.field; }
+                if (o.kind == ObjectKind::Field) {
+                    oj["kind"] = "field"; oj["field"] = o.field;
+                    if (!o.list.empty()) oj["list"] = o.list;   // s014c: only when it has one
+                }
                 else if (o.kind == ObjectKind::Text) {
                     oj["kind"] = "text";  oj["text"] = o.text;
                     if (o.align != Align::Right) oj["align"] = align_name(o.align);   // s012b: only when not the default
@@ -230,6 +260,20 @@ bool save_solution(const std::string& file, const Solution& s) {
         for (const auto& [table, named] : s.summaries)
             for (const auto& [name, x] : named) sums[table][name] = {{"op", summary_op_name(x.op)}, {"of", x.field}};
         j["summaries"] = std::move(sums);
+    }
+    if (!s.lists.empty()) {   // s014c: only when there are some
+        nlohmann::json lists = nlohmann::json::object();
+        for (const auto& [table, named] : s.lists)
+            for (const auto& [name, v] : named) {
+                nlohmann::json vj = nlohmann::json::object();
+                if (v.typed()) vj["values"] = v.values;
+                else {
+                    vj["from"] = v.from; vj["field"] = v.field;
+                    if (!v.shows.empty()) vj["shows"] = v.shows;
+                }
+                lists[table][name] = std::move(vj);
+            }
+        j["value_lists"] = std::move(lists);
     }
     std::error_code ec;
     const fs::path p(file);

@@ -52,6 +52,7 @@ struct LayoutObject {
     std::vector<std::string> columns;  // Portal: the fields of `from` it shows, in order
     std::string shows;                 // Related: the field of `from` it shows
     Align align = Align::Right;        // s012b: Text -- how the words sit
+    std::string list;                  // s014c: Field -- the table's value list its box offers ("" none)
     bool operator==(const LayoutObject&) const = default;
 };
 

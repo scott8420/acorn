@@ -2,6 +2,7 @@
 #include "core/Calc.hpp"
 #include "core/Connections.hpp"
 #include "core/Layout.hpp"
+#include "core/ValueList.hpp"
 
 #include <map>
 #include <optional>
@@ -50,6 +51,11 @@ struct Solution {
     std::map<std::string, std::map<std::string, Summary>> summaries;
     const Summary* summary(const std::string& table, const std::string& name) const;
     const std::map<std::string, Summary>& summaries_of(const std::string& table) const;
+    // s014c: value lists, by table then name. On disk: "value_lists": { "<table>":
+    // { "<name>": {"values": [..]} | {"from": t, "field": f, "shows": s?} } }.
+    std::map<std::string, std::map<std::string, ValueList>> lists;
+    const ValueList* list(const std::string& table, const std::string& name) const;
+    const std::map<std::string, ValueList>& lists_of(const std::string& table) const;
     bool operator==(const Solution&) const = default;
 };
 

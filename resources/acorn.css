@@ -275,3 +275,25 @@ label.acorn-grid-heading { padding: 4px 10px; font-weight: 700; color: @acorn_am
 .acorn-summary-strip { padding: 8px 14px; border-radius: 10px; background: alpha(@acorn_amber, 0.08);
                        border: 1px solid @acorn_panel_edge; }
 .acorn-summary-value { color: @acorn_amber; font-feature-settings: "tnum"; }
+
+/* s014c: a typed value list's lines -- the skin's box, not Adwaita's white */
+window.acorn scrolledwindow.acorn-list-values {
+    background: rgba(0, 0, 0, 0.25);
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    border-radius: 8px;
+}
+window.acorn scrolledwindow.acorn-list-values:focus-within { border-color: @acorn_amber_dim; }
+window.acorn scrolledwindow.acorn-list-values textview,
+window.acorn scrolledwindow.acorn-list-values textview > text { background: transparent; color: @acorn_ink; }
+/* s014d: a field's value list in the Form / List -- as tall as its box */
+.acorn-form dropdown.acorn-form-pick > button { min-height: 24px; padding-top: 0; padding-bottom: 0; }
+.acorn-form menubutton.acorn-form-arrow > button { min-height: 24px; min-width: 24px; padding: 0 4px; }
+/* s014d: a value list's popover in the Form / List -- the panel's ground, not Adwaita's white */
+.acorn-form popover > contents,
+.acorn-form popover > arrow { background: @acorn_panel; color: @acorn_ink; border: 1px solid @acorn_panel_edge; }
+.acorn-form popover list,
+.acorn-form popover listview,
+.acorn-form popover scrolledwindow { background: transparent; color: @acorn_ink; }
+.acorn-form popover list > row:hover,
+.acorn-form popover listview > row:hover,
+.acorn-form popover listview > row:selected { background: rgba(255, 255, 255, 0.08); }

@@ -171,7 +171,8 @@ struct BoxDef {
 // table and name say which (core::Layout).
 // s014a: a calculation field -- in the solution too (core::Calc).
 // s014b: a summary -- in the solution too (core::Summary).
-using Record = std::variant<TableDef, RowDef, FieldData, BoxDef, core::Layout, core::Calc, core::Summary>;
+// s014c: a value list -- in the solution too (core::ValueList).
+using Record = std::variant<TableDef, RowDef, FieldData, BoxDef, core::Layout, core::Calc, core::Summary, core::ValueList>;
 
 // ── the DDL writer: one place, per dialect, shared by preview and act ─────────
 // The New Table window shows exactly the string the store will run.
@@ -268,7 +269,11 @@ public:
     static bool is_layout(const Id& id) { return id.rfind("layout:", 0) == 0; }
     // A record of the solution, not the database: a step of only these needs
     // no transaction and works on a read-only connection.
-    static bool is_local(const Id& id) { return is_box(id) || is_layout(id) || is_calc(id) || is_summary(id); }
+    static bool is_local(const Id& id) { return is_box(id) || is_layout(id) || is_calc(id) || is_summary(id) || is_list(id); }
+    // s014c: a value list, by table and name -- "vlist:<bytes in table>:<table>/<name>".
+    static Id list_id(const std::string& table, const std::string& name);
+    static bool parse_list_id(const Id& id, std::string& table, std::string& name);
+    static bool is_list(const Id& id) { return id.rfind("vlist:", 0) == 0; }
     // s014b: a summary, by table and name -- "summary:<bytes in table>:<table>/<name>".
     static Id summary_id(const std::string& table, const std::string& name);
     static bool parse_summary_id(const Id& id, std::string& table, std::string& name);
@@ -551,6 +556,17 @@ std::expected<void, Error> delete_calc(Journal& j, const std::string& table, con
 std::expected<void, Error> save_summary(Journal& j, const core::Summary& s, const std::string& was = {});
 // Delete Summary “n”. Refused in words when there's none by that name.
 std::expected<void, Error> delete_summary(Journal& j, const std::string& table, const std::string& name);
+
+// s014c -- value lists, kept in the solution (read-only connections too).
+// Save Value List keeps `v`: "New Value List “n”" / "Change Value List “n”"
+// (`was`: a new name in the same step, as save_calc). Refused in words: no
+// such table, anything core::check_value_list refuses (no name, a name another
+// list has, no values, a table / field it reads that isn't there), a binary
+// field to read or show. The same: no step. Layouts that offer a list by its
+// old name are left as they are (their box is a plain box until it's back).
+std::expected<void, Error> save_value_list(Journal& j, const core::ValueList& v, const std::string& was = {});
+// Delete Value List “n”. Refused in words when there's none by that name.
+std::expected<void, Error> delete_value_list(Journal& j, const std::string& table, const std::string& name);
 
 // What a design step would do to the live table, as the SQL put() will run
 // (the designer's preview): `want` is the table as the designer has it.

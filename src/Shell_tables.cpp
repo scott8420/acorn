@@ -163,6 +163,7 @@ void Shell::open_table(const std::string& name) {  // tables: go there, that tab
 
 void Shell::show_table(const std::string& name) {  // tables: paint one table's detail
     m_calc_box = nullptr;   // s014a: the section goes with the rest
+    m_vl_box = nullptr;     // s014c
     while (auto* c = m_table_detail.get_first_child()) m_table_detail.remove(*c);
     m_table_sel.clear();
     const db::Table* t = m_schema.table(name);
@@ -263,6 +264,14 @@ void Shell::show_table(const std::string& name) {  // tables: paint one table's 
     }
 
     if (t->kind == db::Table::Kind::View) return;   // views carry no keys, indexes or links
+
+    // s014c: value lists -- the solution's, offered by this table's layouts.
+    {
+        auto placeholder = Gtk::make_managed<Gtk::Box>();
+        m_vl_box = section("Value lists", *placeholder);
+        m_table_detail.append(*m_vl_box);
+        list_section(*t);
+    }
 
     // Indexes.
     auto ix = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 4);

@@ -680,7 +680,8 @@ void Shell::draw_layout(const Cairo::RefPtr<Cairo::Context>& cr, int w, int h) {
                                    : m_solution.calc(m_lay_table, o.field) ? std::string("  ·  Calculation")
                                    : m_solution.summary(m_lay_table, o.field)
                                          ? "  ·  " + core::summary_says(*m_solution.summary(m_lay_table, o.field))
-                                         : std::string{}),
+                                         : std::string{}) +
+                        (col && !o.list.empty() ? "  ·  ▾ " + o.list : std::string{}),   // s014c: its value list
                     o, Pango::Alignment::LEFT, 0.9);
         }
     }
@@ -931,6 +932,46 @@ void Shell::paint_inspector() {  // layouts: the picked object's field / words /
         m_lay_inspector.append(*side_label("Shows", "acorn-status"));
         m_lay_inspector.append(*dd);
         if (m_lay_focus == "layouts.field") focus_back = dd;
+        // s014c: the value list its box offers -- the table's own lists; one step.
+        const db::Table* lt = m_schema.table(m_lay_table);
+        if (lt && lt->column(o.field)) {
+            const auto& lists = m_solution.lists_of(m_lay_table);
+            auto lnames = std::make_shared<std::vector<std::string>>();
+            std::vector<Glib::ustring> lshown;
+            lnames->push_back({});
+            lshown.push_back("none -- a plain box");
+            if (!o.list.empty() && !lists.contains(o.list)) { lnames->push_back(o.list); lshown.push_back(o.list + " (missing)"); }
+            for (const auto& [n, v] : lists) { lnames->push_back(n); lshown.push_back(n); }
+            auto ld = Gtk::make_managed<Gtk::DropDown>(Gtk::StringList::create(lshown));
+            guint lat = 0;
+            for (std::size_t i = 0; i < lnames->size(); ++i) if ((*lnames)[i] == o.list) lat = static_cast<guint>(i);
+            ld->set_selected(lat);
+            ld->set_sensitive(can && (lnames->size() > 1));
+            ld->set_tooltip_text(lnames->size() > 1 ? "The choices the box offers as a drop-down in the Form and the List"
+                                                    : "Make a value list in Tables first");
+            remember(*ld, "layouts.list");
+            ld->property_selected().signal_changed().connect([this, ld, lnames, idx, gen] {
+                if (gen != m_lay_gen || idx >= m_lay.objects.size()) return;
+                const auto i = ld->get_selected();
+                if (i == GTK_INVALID_LIST_POSITION || i >= lnames->size() || (*lnames)[i] == m_lay.objects[idx].list) return;
+                auto l = m_lay;
+                l.objects[idx].list = (*lnames)[i];
+                const std::string what = (*lnames)[i].empty()
+                                             ? "Took the value list off " + curly(l.objects[idx].field)
+                                             : "Gave " + curly(l.objects[idx].field) + " the value list " + curly((*lnames)[i]);
+                Glib::signal_idle().connect_once([this, l, what] { keep_layout(l, what); });
+            });
+            m_lay_inspector.append(*side_label("Value list", "acorn-status"));
+            m_lay_inspector.append(*ld);
+            if (m_lay_focus == "layouts.list") focus_back = ld;
+            if (!o.list.empty() && !lists.contains(o.list))
+                m_lay_inspector.append(*side_label("There's no value list " + curly(o.list) + " now -- the box is a plain "
+                                                   "box until it's back (Ctrl+Z) or another is picked.", "acorn-mark"));
+            else if (const auto* v = m_solution.list(m_lay_table, o.list))
+                m_lay_inspector.append(*side_label("Offers " + core::value_list_says(*v) + (v->shows.empty() ? "" :
+                                                   " -- picks save the " + curly(v->field) + ", the box shows the " +
+                                                   curly(v->shows)) + ".", "acorn-status"));
+        }
     } else if (o.kind == core::ObjectKind::Portal) {   // s011a: what it lists (columns change in s011b+)
         if (core::missing_link(o, portal_links(m_lay_table)))
             m_lay_inspector.append(*side_label("Its link is gone: " + curly(o.from + "." + o.field) + " no longer points at " +

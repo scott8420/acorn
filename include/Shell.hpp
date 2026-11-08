@@ -240,6 +240,15 @@ private:
     void summary_editor(Gtk::Box& body, const db::Table& t, const std::map<std::string, core::CalcValue>& sums);  // category: calcs: s014b -- the summary editor in the Tables section
     void keep_summary(const core::Summary& s, const std::string& was);  // category: calcs: s014b -- verbs::save_summary, the note, a repaint
     void drop_summary(const std::string& table, const std::string& name);  // category: calcs: s014b -- verbs::delete_summary  // category: calcs: s014b -- the summary editor in the Tables section                  // category: calcs: a field saved in place -- the Form's / List's calculations worked out again  // category: calcs: the fields, then the calculations -- what a layout may show
+    // ── value lists (s014c) -- src/Shell_lists.cpp ──────────────────────────
+    void list_section(const db::Table& t);       // category: lists: the Tables area's Value lists section (list or editor)
+    const db::ListItems* form_list(const std::string& table, const std::string& name);  // category: lists: s014d -- a list's items, read once per view
+    Gtk::Widget* list_pick(const core::ValueList& v, const db::ListItems& li, const std::string& field,
+                           const std::string& shown, const std::string& row_id, unsigned gen);  // category: lists: s014d -- a key-showing list's drop-down
+    Gtk::Widget* list_arrow(const db::ListItems& li, Gtk::Entry* e, const std::string& field,
+                            const std::string& row_id, unsigned gen);  // category: lists: s014d -- a typed box's drop arrow
+    void keep_list(const core::ValueList& v, const std::string& was);  // category: lists: verbs::save_value_list, the note, a repaint
+    void drop_list(const std::string& table, const std::string& name);  // category: lists: verbs::delete_value_list
     std::vector<std::string> fields_of(const std::string& table) const;  // category: layouts: the live table's fields, in order
     std::vector<core::PortalLink> portal_links(const std::string& table) const;  // category: layouts: s011a -- one-field links INTO the table
     std::vector<core::RelatedLink> related_links(const std::string& table) const;  // category: layouts: s011d -- one-field links OUT of the table
@@ -479,6 +488,18 @@ private:
     core::SummaryOp                 m_sum_typed_op = core::SummaryOp::Total;
     std::vector<CalcShown>          m_calc_shown;
     Gtk::Box*                       m_calc_box = nullptr;   // the section's body, repainted alone
+    // s014c: the Value lists section -- its body, the table, the list being
+    // changed ("" with m_vl_new: a new one), and what is typed so far.
+    Gtk::Box*                       m_vl_box = nullptr;
+    std::string                     m_vl_table, m_vl_editing;
+    bool                            m_vl_new = false;
+    core::ValueList                 m_vl_typed;
+    std::string                     m_vl_typed_text;   // a typed list's lines as typed
+    // s014d: what each value list offers, read once per view (m_view_gen) --
+    // the List's rows share one read.
+    std::map<std::string, db::ListItems> m_form_lists;
+    std::map<std::string, std::string>   m_form_lists_error;
+    unsigned                        m_form_lists_gen = ~0u;
     bool                            m_table_painting = false;
 
     // The About window: a hide-on-close singleton, built lazily on first open.

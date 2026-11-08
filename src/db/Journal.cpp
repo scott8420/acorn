@@ -1067,6 +1067,15 @@ bool Store::parse_summary_id(const Id& id, std::string& table, std::string& name
     return parse_layout_id("layout:" + id.substr(8), table, name);
 }
 
+Store::Id Store::list_id(const std::string& table, const std::string& name) {
+    return "vlist:" + std::to_string(table.size()) + ":" + table + "/" + name;
+}
+
+bool Store::parse_list_id(const Id& id, std::string& table, std::string& name) {
+    if (!is_list(id)) return false;
+    return parse_layout_id("layout:" + id.substr(6), table, name);
+}
+
 Store::Id Store::field_id(const std::string& table, const std::string& column) {
     return "field:" + std::to_string(table.size()) + ":" + table + ":" + column;
 }
@@ -1107,6 +1116,7 @@ std::string Store::describe(const Id& id) {
     if (parse_layout_id(id, table, name)) return "the layout " + curly(name) + " of " + curly(table);
     if (parse_calc_id(id, table, name)) return "the calculation " + curly(name) + " of " + curly(table);
     if (parse_summary_id(id, table, name)) return "the summary " + curly(name) + " of " + curly(table);
+    if (parse_list_id(id, table, name)) return "the value list " + curly(name) + " of " + curly(table);
     return curly(name_of(id));
 }
 
@@ -1159,6 +1169,12 @@ std::optional<Record> Store::get(const Id& id) const {
         std::string t, n;
         if (!m_solution || !parse_summary_id(id, t, n)) return std::nullopt;
         if (const auto* x = m_solution->summary(t, n)) return *x;
+        return std::nullopt;
+    }
+    if (is_list(id)) {   // s014c: from the solution
+        std::string t, n;
+        if (!m_solution || !parse_list_id(id, t, n)) return std::nullopt;
+        if (const auto* v = m_solution->list(t, n)) return *v;
         return std::nullopt;
     }
     return std::nullopt;   // "new:..." -- a declaration, never a record
@@ -1438,6 +1454,7 @@ void Store::put_local(const Id& id, const std::optional<Record>& v) {
     if (!m_solution) {
         fail(Error::Code::Unsupported, is_box(id)    ? "there is no solution to keep the Graph's boxes in"
                                        : is_calc(id) || is_summary(id) ? "there is no solution to keep calculations in"
+                                       : is_list(id) ? "there is no solution to keep value lists in"
                                                      : "there is no solution to keep layouts in");
         return;
     }
@@ -1447,6 +1464,18 @@ void Store::put_local(const Id& id, const std::optional<Record>& v) {
         const std::string t = id.substr(4);
         if (v) m_solution->boxes[t] = {std::get<BoxDef>(*v).x, std::get<BoxDef>(*v).y};
         else   m_solution->boxes.erase(t);
+    } else if (is_list(id)) {   // s014c
+        std::string t, n;
+        if (!parse_list_id(id, t, n)) { fail(Error::Code::Internal, "not a value list: " + id); return; }
+        if (v && !std::holds_alternative<core::ValueList>(*v)) { fail(Error::Code::Internal, id + " given something else"); return; }
+        if (v) {
+            const auto& x = std::get<core::ValueList>(*v);
+            if (x.table != t || x.name != n) { fail(Error::Code::Internal, id + " given another value list"); return; }
+            m_solution->lists[t][n] = x;
+        } else if (auto it = m_solution->lists.find(t); it != m_solution->lists.end()) {
+            it->second.erase(n);
+            if (it->second.empty()) m_solution->lists.erase(it);
+        }
     } else if (is_summary(id)) {   // s014b
         std::string t, n;
         if (!parse_summary_id(id, t, n)) { fail(Error::Code::Internal, "not a summary: " + id); return; }
@@ -2671,6 +2700,52 @@ std::expected<void, Error> save_summary(Journal& j, const core::Summary& x, cons
     });
 }
 
+std::expected<void, Error> save_value_list(Journal& j, const core::ValueList& v, const std::string& was) {
+    Store& st = j.store();
+    if (!st.solution()) return std::unexpected(Error{Error::Code::Unsupported, "there is no solution to keep value lists in"});
+    st.forget_schema();
+    const Table* t = st.table_info(v.table);
+    if (st.failed()) { Error e = st.error(); st.clear_failed(); return std::unexpected(e); }
+    if (!t) return std::unexpected(Error{Error::Code::NotFound, "there's no table " + curly(v.table)});
+    const auto& lists = st.solution()->lists_of(v.table);
+    if (!was.empty() && !lists.contains(was))
+        return std::unexpected(Error{Error::Code::NotFound, curly(v.table) + " has no value list " + curly(was)});
+    const bool renaming = !was.empty() && was != v.name;
+    std::vector<std::string> taken;
+    for (const auto& [n, x] : lists) if (n != (was.empty() ? v.name : was)) taken.push_back(n);
+    std::vector<std::string> from_fields;
+    const Table* from = nullptr;
+    if (!v.typed() && !v.from.empty()) {
+        from = st.table_info(v.from);
+        if (st.failed()) { Error e = st.error(); st.clear_failed(); return std::unexpected(e); }
+        if (from) for (const auto& col : from->columns) from_fields.push_back(col.name);
+    }
+    if (auto why = core::check_value_list(v, taken, from ? &from_fields : nullptr); !why.empty())
+        return std::unexpected(Error{Error::Code::Unsupported, why});
+    if (from)
+        for (const auto* f : {&v.field, &v.shows})
+            if (!f->empty() && from->column(*f)->type == FieldType::Container)
+                return std::unexpected(Error{Error::Code::Unsupported, curly(*f) + " holds binary data -- it can't be offered in a list"});
+    const auto id = Store::list_id(v.table, v.name);
+    if (!renaming) {
+        const auto now = st.get(id);
+        if (now && std::get<core::ValueList>(*now) == v) return {};   // already kept: no step
+        return j.run((now ? "Change Value List " : "New Value List ") + curly(v.name), {id}, [&](Store& s) { s.put(id, v); });
+    }
+    const auto old = Store::list_id(v.table, was);
+    return j.run("Change Value List " + curly(was), {old, id}, [&](Store& s) {
+        s.put(old, std::nullopt);
+        s.put(id, v);
+    });
+}
+
+std::expected<void, Error> delete_value_list(Journal& j, const std::string& table, const std::string& name) {
+    const auto id = Store::list_id(table, name);
+    if (!j.store().get(id))
+        return std::unexpected(Error{Error::Code::NotFound, curly(table) + " has no value list " + curly(name)});
+    return j.run("Delete Value List " + curly(name), {id}, [&](Store& s) { s.put(id, std::nullopt); });
+}
+
 std::expected<void, Error> delete_summary(Journal& j, const std::string& table, const std::string& name) {
     const auto id = Store::summary_id(table, name);
     if (!j.store().get(id))
@@ -2953,6 +3028,16 @@ const std::vector<Verb>& all() {
         {"Delete Summary", [](Journal& j) { return delete_summary(j, kDesign, "how_many"); },
          [](Journal& j) { return design_fixture(j).and_then([&] {
              return save_summary(j, core::Summary{kDesign, "how_many", core::SummaryOp::Count, "title"}); }); }, true},
+        // s014c -- value lists, in the solution too.
+        {"New Value List", [](Journal& j) { return save_value_list(j, core::ValueList{kDesign, "kinds", {"a", "b"}}); },
+         design_fixture, true},
+        {"Change Value List", [](Journal& j) {
+             return save_value_list(j, core::ValueList{kDesign, "titles", {}, kDesign, "title"});
+         }, [](Journal& j) { return design_fixture(j).and_then([&] {
+             return save_value_list(j, core::ValueList{kDesign, "titles", {"x"}}); }); }, true},
+        {"Delete Value List", [](Journal& j) { return delete_value_list(j, kDesign, "gone"); },
+         [](Journal& j) { return design_fixture(j).and_then([&] {
+             return save_value_list(j, core::ValueList{kDesign, "gone", {"one"}}); }); }, true},
         {"Delete Record (Set Empty)", [](Journal& j) -> std::expected<void, Error> {
              auto row = newest_parent(j);
              if (!row) return std::unexpected(row.error());

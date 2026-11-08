@@ -278,6 +278,37 @@ read_summaries(Connection& c, const Table& t, const std::map<std::string, core::
     return out;
 }
 
+std::string value_list_sql(const Connection& c, const core::ValueList& v) {
+    const auto f = c.quote_ident(v.field);
+    const std::string sh = v.shows.empty() ? f : c.quote_ident(v.shows);
+    return "SELECT DISTINCT " + f + (v.shows.empty() ? "" : ", " + sh) + " FROM " + c.quote_ident(v.from) + " WHERE " + f +
+           " IS NOT NULL ORDER BY " + sh + (v.shows.empty() ? "" : ", " + f) + " LIMIT " +
+           std::to_string(core::kValueListMax + 1);
+}
+
+std::expected<ListItems, Error> read_value_list(Connection& c, const Schema& s, const core::ValueList& v) {
+    ListItems out;
+    if (v.typed()) { out.items = core::typed_items(v); return out; }
+    const Table* t = s.table(v.from);
+    if (!t) return std::unexpected(Error{Error::Code::NotFound, "there's no table \u201c" + v.from + "\u201d"});
+    const Column* f = t->column(v.field);
+    const Column* sh = v.shows.empty() ? f : t->column(v.shows);
+    if (!f || !sh)
+        return std::unexpected(Error{Error::Code::NotFound, "\u201c" + v.from + "\u201d has no field \u201c" +
+                                                            (f ? v.shows : v.field) + "\u201d"});
+    auto r = c.query(value_list_sql(c, v));
+    if (!r) return std::unexpected(r.error());
+    for (const auto& row : r->rows) {
+        if (out.items.size() >= static_cast<std::size_t>(core::kValueListMax)) { out.more = true; break; }
+        if (row.empty()) continue;
+        std::string value = cell_text(row[0], f->type);
+        if (value.empty()) continue;
+        std::string shown = v.shows.empty() || row.size() < 2 ? value : cell_text(row[1], sh->type);
+        out.items.push_back({std::move(value), shown.empty() ? std::string("(") + "empty" + ")" : std::move(shown)});
+    }
+    return out;
+}
+
 std::string cell_text(const Value& v, FieldType t) {
     switch (v.kind()) {
     case Value::Kind::Null: return {};

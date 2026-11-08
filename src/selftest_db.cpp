@@ -2727,6 +2727,194 @@ void test_summaries(Engine* e, const ConnectParams& ro, const std::string& P) {
     check(P + "summaries: the database untouched throughout", g.strays() == 0, std::to_string(g.strays()));
 }
 
+// ── s014c: value lists ───────────────────────────────────────────────────────
+void test_value_list_pure(const fs::path& dir) {
+    using core::ValueList;
+    const auto vals = core::parse_list_values("  home \n\nwork\r\nmobile\nhome\n  \nother");
+    check("value list: typed lines -- trimmed, blanks and repeats left out, in order; back as lines",
+          vals == std::vector<std::string>{"home", "work", "mobile", "other"} &&
+          core::list_values_text(vals) == "home\nwork\nmobile\nother" && core::parse_list_values("").empty(),
+          core::list_values_text(vals));
+    check("value list: names -- any words; refused: empty, a space at an end, two lines, over 64 letters",
+          core::check_value_list_name("Phone kinds").empty() && core::check_value_list_name("état").empty() &&
+          !core::check_value_list_name("").empty() && !core::check_value_list_name(" x").empty() &&
+          !core::check_value_list_name("a\nb").empty() && !core::check_value_list_name(std::string(65, 'x')).empty() &&
+          core::check_value_list_name(std::string(64, 'x')).empty(), "");
+    const std::vector<std::string> cf = {"id", "last_name", "city"};
+    const ValueList typed{"phones", "kinds", {"home", "work"}};
+    const ValueList cities{"contacts", "cities", {}, "contacts", "city"};
+    const ValueList who{"phones", "who", {}, "contacts", "id", "last_name"};
+    const auto a = core::check_value_list(typed, {"other"}, nullptr);
+    const auto b = core::check_value_list(who, {}, &cf);
+    const auto c = core::check_value_list(typed, {"kinds"}, nullptr);
+    const auto d = core::check_value_list(ValueList{"phones", "none", {}}, {}, nullptr);
+    const auto e = core::check_value_list(who, {}, nullptr);
+    const auto f = core::check_value_list(ValueList{"phones", "x", {}, "contacts", "nope"}, {}, &cf);
+    const auto g = core::check_value_list(ValueList{"phones", "x", {}, "contacts", "id", "id"}, {}, &cf);
+    const auto h = core::check_value_list(ValueList{"phones", "x", {}, "contacts", "id", "nope"}, {}, &cf);
+    check("value list: good ones pass; refused in words -- a name taken, no values, no table, no field, showing itself, "
+          "no field to show",
+          a.empty() && b.empty() && core::check_value_list(cities, {}, &cf).empty() &&
+          c.find("already has a value list") != std::string::npos && d == "Type at least one value" &&
+          e.find("no table") != std::string::npos && f.find("no field") != std::string::npos &&
+          g.find("already") != std::string::npos && h.find("no field") != std::string::npos, c + " | " + g);
+    check("value list: how each says what it offers",
+          core::value_list_says(typed) == "home · work" &&
+          core::value_list_says(ValueList{"t", "n", {"a", "b", "c", "d", "e", "f"}}) == "a · b · c · d  + 2 more" &&
+          core::value_list_says(cities) == "every “city” of “contacts”" &&
+          core::value_list_says(who) == "“id” of “contacts”, showing “last_name”" &&
+          core::typed_items(typed) == std::vector<core::ListItem>{{"home", "home"}, {"work", "work"}},
+          core::value_list_says(who));
+    std::string ti, na;
+    check("value list: ids round-trip; a value list is the solution's",
+          Store::parse_list_id(Store::list_id("a/b", "my list"), ti, na) && ti == "a/b" && na == "my list" &&
+          !Store::parse_list_id(Store::summary_id("a", "s"), ti, na) && Store::is_local(Store::list_id("x", "y")), "");
+    core::Solution sol;
+    sol.points_at.engine = "sqlite";
+    sol.points_at.path = (dir / "vl.sqlite").string();
+    sol.lists["phones"]["kinds"] = typed;
+    sol.lists["phones"]["who"] = who;
+    sol.lists["contacts"]["cities"] = cities;
+    auto l = core::default_layout("phones", {"id", "kind", "contact_id"});
+    for (auto& o : l.objects) if (o.kind == core::ObjectKind::Field && o.field == "kind") o.list = "kinds";
+    sol.layouts["phones"][l.name] = l;
+    const auto file = (dir / "vl.acorn").string();
+    auto back = core::save_solution(file, sol) ? core::load_solution(file) : std::nullopt;
+    std::ifstream in(file);
+    const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    check("value list: round-trip in the .acorn -- each kind, and a layout field's list",
+          back && *back == sol && text.find("\"value_lists\"") != std::string::npos && text.find("\"list\": \"kinds\"") != std::string::npos,
+          "");
+    {
+        std::ofstream o(dir / "vl_half.acorn");
+        o << R"({"acorn": 1, "value_lists": {"t": {"good": {"values": ["a", "b"]}, "empty": {"values": []},)"
+             R"( "both": {"values": ["a"], "from": "x", "field": "y"}, "nofrom": {"field": "y"},)"
+             R"( "src": {"from": "x", "field": "y"}}}})";
+    }
+    auto half = core::load_solution((dir / "vl_half.acorn").string());
+    check("value list: a broken one is skipped (no values, two kinds at once, no table), the rest reads",
+          half && half->list("t", "good") && half->list("t", "good")->values.size() == 2 && half->list("t", "src") &&
+          !half->list("t", "empty") && !half->list("t", "both") && !half->list("t", "nofrom"), "");
+    core::Solution plain;
+    plain.points_at = sol.points_at;
+    const auto pf = (dir / "vl_plain.acorn").string();
+    std::string ptext;
+    if (core::save_solution(pf, plain)) {
+        std::ifstream pi(pf);
+        ptext.assign((std::istreambuf_iterator<char>(pi)), std::istreambuf_iterator<char>());
+    }
+    check("value list: a solution without any never writes the key", !ptext.empty() && ptext.find("value_lists") == std::string::npos, "");
+}
+
+void test_value_lists(Engine* e, const ConnectParams& ro, const std::string& P) {
+    using core::ValueList;
+    auto c = e->open(ro);
+    if (!c) { check(P + "value lists: open read-only", false, c.error().message); return; }
+    Gate g(std::move(*c));
+    Journal j(g, e->dialect(), e->caps());
+    core::Solution sol;
+    j.store().set_solution(&sol, [] { return true; });
+    const ValueList kinds{"orders", "kinds", {"home", "work"}};
+    auto m = verbs::save_value_list(j, kinds);
+    check(P + "value lists: New Value List on a READ-ONLY connection -- a step, kept, nothing written to the database",
+          m && sol.list("orders", "kinds") && j.undo_label() == "New Value List “kinds”" && g.strays() == 0,
+          m ? j.undo_label() : m.error().message);
+    auto more = kinds;
+    more.values.push_back("mobile");
+    auto m2 = verbs::save_value_list(j, more);
+    auto same = verbs::save_value_list(j, more);
+    const auto after_same = j.undo_label();
+    auto rn = more;
+    rn.name = "phone kinds";
+    auto m3 = verbs::save_value_list(j, rn, "kinds");
+    check(P + "value lists: a change is \"Change Value List\"; the same again no step; a new name in the same step",
+          m2 && same && after_same == "Change Value List “kinds”" && m3 && !sol.list("orders", "kinds") &&
+          sol.list("orders", "phone kinds") && j.undo_label() == "Change Value List “kinds”",
+          m3 ? j.undo_label() : m3.error().message);
+    auto u = j.undo();
+    auto del = verbs::delete_value_list(j, "orders", "kinds");
+    auto ud = del ? j.undo() : std::expected<std::string, Error>(std::unexpected(del.error()));
+    check(P + "value lists: Ctrl+Z puts the old name back; Delete Value List, Ctrl+Z brings it back exactly",
+          u && del && ud && sol.list("orders", "kinds") && *sol.list("orders", "kinds") == more,
+          ud ? "" : ud.error().message);
+    const auto lbl = j.undo_label();
+    auto r1 = verbs::save_value_list(j, ValueList{"orders", "x", {}});
+    auto r2 = verbs::save_value_list(j, ValueList{"orders", "kinds", {"a"}}, "nosuch");
+    auto r3 = verbs::save_value_list(j, ValueList{"nosuch", "x", {"a"}});
+    auto r4 = verbs::save_value_list(j, ValueList{"orders", "x", {}, "nosuch", "id"});
+    auto r5 = verbs::save_value_list(j, ValueList{"orders", "x", {}, "customers", "nosuch"});
+    auto r6 = verbs::save_value_list(j, ValueList{"orders", "x", {}, "customers", "photo"});
+    auto r7 = verbs::save_value_list(j, ValueList{"orders", "x", {}, "customers", "id", "photo"});
+    auto r8 = verbs::delete_value_list(j, "orders", "nosuch");
+    auto two = verbs::save_value_list(j, ValueList{"orders", "two", {"z"}});
+    auto r9 = two ? verbs::save_value_list(j, ValueList{"orders", "kinds", {"z"}}, "two")
+                  : std::expected<void, Error>(std::unexpected(two.error()));
+    check(P + "value lists: refused in words, no step -- no values, renaming one that isn't there, no table, no table to read, "
+              "no field, a binary field read or shown, deleting one that isn't there, a name another has",
+          !r1 && !r2 && !r3 && !r4 && r4.error().message.find("no table") != std::string::npos && !r5 && !r6 &&
+          r6.error().message.find("binary") != std::string::npos && !r7 && !r8 && two && !r9 &&
+          r9.error().message.find("already has a value list") != std::string::npos,
+          (r6 ? std::string("kept!") : r6.error().message) + " | " + (r9 ? std::string("kept!") : r9.error().message));
+    (void)lbl;
+    // s014d: a layout field offers a list by name -- one Change Layout step; the
+    // list deleted leaves the layout as it was (its box plain until it's back).
+    auto lay = core::default_layout("orders", {"id", "customer_id"});
+    for (auto& o : lay.objects) if (o.kind == core::ObjectKind::Field && o.field == "customer_id") o.list = "kinds";
+    auto ls = verbs::save_layout(j, lay);
+    auto ld = ls ? verbs::delete_value_list(j, "orders", "kinds") : std::expected<void, Error>(std::unexpected(ls.error()));
+    const core::Layout* kept = sol.layout("orders", lay.name);
+    bool still = false;
+    if (kept) for (const auto& o : kept->objects) if (o.field == "customer_id" && o.kind == core::ObjectKind::Field) still = o.list == "kinds";
+    auto lu = ld ? j.undo() : std::expected<std::string, Error>(std::unexpected(ld.error()));
+    check(P + "value lists: a layout field offers one by name (a layout step); deleting the list leaves the layout as it was",
+          ls && ld && still && lu && sol.list("orders", "kinds") && g.strays() == 0, ls ? (ld ? "" : ld.error().message) : ls.error().message);
+
+    // What each offers -- against the same set worked out in C++ over every record.
+    auto sch = g.introspect();
+    const Table* t = sch ? sch->table("customers") : nullptr;
+    if (!t) { check(P + "value lists: the fixture's table", false, ""); return; }
+    auto all = read_page(g, *t, PageRequest{0, 10000});
+    std::size_t ii = 0, in = 0;
+    for (std::size_t i = 0; i < t->columns.size(); ++i) {
+        if (t->columns[i].name == "id") ii = i;
+        if (t->columns[i].name == "name") in = i;
+    }
+    std::set<std::string> names;
+    std::map<std::string, std::string> name_of;   // id -> name
+    for (const auto& row : all ? all->rows : std::vector<Row>{}) {
+        const std::string nm = cell_text(row[in], t->columns[in].type);
+        if (!nm.empty()) names.insert(nm);
+        name_of[cell_text(row[ii], t->columns[ii].type)] = nm;
+    }
+    auto ty = read_value_list(g, *sch, more);
+    check(P + "value lists: a typed list offers its values, in order",
+          ty && ty->items == std::vector<core::ListItem>{{"home", "home"}, {"work", "work"}, {"mobile", "mobile"}} && !ty->more, "");
+    auto byname = read_value_list(g, *sch, ValueList{"orders", "n", {}, "customers", "name"});
+    std::set<std::string> got;
+    bool each_once = byname.has_value(), self_shown = true;
+    for (const auto& it : byname ? byname->items : std::vector<core::ListItem>{}) {
+        each_once = each_once && got.insert(it.value).second;
+        self_shown = self_shown && it.shown == it.value;
+    }
+    check(P + "value lists: from a field -- every distinct value once, as Browse shows it (one SELECT DISTINCT)",
+          byname && !names.empty() && got == names && each_once && self_shown && !byname->more,
+          byname ? std::to_string(got.size()) + " vs " + std::to_string(names.size()) : byname.error().message);
+    auto who = read_value_list(g, *sch, ValueList{"orders", "who", {}, "customers", "id", "name"});
+    bool pairs = who.has_value() && who->items.size() == name_of.size();
+    bool ordered = true;
+    for (std::size_t i = 0; who && i < who->items.size(); ++i) {
+        const auto& it = who->items[i];
+        pairs = pairs && name_of.contains(it.value) && name_of[it.value] == it.shown;
+        if (i && who->items[i - 1].shown > it.shown && e->dialect() != Dialect::MariaDB) ordered = false;   // MariaDB's order ignores case
+    }
+    check(P + "value lists: a key showing another field -- each id with its own name, in the order of the names",
+          pairs && ordered, who ? std::to_string(who->items.size()) + " vs " + std::to_string(name_of.size()) : who.error().message);
+    auto gone = read_value_list(g, *sch, ValueList{"orders", "g", {}, "customers", "nosuch"});
+    check(P + "value lists: a field that's gone -- refused in words, no SELECT run",
+          !gone && gone.error().message.find("no field") != std::string::npos, "");
+    check(P + "value lists: the database untouched throughout", g.strays() == 0, std::to_string(g.strays()));
+}
+
 // ── s009b: the Address Book starter ──────────────────────────────────────────
 void test_starter(Journal& j, Gate& g, const std::string& P) {
     auto count = [&](const std::string& t) {
@@ -3204,6 +3392,7 @@ void test_server(Engine* e, const char* env_name, const char* admin_db) {
     test_layouts(e, T.ro, std::string(e->id()) + ": "); // s010
     test_calcs(e, T.ro, std::string(e->id()) + ": ");   // s014a
     test_summaries(e, T.ro, std::string(e->id()) + ": ");   // s014b
+    test_value_lists(e, T.ro, std::string(e->id()) + ": "); // s014c
 
     auto a2 = e->open(admin);
     std::string why = a2 ? "" : a2.error().message;
@@ -3259,6 +3448,8 @@ void db_tests(CheckFn fn, int& skip_count) {
         test_calcs(e, T.ro, "sqlite: ");      // s014a: calculations kept on a read-only connection
         test_summary_pure(tmp.p);             // s014b
         test_summaries(e, T.ro, "sqlite: ");  // s014b: summaries kept read-only, worked out by the database
+        test_value_list_pure(tmp.p);          // s014c
+        test_value_lists(e, T.ro, "sqlite: ");  // s014c: value lists kept read-only, read from a field
         {   // s005b: the door, on its own fresh fixture file
             Target J = T;
             J.rw.path = (tmp.p / "journal.sqlite").string();

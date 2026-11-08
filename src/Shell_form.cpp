@@ -424,7 +424,14 @@ Gtk::Fixed* Shell::layout_part(const core::Layout& L, core::Part part, bool edit
                 });
                 holder->append(*cb);
                 w = holder;
+            } else if (const core::ValueList* kv = o.list.empty() ? nullptr : m_solution.list(t->name, o.list);
+                       kv && !kv->shows.empty() && form_list(t->name, o.list)) {
+                // s014d: a key showing another field -- a pick-only drop-down of the names.
+                w = list_pick(*kv, *form_list(t->name, o.list), o.field, shown, row_id, gen);
             } else {
+                // s014d: any other value list adds a drop arrow beside the box.
+                const core::ValueList* vl = o.list.empty() ? nullptr : m_solution.list(t->name, o.list);
+                const db::ListItems* li = vl ? form_list(t->name, o.list) : nullptr;
                 auto e = Gtk::make_managed<Gtk::Entry>();
                 e->set_name("form.field." + o.field);
                 e->add_css_class("acorn-form-entry");
@@ -435,12 +442,19 @@ Gtk::Fixed* Shell::layout_part(const core::Layout& L, core::Part part, bool edit
                 if (col->type == db::FieldType::Time) e->set_placeholder_text("HH:MM:SS");
                 if (col->type == db::FieldType::Timestamp) e->set_placeholder_text("YYYY-MM-DD HH:MM:SS");
                 wire_field_entry(e, row_id, o.field, &m_view_gen, gen);
+                Gtk::Widget* arrow = li ? list_arrow(*li, e, o.field, row_id, gen) : nullptr;   // s014d
                 auto focus = Gtk::EventControllerFocus::create();
                 const std::string colname = o.field;
                 focus->signal_enter().connect([this, colname, gen] { if (gen == m_view_gen) m_form_focus = colname; });
                 e->add_controller(focus);
                 if (o.field == m_form_focus) focus_back = e;
                 w = e;
+                if (arrow && col->type != db::FieldType::Date) {   // s014d: the box + its list's arrow
+                    auto line = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 4);
+                    line->append(*e);
+                    line->append(*arrow);
+                    w = line;
+                }
                 if (col->type == db::FieldType::Date) {   // a date box: the entry + a calendar
                     e->set_placeholder_text("YYYY-MM-DD");
                     auto line = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 4);
@@ -462,6 +476,7 @@ Gtk::Fixed* Shell::layout_part(const core::Layout& L, core::Part part, bool edit
                     });
                     pop->set_child(*cal);
                     pick->set_popover(*pop);
+                    if (arrow) line->append(*arrow);   // s014d: a list's days, beside the calendar
                     line->append(*pick);
                     w = line;
                 }
