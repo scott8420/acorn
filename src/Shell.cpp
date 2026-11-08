@@ -3,6 +3,7 @@
 #include "ShortcutsDialog.hpp"  // ditto -- same singleton shape, same dtor requirement
 #include "DesignTableWindow.hpp"   // s007b
 #include "NewTableWindow.hpp"   // ditto (s005b)
+#include "ImportWindow.hpp"     // ditto (s018b)
 #include "Log.hpp"
 
 // Shell.cpp -- GLUE. The ctor and the ordered build_ui() pass live here; every
@@ -56,6 +57,7 @@ Shell::Shell()
       m_browse_show_all("shell.browse.show_all"),
       m_browse_scripts("shell.browse.scripts"),
       m_browse_export("shell.browse.export"),
+      m_browse_import("shell.browse.import"),
       m_record_scroll("shell.browse.record"),
       m_graph_page("shell.graph.page", Gtk::Orientation::VERTICAL, 12),
       m_graph_where("shell.graph.where"),

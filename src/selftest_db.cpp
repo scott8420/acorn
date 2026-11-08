@@ -12,6 +12,7 @@
 #include "db/Print.hpp"
 #include "db/Script.hpp"
 #include "db/Export.hpp"
+#include "db/Import.hpp"
 #include <sstream>
 #include "core/Print.hpp"
 #include "db/Convert.hpp"
@@ -3354,6 +3355,160 @@ void test_export_book(Gate& g, const std::string& P) {
     check(P + "export: reads only -- nothing went near the door", g.strays() == strays0, std::to_string(g.strays()));
 }
 
+// ── s018b: import ──────────────────────────────────────────────────────────
+void test_import_pure() {
+    // What Export writes reads back exactly: the separator, quotes, line breaks, end spaces, empties.
+    const std::vector<std::string> tricky{"plain", "a,b", "say \"hi\"", "two\r\nlines", " pad ", "", "a\tb", "\"", "x\ny"};
+    bool same = true;
+    for (const char sep : {',', '\t'}) {
+        const std::string text = export_line({"h1", "h2"}, sep) + "\r\n" + export_line(tricky, sep) + "\r\n" +
+                                 export_line({"last", ""}, sep) + "\r\n";
+        auto d = read_delimited(text, sep);
+        same = same && d && d->rows.size() == 3 && d->rows[1] == tricky && d->rows[2] == std::vector<std::string>{"last", ""} &&
+               d->lines == std::vector<std::size_t>{1, 2, 5};
+    }
+    check("import: what Export writes reads back exactly -- comma and tab; quotes, line breaks, end spaces, empties; "
+          "each record's first line counted", same, "");
+    auto bom = read_delimited("\xEF\xBB\xBF" "a,b\nc,d\re,f", ',');
+    auto open = read_delimited("a,b\n\"never,closed\n", ',');
+    auto loose = read_delimited("5\" pipe,x\n\nlast", ',');
+    check("import: a byte-order mark skipped; LF, CR and CRLF end a record; a quote never closed refused with its line; "
+          "a quote inside a value kept; an empty line is a record of nothing",
+          bom && bom->rows.size() == 3 && bom->rows[0][0] == "a" && bom->rows[2] == std::vector<std::string>{"e", "f"} && !open &&
+              open.error() == "line 2: a quote is never closed" && loose && loose->rows.size() == 3 &&
+              loose->rows[0][0] == "5\" pipe" && loose->rows[1].empty() && loose->lines[2] == 3 && loose->width() == 2,
+          open ? "" : open.error());
+    check("import: comma or tab -- by the ending, else the first line (outside quotes)",
+          guess_separator("a\tb", "x.csv") == ',' && guess_separator("a,b", "x.TSV") == '\t' &&
+              guess_separator("a\tb\tc,d", "x.txt") == '\t' && guess_separator("\"a\tb\",c", "x") == ',', "");
+    Table t;
+    t.name = "contacts";
+    auto col = [](const char* n, FieldType ty) { Column c; c.name = n; c.type = ty; return c; };
+    t.columns = {col("id", FieldType::Integer), col("last_name", FieldType::Text), col("photo", FieldType::Container),
+                 col("birthday", FieldType::Date), col("seen", FieldType::Timestamp), col("at", FieldType::Time),
+                 col("vip", FieldType::Boolean), col("age", FieldType::Integer)};
+    t.columns[0].pk_position = 1;
+    t.columns[0].auto_increment = true;
+    t.columns[0].nullable = false;
+    const auto m = match_fields({"ID", " Last_Name ", "photo", "nope", "last_name", "AGE"}, t);
+    check("import: the first line matched to fields case-blind, each once -- the counting key and binary left out",
+          m == std::vector<std::string>{"", "last_name", "", "", "", "age"} && looks_like_header({"x", "Birthday"}, t) &&
+              !looks_like_header({"Ada", "1990-07-14"}, t) &&
+              import_fields(t) == std::vector<std::string>{"id", "last_name", "birthday", "seen", "at", "vip", "age"}, "");
+    auto v = [&](const char* s, std::size_t k) { return import_value(s, t.columns[k]).has_value(); };
+    auto why = [&](const char* s, std::size_t k) { auto r = import_value(s, t.columns[k]); return r ? std::string{} : r.error(); };
+    check("import: dates, times and timestamps must look like them (ISO, as Export writes); the rest by parse_field",
+          v("1990-07-14", 3) && v(" 2024-02-29 ", 3) && !v("2023-02-29", 3) && !v("14/07/1990", 3) && v("", 3) &&
+              why("1990-13-01", 3) == "“birthday” needs a date like 1990-07-14" && v("2026-11-07 09:30:00", 4) &&
+              v("2026-11-07T09:30:00.123+00:00", 4) && v("2026-11-07", 4) && !v("2026-11-07 25:00", 4) && v("09:30", 5) &&
+              v("23:59:59.5", 5) && !v("9:30", 5) && v("Yes", 6) && why("maybe", 6) == "“vip” is Yes or No" &&
+              why("4x", 7) == "“age” needs a whole number",
+          why("1990-13-01", 3));
+    check("import: a plan names each field once, at least one, never binary or missing",
+          check_import(t, {{"", "last_name", "age"}, true}).empty() &&
+              check_import(t, {{"age", "age"}, true}) == "“age” is picked for two columns" &&
+              check_import(t, {{"", ""}, true}) == "Pick a field for at least one column" &&
+              check_import(t, {{"photo"}, true}) == "“photo” is binary -- it can't come from a text file" &&
+              check_import(t, {{"x"}, true}) == "“contacts” has no field “x”", check_import(t, {{"age", "age"}, true}));
+    auto d = read_delimited("last_name,birthday,age\r\nAda,1815-12-10,36\r\n\"Two\nLines\",1990-13-01,1\r\n\r\n"
+                            "Bo,,x\r\nCy,,2,extra\r\nDi,,3,\r\n", ',');
+    ImportPlan p{{"last_name", "birthday", "age"}, true};
+    const auto pv = d ? import_preview(t, *d, p) : ImportResult{};
+    check("import: the preview -- good rows counted, refusals by the line each record starts on, an empty line passed by, "
+          "an empty extra value let be",
+          pv.rows == 5 && pv.records == 2 && pv.refused.size() == 3 && pv.refused[0].line == 3 &&
+              refusal_says(pv.refused[0]) == "Line 3: “birthday” needs a date like 1990-07-14" && pv.refused[1].line == 6 &&
+              pv.refused[1].why == "“age” needs a whole number" && pv.refused[2].line == 7 &&
+              pv.refused[2].why == "it has 4 values -- the file's columns are 3",
+          pv.refused.empty() ? "" : refusal_says(pv.refused[0]));
+    check("import: the words -- the step's label and the note",
+          import_label(40, "contacts") == "Import 40 records into “contacts”" && import_label(1, "c") == "Import 1 record into “c”" &&
+              import_says({38, 40, {{7, "x"}, {9, "y"}}}, "contacts") == "Imported 38 records into “contacts” -- 2 refused" &&
+              import_says({1, 1, {}}, "c") == "Imported 1 record into “c”", import_says({38, 40, {{7, "x"}, {9, "y"}}}, "contacts"));
+}
+
+// On the sample Address Book, writable: Export's file read back through Import --
+// every record again, the same values, ONE step; a file with bad rows takes the
+// good ones and lists the rest; Ctrl+Z puts it all back.
+void test_import_book(Journal& j, Gate& g, const std::string& P) {
+    auto count = [&](const std::string& t) {
+        auto r = g.query("SELECT COUNT(*) FROM " + g.quote_ident(t));
+        return r && !r->rows.empty() ? num(r->rows[0][0]).value_or(-1) : -1.0;
+    };
+    auto sch = g.introspect();
+    const Table* ct = sch ? sch->table("contacts") : nullptr;
+    if (!ct) { check(P + "import: the sample's contacts", false, ""); return; }
+    const double n0 = count("contacts");
+    const int strays0 = j.strays();
+    // A record whose notes need every kind of quoting.
+    const std::string notes = "a, \"quoted\"\r\nsecond line\tand a tab ";
+    auto odd = verbs::new_record(j, "contacts", {"first_name", "last_name", "notes"}, {Value("Odd"), Value("O'Brien, Jr."), Value(notes)});
+    // Every field (the key too) out, as CSV.
+    ExportRequest all;
+    all.fields = table_export_fields(*ct, {});
+    all.sort = "last_name";
+    std::ostringstream out;
+    auto ex = export_records(g, *sch, *ct, all, out);
+    auto d = ex ? read_delimited(out.str(), ',') : std::unexpected(std::string("export failed"));
+    const auto first = d && !d->rows.empty() ? d->rows[0] : std::vector<std::string>{};
+    ImportPlan plan{match_fields(first, *ct), looks_like_header(first, *ct)};
+    const bool key_left = !plan.fields.empty() && plan.fields[0].empty();
+    auto im = d ? import_records(j, *ct, *d, plan) : std::unexpected(Error{Error::Code::Internal, d.error()});
+    check(P + "import: Export's file read back -- the key left to count up, every record in, ONE step named for it",
+          odd && im && plan.header && key_left && im->records == n0 + 1 && im->refused.empty() && count("contacts") == 2 * (n0 + 1) &&
+              j.undo_label() == import_label(static_cast<std::int64_t>(n0 + 1), "contacts"),
+          im ? (im->refused.empty() ? j.undo_label() : refusal_says(im->refused[0])) : im.error().message);
+    // The same values: every non-key line of a second export appears exactly twice as often as before.
+    ExportRequest nk;
+    for (const auto& f : all.fields) if (f != "id") nk.fields.push_back(f);
+    std::ostringstream o1, o2;
+    (void)j.undo();
+    auto e1 = export_records(g, *sch, *ct, nk, o1);
+    (void)j.redo();
+    auto e2 = export_records(g, *sch, *ct, nk, o2);
+    std::multiset<std::string> m1, m2;
+    auto rows_of = [](const std::string& s, std::multiset<std::string>& m) {
+        auto r = read_delimited(s, ',');
+        if (r) for (std::size_t i = 1; i < r->rows.size(); ++i) m.insert(export_line(r->rows[i], ','));
+    };
+    rows_of(o1.str(), m1);
+    rows_of(o2.str(), m2);
+    bool doubled = e1 && e2 && !m1.empty() && m2.size() == 2 * m1.size();
+    for (const auto& line : m1) doubled = doubled && m2.count(line) == 2 * m1.count(line);
+    bool odd_back = false;
+    if (auto r = read_delimited(o2.str(), ','); r)
+        for (const auto& row : r->rows) odd_back = odd_back || std::find(row.begin(), row.end(), notes) != row.end();
+    check(P + "import: the same values came back -- dates, empties, a note with a comma, quotes, a line break, a tab, an end space; "
+              "Ctrl+Z took them away, redo put them back",
+          doubled && odd_back, std::to_string(m1.size()) + " / " + std::to_string(m2.size()));
+    auto u = j.undo();
+    check(P + "import: Ctrl+Z puts back the whole import -- one step", u && *u == import_label(static_cast<std::int64_t>(n0 + 1), "contacts") &&
+          count("contacts") == n0 + 1, u ? *u : u.error().message);
+    (void)j.undo();   // the odd record
+    // A file with refusals: no names line, its columns picked by hand.
+    const std::string text = "Zed,Zimmer,1990-07-14\nBad,Date,1990-02-30\n\nTwo,\"Line\nName\",\nMore,Values,,here\nLast,One,2001-01-01\n";
+    auto d2 = read_delimited(text, ',');
+    ImportPlan p2{{"first_name", "last_name", "birthday"}, false};
+    auto im2 = d2 ? import_records(j, *ct, *d2, p2) : std::unexpected(Error{Error::Code::Internal, d2.error()});
+    check(P + "import: bad rows listed by line, never half a row -- the good three in, one step",
+          im2 && im2->rows == 5 && im2->records == 3 && im2->refused.size() == 2 && im2->refused[0].line == 2 &&
+              im2->refused[1].line == 6 && count("contacts") == n0 + 3 &&
+              j.undo_label() == "Import 3 records into “contacts”",
+          im2 ? (im2->refused.empty() ? j.undo_label() : refusal_says(im2->refused[0])) : im2.error().message);
+    auto u2 = j.undo();
+    const std::string top = j.undo_label();
+    auto none = read_delimited("x,y\n", ',');
+    auto im3 = none ? import_records(j, *ct, *none, {{"", ""}, false}) : std::unexpected(Error{Error::Code::Internal, ""});
+    auto im4 = read_delimited("Only,Bad,nope\n", ',');
+    auto r4 = im4 ? import_records(j, *ct, *im4, p2) : std::unexpected(Error{Error::Code::Internal, ""});
+    check(P + "import: Ctrl+Z puts it back; a plan with no field refused before anything; nothing made is no step",
+          u2 && count("contacts") == n0 && !im3 && im3.error().message == "Pick a field for at least one column" && r4 &&
+              r4->records == 0 && r4->refused.size() == 1 && j.undo_label() == top && !j.in_batch(),
+          im3 ? "" : im3.error().message);
+    check(P + "import: every write through the door -- no strays", j.strays() == strays0 && count("contacts") == n0,
+          std::to_string(j.strays()));
+}
+
 // On the sample Address Book, writable: whole runs through ScriptRun.
 void test_scripts(Journal& j, Gate& g, core::Solution& sol, const std::string& P) {
     using core::Script; using K = core::StepKind;
@@ -3855,6 +4010,7 @@ void test_sample(Journal& j, Gate& g, const std::string& P) {
     test_report_book(g, sol, P);   // s015b
     test_scripts(j, g, sol, P);    // s017a
     test_export_book(g, P);        // s018a
+    test_import_book(j, g, P);     // s018b
     {   // s016
         const auto* lab = sol.layout("addresses", kSampleLabelsName);
         check(P + "labels: the sample's Mailing Labels kept beside the report", lab && *lab == sample_labels_layout(), "");
@@ -4163,6 +4319,7 @@ void db_tests(CheckFn fn, int& skip_count) {
         test_script_pure(tmp.p);              // s017a: scripts
         test_button_pure(tmp.p);              // s017b: buttons
         test_export_pure();                   // s018a: export
+        test_import_pure();                   // s018b: import
         {   // s005b: the door, on its own fresh fixture file
             Target J = T;
             J.rw.path = (tmp.p / "journal.sqlite").string();

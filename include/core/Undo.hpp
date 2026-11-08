@@ -175,6 +175,8 @@ public:
         m_open.sel_before = selection();
     }
     bool in_group() const { return m_group; }
+    // s018b: the group's label, known only at its end (an import's count).
+    void name_group(const std::string& label) { if (m_group) m_open.label = label; }
     std::vector<Id> group_ids() const {
         std::vector<Id> v;
         if (m_group) for (const auto& e : m_open.entries) v.push_back(e.id);

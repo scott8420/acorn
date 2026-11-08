@@ -73,12 +73,14 @@
 //   "Where are links drawn / made?"     -> Shell_graph.cpp    (paint_graph / on_graph_drop)
 //   "Where are layouts edited?"         -> Shell_layouts.cpp  (paint_layouts / keep_layout)
 //   "Where do records go out to a file?" -> Shell_export.cpp  (fill_export_menu / export_records_to_file)
+//   "Where do records come in from one?" -> Shell_import.cpp  (import_records_from_file; ImportWindow)
 // ─────────────────────────────────────────────────────────────────────────────
 namespace acorn {
 
 class AboutWindow;
 class ShortcutsDialog;
 class NewTableWindow;
+class ImportWindow;
 class DesignTableWindow;
 
 struct PreviewDoc;   // s015a: Shell_preview.cpp
@@ -264,6 +266,7 @@ private:
     void script_apply();                         // category: scripts: the run's state (layout, find, sort, record) -> Browse
     void fill_export_menu();                     // category: export: s018a -- Browse's Export popover (fields, format, Export…)
     void export_records_to_file();               // category: export: the save dialog, db::export_file, the note
+    void import_records_from_file();             // category: import: s018b -- the open dialog, ImportWindow, db::import_records
     void keep_list(const core::ValueList& v, const std::string& was);  // category: lists: verbs::save_value_list, the note, a repaint
     void drop_list(const std::string& table, const std::string& name);  // category: lists: verbs::delete_value_list
     std::vector<std::string> fields_of(const std::string& table) const;  // category: layouts: the live table's fields, in order
@@ -411,6 +414,7 @@ private:
     Gtk::Popover                    m_browse_export_pop;
     bool                            m_export_every = false; // every field (else the layout's) -- kept across opens
     bool                            m_export_tab = false;   // tab-separated (else comma)
+    widgets::Button                 m_browse_import;        // s018b: records in from CSV / TSV
     Glib::RefPtr<Gio::SimpleAction> m_find_action, m_show_all_action;
     // s006c -- the record panel and its verbs.
     widgets::Label                  m_browse_note;    // "Changed “age”. Ctrl+Z undoes it." / a refusal
@@ -486,6 +490,7 @@ private:
     Glib::RefPtr<Gio::Menu>         m_edit_menu;
     Glib::RefPtr<Gio::SimpleAction> m_undo_action, m_redo_action, m_new_table_action;
     std::unique_ptr<NewTableWindow> m_new_table_win;
+    std::unique_ptr<ImportWindow>   m_import_win;           // s018b
     std::unique_ptr<DesignTableWindow> m_design_win;              // s007b
     Glib::RefPtr<Gio::SimpleAction> m_design_table_action;        // s007b: win.design-table
 

@@ -399,6 +399,7 @@ public:
     // nothing (a script stopped by a refusal).
     void begin_batch(const std::string& label) { m_core.begin_group(label); }
     bool in_batch() const { return m_core.in_group(); }
+    void name_batch(const std::string& label) { m_core.name_group(label); }   // s018b
     bool end_batch() { return m_core.end_group(); }
     std::expected<void, Error> cancel_batch();
 

@@ -120,6 +120,7 @@ add_library(acorn_core STATIC
     src/db/Print.cpp      # s015a: a record's layout resolved to the words it prints
     src/db/Script.cpp     # s017a: a script's run -- steps on a state, writes in one batch
     src/db/Export.cpp     # s018a: records out as CSV / tab-separated text
+    src/db/Import.cpp     # s018b: records in from CSV / tab-separated text
 )
 target_include_directories(acorn_core PUBLIC include)
 target_link_libraries(acorn_core PUBLIC acorn_db ${CMAKE_DL_LIBS})
@@ -197,6 +198,8 @@ add_executable(acorn
     src/Shell_lists.cpp      # s014c: value lists -- the Tables section and its editor
     src/Shell_scripts.cpp    # s017a: scripts -- the Tables section, Browse's Scripts menu, the run
     src/Shell_export.cpp     # s018a: Browse -> Export -- the popover, the save dialog, db::export_file
+    src/Shell_import.cpp     # s018b: Browse -> Import… -- the open dialog, ImportWindow, db::import_records
+    src/ImportWindow.cpp     # s018b: the preview + column matching window
     src/Shell_preview.cpp    # s015a: Preview -- the List's layout on pages; Print / Save as PDF
     src/Shell_browse.cpp
     src/Shell_form.cpp

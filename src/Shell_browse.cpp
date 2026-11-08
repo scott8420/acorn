@@ -164,6 +164,11 @@ void Shell::build_browse_page() {  // browse: the Browse area
     m_browse_export_pop.add_css_class("acorn-graph-pop");
     m_browse_export.set_create_popup_func([this] { fill_export_menu(); });
     bar->append(m_browse_export);
+    // s018b: Import… -- records in from a CSV / tab-separated file, one step.
+    m_browse_import.set_label("Import…");
+    m_browse_import.set_tooltip_text("Add records to this table from a CSV or tab-separated file -- Ctrl+Z takes the whole import back");
+    m_browse_import.signal_clicked().connect([this] { import_records_from_file(); });
+    bar->append(m_browse_import);
     auto spacer = Gtk::make_managed<Gtk::Box>();
     spacer->set_hexpand(true);
     bar->append(*spacer);
@@ -369,6 +374,7 @@ void Shell::paint_browse() {  // browse: cards or grid
     m_browse_preview_btn.set_sensitive(browse_info() != nullptr);
     m_browse_scripts.set_sensitive(browse_info() != nullptr && m_journal != nullptr && !m_script_run);   // s017a
     m_browse_export.set_sensitive(browse_info() != nullptr && m_conn != nullptr && !m_finding);   // s018a
+    m_browse_import.set_sensitive(browse_writable() && m_conn != nullptr && !m_finding && !m_script_run);   // s018b
     m_browse_show_all.set_visible(found_here());
     if (m_finding && browse_info()) {   // s013a: the Find screen
         m_browse_prev.set_sensitive(false);
