@@ -77,7 +77,7 @@ void Shell::paint_record() {  // records: the panel
     // s010a: the Form IS the record's editor -- the panel only for a new one.
     // s012c: so are the List's rows.
     const bool own_editor = m_browse_view == BrowseView::Form || m_browse_view == BrowseView::List;
-    if (!t || (!picked && !m_record_new) || (own_editor && !m_record_new)) {
+    if (!t || m_finding || (!picked && !m_record_new) || (own_editor && !m_record_new)) {   // s013a: + Find
         m_record_scroll.set_visible(false);
         m_record_scroll.unset_child();
         return;
@@ -273,6 +273,7 @@ void Shell::commit_field(const std::string& row, const std::string& column, cons
 
 void Shell::on_new_record() {  // records: the panel, blank
     if (!browse_writable()) return;
+    m_finding = false;   // s013a
     m_record_new = true;
     m_browse_sel.clear();
     m_browse_sel_index = -1;

@@ -188,6 +188,7 @@ add_executable(acorn
     src/Shell_tables.cpp
     src/Shell_browse.cpp
     src/Shell_form.cpp
+    src/Shell_find.cpp
     src/Shell_layouts.cpp
     src/Shell_records.cpp
     src/Shell_graph.cpp

@@ -107,6 +107,12 @@ const std::vector<ShortcutSpec>& shortcut_registry() {
     // Deliberately small -- a seed proves the SHAPE, not a product's key set. It
     // carries one doc-only row so that half of the paradigm is exercised too.
     static const std::vector<ShortcutSpec> kReg = {
+        // ── Browse (s013a) ────────────────────────────────────────────────────
+        {"Browse", "win.find",     {"<Ctrl>f"}, "", "Find records -- type what to look for in the layout's boxes"},
+        {"Browse", "win.show-all", {"<Ctrl>j"}, "", "Show every record again (after a find)"},
+        {"Browse", "", {}, "Enter", "In Find: find the records that match every box"},
+        {"Browse", "", {}, "Esc", "In Find: back to the records as they were"},
+
         // ── Diagnostics ───────────────────────────────────────────────────────
         {"Diagnostics", "win.dump-registry", {"<Ctrl>d"}, "",
          "Dump the widget registry to the log"},

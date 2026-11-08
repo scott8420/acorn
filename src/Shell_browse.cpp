@@ -101,6 +101,7 @@ void Shell::build_browse_page() {  // browse: the Browse area
             if (!b.get_active() || m_browse_view == v) return;
             m_browse_view = v;
             m_form_focus.clear();
+            m_finding = false;   // s013a: another view leaves the Find screen
             // The Form shows one record: the picked one, else the page's first.
             if (v == BrowseView::Form && m_browse_sel_index < 0 && !m_browse_data.ids.empty() && !m_record_new) {
                 m_browse_sel_index = 0;
@@ -130,6 +131,17 @@ void Shell::build_browse_page() {  // browse: the Browse area
     m_browse_delete.set_tooltip_text("Delete the picked record -- Ctrl+Z brings it back");
     bar->append(m_browse_new);
     bar->append(m_browse_delete);
+    // s013a: Find -- query by form; Show All only while a found set stands.
+    m_browse_find.set_label("Find");
+    m_browse_find.set_action_name("win.find");
+    m_browse_find.set_tooltip_text("Find records: type what to look for in the layout's boxes (Ctrl+F)");
+    m_browse_find.set_margin_start(12);
+    m_browse_show_all.set_label("Show All");
+    m_browse_show_all.set_action_name("win.show-all");
+    m_browse_show_all.set_tooltip_text("Every record again (Ctrl+J)");
+    m_browse_show_all.set_visible(false);
+    bar->append(m_browse_find);
+    bar->append(m_browse_show_all);
     auto spacer = Gtk::make_managed<Gtk::Box>();
     spacer->set_hexpand(true);
     bar->append(*spacer);
@@ -206,6 +218,9 @@ void Shell::browse_table(const std::string& name) {  // browse: this table's fir
     if (name == m_browse_table) return;
     m_browse_table = name;
     m_form_focus.clear();
+    m_finding = false;   // s013a: a find belongs to its table
+    m_found.clear();
+    m_found_table.clear();
     m_browse_req = {0, kPage};
     m_browse_sel.clear();
     m_browse_sel_index = -1;
@@ -239,7 +254,21 @@ void Shell::load_browse_page(bool keep_panel) {  // browse: read the page, repai
     }
     // On the UI thread: 50 records from a local file is instant. A server's
     // page moves to a worker when servers become writable (handoff).
-    auto p = db::read_page(*m_conn, *t, m_browse_req);
+    // s013a: a found set reads only what matches -- the find run again, so
+    // the page, the count and an edited record follow it.
+    const bool found = found_here();
+    auto p = found ? db::read_found(*m_conn, *t, m_found, m_browse_req) : db::read_page(*m_conn, *t, m_browse_req);
+    if (!p && found) {   // the find no longer fits the table (a field undone away): every record again
+        browse_note("The find no longer fits “" + t->name + "” (" + p.error().message + ") -- showing every record.", "error");
+        m_found.clear();
+        m_found_table.clear();
+        load_browse_page(keep_panel);
+        return;
+    }
+    if (found) {
+        auto all = db::read_page(*m_conn, *t, {0, 1});
+        m_found_of = all ? all->total : 0;
+    }
     if (!p) {
         m_browse_where.set_text("Could not read “" + t->name + "”: " + p.error().message);
         if (auto lg = log::get(log::Area::Shell)) lg->warn("browse: read '{}': {}", t->name, p.error().message);
@@ -256,6 +285,9 @@ void Shell::load_browse_page(bool keep_panel) {  // browse: read the page, repai
     const auto why = db::Store::why_not_writable(*t);
     std::string where = "“" + t->name + "” -- " + std::to_string(m_browse_data.total) + " record" +
                         (m_browse_data.total == 1 ? "" : "s");
+    if (found)   // s013a: "found 5 of 12 · last_name has “a”"
+        where = "“" + t->name + "” -- found " + std::to_string(m_browse_data.total) + " of " +
+                std::to_string(m_found_of) + " · " + db::find_summary(m_found);
     if (!m_writable)       where += " · read-only";
     else if (!why.empty()) where += " · read-only: " + why;
     // s008b: records that stop a link are marked -- say so, and how to read
@@ -277,12 +309,16 @@ void Shell::load_browse_page(bool keep_panel) {  // browse: read the page, repai
     }
     // s010a: a field just saved from the Form keeps its boxes (the one Tab
     // moved to holds the focus); the values under them are fresh.
-    if (keep_panel && (m_browse_view == BrowseView::Form || m_browse_view == BrowseView::List)) {   // s012c: + List
+    // s013a: ...unless the picked record has left the page (edited out of a
+    // found set): its boxes would edit a record no longer shown.
+    if (keep_panel && (m_browse_view == BrowseView::Form || m_browse_view == BrowseView::List) &&
+        (m_browse_sel_index >= 0 || m_browse_sel.empty()) && !m_finding) {   // s012c: + List
         sync_undo();
         return;
     }
     paint_browse();
-    if (!keep_panel) paint_record();
+    // s013a: a record edited out of a found set takes its panel with it.
+    if (!keep_panel || (m_browse_sel_index < 0 && !m_browse_sel.empty())) paint_record();
     sync_undo();
 }
 
@@ -304,6 +340,14 @@ void Shell::paint_browse() {  // browse: cards or grid
     m_browse_grid_btn.set_sensitive(browse_info() != nullptr);
     m_browse_form_btn.set_sensitive(browse_info() != nullptr);
     m_browse_list_btn.set_sensitive(browse_info() != nullptr);
+    m_browse_show_all.set_visible(found_here());
+    if (m_finding && browse_info()) {   // s013a: the Find screen
+        m_browse_prev.set_sensitive(false);
+        m_browse_next.set_sensitive(false);
+        m_browse_range.set_text("Find");
+        paint_find();
+        return;
+    }
     if (!browse_info() || m_browse_data.rows.empty()) {
         auto empty = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 8);
         empty->add_css_class("acorn-panel");

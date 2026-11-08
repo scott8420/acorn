@@ -30,6 +30,8 @@ void Shell::bind_journal() {  // journal: win.undo / win.redo / win.new-table + 
     m_new_record_action    = add_action("new-record",    sigc::mem_fun(*this, &Shell::on_new_record));     // s006c
     m_delete_record_action = add_action("delete-record", sigc::mem_fun(*this, &Shell::on_delete_record));  // s006c
     m_design_table_action  = add_action("design-table",  sigc::mem_fun(*this, &Shell::on_design_table));   // s007b
+    m_find_action          = add_action("find",          sigc::mem_fun(*this, &Shell::start_find));        // s013a
+    m_show_all_action      = add_action("show-all",      sigc::mem_fun(*this, &Shell::show_all));          // s013a
 
     auto keys = Gtk::EventControllerKey::create();
     keys->set_propagation_phase(Gtk::PropagationPhase::BUBBLE);
@@ -54,6 +56,9 @@ void Shell::attach_journal(db::Engine* e) {  // journal: a new connection -> a f
     m_conn_engine = e;
     m_journal.reset();
     m_marks.clear();   // s008b: marks belong to the connection
+    m_found.clear();   // s013a: so does a found set
+    m_found_table.clear();
+    m_finding = false;
     if (m_conn && e) {
         m_journal = std::make_unique<db::Journal>(*m_conn, e->dialect(), e->caps());
         m_journal->set_on_change([this] { sync_undo(); });
@@ -73,7 +78,9 @@ void Shell::sync_undo() {  // journal: re-label + grey Undo / Redo / New Table
     if (m_design_table_action) m_design_table_action->set_enabled(cw && shown && shown->kind == db::Table::Kind::Table);
     const bool rw = m_journal && browse_writable();   // s006c
     if (m_new_record_action) m_new_record_action->set_enabled(rw);
-    if (m_delete_record_action) m_delete_record_action->set_enabled(rw && !m_browse_sel.empty() && !m_record_new);
+    if (m_delete_record_action) m_delete_record_action->set_enabled(rw && !m_browse_sel.empty() && !m_record_new && !m_finding);
+    if (m_find_action) m_find_action->set_enabled(m_conn && browse_info());              // s013a: reads only
+    if (m_show_all_action) m_show_all_action->set_enabled(found_here() || m_finding);
     m_browse_new.set_tooltip_text(rw ? "Add a record to this table -- fill it in beside, then Add"
                                      : "This table can't take changes here (see the line under Browse)");
     m_new_table_btn.set_tooltip_text(
@@ -87,6 +94,8 @@ void Shell::sync_undo() {  // journal: re-label + grey Undo / Redo / New Table
         m_edit_menu->append("Design Table…", "win.design-table");
         m_edit_menu->append("New Record", "win.new-record");
         m_edit_menu->append("Delete Record", "win.delete-record");
+        m_edit_menu->append("Find…", "win.find");          // s013a
+        m_edit_menu->append("Show All", "win.show-all");
     }
 }
 

@@ -51,6 +51,34 @@ std::string related_sql(const Connection& c, const Table& t, const std::vector<s
 std::expected<Page, Error> read_related(Connection& c, const Table& t, const std::vector<std::string>& link,
                                         const std::vector<Value>& values, const PageRequest& r);
 
+// s013a -- FIND: query by form. A criterion is what was typed in one box of
+// the Find layout; the records that match EVERY criterion are the found set.
+// Blank boxes ask nothing. What a box asks, by what it starts with:
+//   "=" alone        the field is empty (NULL; for text, also "")
+//   "=x"             exactly x
+//   "<x" "<=x" ">x" ">=x"   less / greater, as the engine orders the field
+//   anything else    text: CONTAINS x, any case (ASCII letters); the rest: = x
+// Values are bound (never written into the SQL); a value the field can't
+// hold is refused in words ("“id” needs a whole number"), as is a field the
+// table hasn't, a binary field, and no criterion at all.
+struct Criterion {
+    std::string field;
+    std::string typed;
+    bool operator==(const Criterion&) const = default;
+};
+struct FindQuery {
+    std::string        where;    // " WHERE ..." (with the leading space)
+    std::vector<Value> values;
+};
+std::expected<FindQuery, std::string> find_query(const Connection& c, const Table& t, const std::vector<Criterion>& crit);
+// A page of the found set; `total` counts every match. A refusal is an Error
+// (Code::Unsupported) carrying the words.
+std::expected<Page, Error> read_found(Connection& c, const Table& t, const std::vector<Criterion>& crit,
+                                      const PageRequest& r);
+// "last_name contains “a” · company is empty" -- the non-blank criteria, in
+// words, for the line under Browse.
+std::string find_summary(const std::vector<Criterion>& crit);
+
 // One cell as Browse shows it: NULL -> "", text as-is, a Yes-No field 0/1 ->
 // "No" / "Yes", a real without a trailing ".0" mess, a blob -> "(n bytes)".
 std::string cell_text(const Value& v, FieldType t);

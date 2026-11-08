@@ -2402,6 +2402,64 @@ void test_sample(Journal& j, Gate& g, const std::string& P) {
     check(P + "sample: the Contact Card kept in the solution (saved once)", card && *card == sample_layout() && saves >= 1, "");
     const auto* lst = sol.layout("contacts", kSampleListName);   // s012b
     check(P + "sample: the Contact List kept beside it", lst && *lst == sample_list_layout(), "");
+    // s013a: Find -- each found set checked against the same rule applied here to every record.
+    if (auto sc = g.introspect(); sc && sc->table("contacts")) {
+        const Table& ct = *sc->table("contacts");
+        auto all = read_page(g, ct, {0, 100});
+        auto col = [&](const std::string& n) {
+            for (std::size_t i = 0; i < ct.columns.size(); ++i) if (ct.columns[i].name == n) return i;
+            return std::size_t{0};
+        };
+        auto text_of = [&](const Row& r, const std::string& n) { return cell_text(r[col(n)], ct.column(n)->type); };
+        auto lower = [](std::string x) { for (auto& ch : x) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch))); return x; };
+        auto expect = [&](auto pred) {
+            std::int64_t n = 0;
+            if (all) for (const auto& r : all->rows) n += pred(r) ? 1 : 0;
+            return n;
+        };
+        auto found = [&](std::vector<Criterion> c, PageRequest r = {0, 100}) { return read_found(g, ct, c, r); };
+        auto has = [&](const std::string& n, const std::string& w) {
+            return [&, n, w](const Row& r) { return lower(text_of(r, n)).find(lower(w)) != std::string::npos; };
+        };
+        const auto a_n = expect(has("last_name", "a"));
+        auto fa = found({{"last_name", "A"}});
+        check(P + "find: text contains, any case -- last_name “A” finds every last name with an a",
+              all && fa && fa->total == a_n && a_n > 0 && static_cast<std::int64_t>(fa->rows.size()) == a_n,
+              fa ? std::to_string(fa->total) + " / " + std::to_string(a_n) : fa.error().message);
+        const auto e_n = expect([&](const Row& r) { return r[col("company")].is_null() || text_of(r, "company").empty(); });
+        auto fe = found({{"company", " = "}});
+        check(P + "find: “=” alone -- company is empty", fe && fe->total == e_n && e_n > 0,
+              fe ? std::to_string(fe->total) + " / " + std::to_string(e_n) : fe.error().message);
+        const auto both_n = expect([&](const Row& r) { return has("last_name", "e")(r) && (r[col("company")].is_null() || text_of(r, "company").empty()); });
+        auto fb = found({{"last_name", "e"}, {"company", "="}, {"email", ""}});
+        check(P + "find: two boxes -- both must match; a blank box asks nothing", fb && fb->total == both_n,
+              fb ? std::to_string(fb->total) + " / " + std::to_string(both_n) : fb.error().message);
+        const auto old_n = expect([&](const Row& r) { auto b = text_of(r, "birthday"); return !b.empty() && b < "1960-01-01"; });
+        auto fo = found({{"birthday", "<1960-01-01"}});
+        check(P + "find: “<” on a date -- born before 1960", fo && fo->total == old_n && old_n > 0,
+              fo ? std::to_string(fo->total) + " / " + std::to_string(old_n) : fo.error().message);
+        std::string key;
+        for (const auto& c : ct.columns) if (c.pk_position > 0) key = c.name;
+        auto f3 = found({{key, "3"}});
+        check(P + "find: a number is equal -- id 3 is one record, id 3", f3 && f3->total == 1 && f3->rows.size() == 1 &&
+              num(f3->rows[0][col(key)]) == 3.0, f3 ? std::to_string(f3->total) : f3.error().message);
+        const auto pct_n = expect(has("notes", "%"));
+        auto fp = found({{"notes", "%"}, {"first_name", "_"}});
+        check(P + "find: % and _ are only themselves", fp && fp->total == pct_n,
+              fp ? std::to_string(fp->total) : fp.error().message);
+        auto pg = found({{"last_name", "a"}}, {0, 2});
+        check(P + "find: a page of the found set -- two rows, the total counts all",
+              pg && pg->rows.size() == std::min<std::size_t>(2, static_cast<std::size_t>(a_n)) && pg->total == a_n, "");
+        auto none = found({{"last_name", "zzqx"}});
+        auto blank = found({{"last_name", "  "}});
+        auto bad = found({{key, "abc"}});
+        auto gone = found({{"fax", "1"}});
+        auto dangle = found({{key, ">="}});
+        check(P + "find: nothing matches -> none; no criterion / a value the field can't hold / a field it hasn't / an operator alone -> refused in words",
+              none && none->total == 0 && !blank && !bad && bad.error().message.find("whole number") != std::string::npos &&
+              !gone && gone.error().message.find("fax") != std::string::npos && !dangle,
+              bad ? "read!" : bad.error().message);
+    }
     // s011a: a portal's rows -- each contact's phones, read by the link.
     if (auto sc = g.introspect(); sc && sc->table("phones") && sc->table("contacts")) {
         const Table& ph = *sc->table("phones");

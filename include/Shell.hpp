@@ -151,6 +151,12 @@ private:
     core::Layout form_layout(bool* kept = nullptr) const;  // category: form: the shown table's layout -- kept in the solution, else the default
     void form_step(int delta);                   // category: form: the previous / next record (across pages)
     // s012a -- the List view: the page through the picked layout, a row each.
+    void paint_find();                           // category: find: the layout's boxes, empty -- type what to look for (s013a)
+    void start_find();                           // category: find: win.find -> the Find screen
+    void do_find();                              // category: find: the typed boxes -> the found set
+    void cancel_find();                          // category: find: back to the records as they were
+    void show_all();                             // category: find: win.show-all -> every record again
+    bool found_here() const;                     // category: find: a found set for the shown table
     void paint_list();                           // category: form: the header once, the body per record, the footer once
     void form_caption(Gtk::Box& outer, const db::Table& t, const core::Layout& L, bool kept, const std::string& row_id);  // category: form: which layout (+ the picker, the mark)
     Gtk::Fixed* layout_part(const core::Layout& L, core::Part part, bool edit, Gtk::Widget*& focus_back);  // category: form: one part drawn for the record browse_value reads
@@ -344,6 +350,14 @@ private:
     int                             m_paint_row = -1; // s012a: the List row being drawn -- browse_value reads it (-1: the picked record)
     std::string                     m_form_focus;     // s010a: the Form box last focused (kept across a repaint)
     bool                            m_browse_painting = false;
+    // s013a -- Find: the Find screen, what is typed in it, and the found set.
+    bool                            m_finding = false;
+    std::map<std::string, std::string> m_find_typed;  // field -> what is typed in its box (kept across a repaint)
+    std::string                     m_found_table;    // the found set's table ("" = none: every record)
+    std::vector<db::Criterion>      m_found;          // ...and what it asked
+    std::int64_t                    m_found_of = 0;   // every record in the table, for "found 5 of 12"
+    widgets::Button                 m_browse_find, m_browse_show_all;
+    Glib::RefPtr<Gio::SimpleAction> m_find_action, m_show_all_action;
     // s006c -- the record panel and its verbs.
     widgets::Label                  m_browse_note;    // "Changed “age”. Ctrl+Z undoes it." / a refusal
     widgets::Button                 m_browse_new, m_browse_delete;

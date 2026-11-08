@@ -21,6 +21,7 @@
 #include <cstdlib>
 #include <functional>
 #include "core/Shortcuts.hpp"
+#include "db/Browse.hpp"
 #include "core/Stones.hpp"
 #include "core/Undo.hpp"
 #include "core/TextMap.hpp"
@@ -482,6 +483,16 @@ int main() {
         check("startup: garbage -> the default (on)", c::load_startup(sfile).open_sample);
         std::error_code ec;
         std::filesystem::remove_all(dir, ec);
+    }
+
+    // -- s013a: Find's words ------------------------------------------------------
+    {
+        using acorn::db::Criterion;
+        const std::vector<Criterion> c = {{"last_name", "Th"}, {"company", "="}, {"email", "  "}, {"birthday", "< 1960-01-01"}};
+        const auto s = acorn::db::find_summary(c);
+        check("find: the summary says each non-blank box in words",
+              s == "last_name has \u201CTh\u201D · company is empty · birthday < 1960-01-01", s);
+        check("find: no boxes -> an empty summary", acorn::db::find_summary({{"a", ""}}).empty(), "");
     }
 
     // -- Shortcuts: the registry paradigm, exercised ---------------------------

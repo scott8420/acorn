@@ -38,13 +38,12 @@ std::string select_sql(const Connection& c, const Table& t, const PageRequest& r
     return s;
 }
 
-std::expected<Page, Error> read_where(Connection& c, const Table& t, const PageRequest& r,
-                                      const std::vector<std::string>& link, const std::vector<Value>& values) {
+std::expected<Page, Error> read_sql_where(Connection& c, const Table& t, const PageRequest& r,
+                                          const std::string& where, const std::vector<Value>& values) {
     Page p;
     p.offset = std::max<std::int64_t>(r.offset, 0);
     for (const auto& col : t.columns) p.columns.push_back(col.name);
     if (t.columns.empty()) return p;
-    const std::string where = where_of(c, link);
 
     auto n = c.query("SELECT COUNT(*) FROM " + c.quote_ident(t.name) + where, values);
     if (!n) return std::unexpected(n.error());
@@ -72,7 +71,87 @@ std::expected<Page, Error> read_where(Connection& c, const Table& t, const PageR
     return p;
 }
 
+std::expected<Page, Error> read_where(Connection& c, const Table& t, const PageRequest& r,
+                                      const std::vector<std::string>& link, const std::vector<Value>& values) {
+    return read_sql_where(c, t, r, where_of(c, link), values);
+}
+
+std::string trimmed(const std::string& s) {
+    std::size_t a = 0, b = s.size();
+    while (a < b && std::isspace(static_cast<unsigned char>(s[a]))) ++a;
+    while (b > a && std::isspace(static_cast<unsigned char>(s[b - 1]))) --b;
+    return s.substr(a, b - a);
+}
+
+// The operator a box starts with ("" = none) and the rest, trimmed.
+std::pair<std::string, std::string> split_op(const std::string& typed) {
+    const std::string s = trimmed(typed);
+    for (const char* op : {"<=", ">=", "=", "<", ">"}) {
+        const std::string o = op;
+        if (s.rfind(o, 0) == 0) return {o, trimmed(s.substr(o.size()))};
+    }
+    return {"", s};
+}
+
 }  // namespace
+
+std::expected<FindQuery, std::string> find_query(const Connection& c, const Table& t, const std::vector<Criterion>& crit) {
+    FindQuery q;
+    for (const auto& k : crit) {
+        if (trimmed(k.typed).empty()) continue;
+        const Column* col = t.column(k.field);
+        if (!col) return std::unexpected("“" + t.name + "” has no field “" + k.field + "”");
+        const std::string name = "\u201C" + col->name + "\u201D";
+        if (col->type == FieldType::Container) return std::unexpected(name + " holds binary data -- it can't be searched");
+        const std::string f = c.quote_ident(col->name);
+        auto [op, rest] = split_op(k.typed);
+        std::string cond;
+        if (op == "=" && rest.empty()) {
+            cond = col->type == FieldType::Text ? "(" + f + " IS NULL OR " + f + " = '')" : f + " IS NULL";
+        } else if (op.empty() && col->type == FieldType::Text) {
+            // Contains, any case: the field lowered by the engine, the words here
+            // (ASCII). '!' escapes LIKE's own % and _ so they are only themselves.
+            std::string pat = "%";
+            for (unsigned char ch : rest) {
+                if (ch == '%' || ch == '_' || ch == '!') pat += '!';
+                pat += static_cast<char>(std::tolower(ch));
+            }
+            pat += "%";
+            cond = "LOWER(" + f + ") LIKE ? ESCAPE '!'";
+            q.values.emplace_back(pat);
+        } else {
+            if (rest.empty()) return std::unexpected(name + ": “" + op + "” needs something after it");
+            auto v = parse_field(rest, *col);
+            if (!v) return std::unexpected(v.error());
+            cond = f + " " + (op.empty() ? std::string("=") : op) + " ?";
+            q.values.push_back(std::move(*v));
+        }
+        q.where += (q.where.empty() ? " WHERE " : " AND ") + cond;
+    }
+    if (q.where.empty()) return std::unexpected("Type what to look for in at least one box");
+    return q;
+}
+
+std::expected<Page, Error> read_found(Connection& c, const Table& t, const std::vector<Criterion>& crit,
+                                      const PageRequest& r) {
+    auto q = find_query(c, t, crit);
+    if (!q) return std::unexpected(Error{Error::Code::Unsupported, q.error()});
+    return read_sql_where(c, t, r, q->where, q->values);
+}
+
+std::string find_summary(const std::vector<Criterion>& crit) {
+    std::string out;
+    for (const auto& k : crit) {
+        if (trimmed(k.typed).empty()) continue;
+        auto [op, rest] = split_op(k.typed);
+        std::string said;
+        if (op == "=" && rest.empty()) said = k.field + " is empty";
+        else if (op.empty())           said = k.field + " has “" + rest + "”";
+        else                           said = k.field + " " + op + " " + rest;
+        out += (out.empty() ? "" : " · ") + said;
+    }
+    return out;
+}
 
 std::string page_sql(const Connection& c, const Table& t, const PageRequest& r) { return select_sql(c, t, r, {}); }
 
