@@ -139,6 +139,7 @@ private:
     bool run_long(const std::string& says, LongWork work);
     bool busy() const { return m_busy; }
     void long_done();                            // long: back on the UI thread
+    void stop_long();                            // long: Stop -- the work ends after the read / row running
     void shut(bool on);                          // long: no input while the worker has the connection
     void build_busy();                           // long: the line and Stop, over the window
     void show_schema();                          // category: connect: paint the table list
@@ -214,7 +215,9 @@ private:
     // changes or unlinks it. Every change is a verb through m_journal.
     void build_graph_page();                     // category: graph: the Graph area
     void build_accounts_page();                  // category: accounts: s019a -- the Accounts area
-    void paint_accounts();                       // category: accounts: one card per account, its rights per table (reads only)
+    void paint_accounts(bool keep = false);      // category: accounts: read on the worker (s020c); keep: the cards stay till it lands
+    void paint_account_cards(const db::AccountCards& c);  // category: accounts: one card per account, its rights per table
+    Gtk::Label* account_status(const std::string& s);     // category: accounts: one line in place of the cards
     void accounts_note(const std::string& text, const char* kind);  // category: accounts: s019b -- under the Accounts title
     void account_editor_check();                 // category: accounts: New Account's live line and SQL
     void make_account();                         // category: accounts: New Account -> verbs::new_account
@@ -386,6 +389,8 @@ private:
     std::shared_ptr<LongTicket>     m_long_ticket;
     std::string                     m_long_says;
     bool                            m_busy = false;
+    std::thread::id                 m_ui_thread = std::this_thread::get_id();   // s020c: the journal's on_change syncs only here
+    bool                            m_accounts_again = false;   // s020c: Accounts asked for while a worker ran
     bool                            m_preview_again = false;   // Preview asked for while busy
     sigc::connection                m_busy_timer;
     Gtk::Overlay                    m_frame;

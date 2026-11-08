@@ -61,7 +61,9 @@ void Shell::attach_journal(db::Engine* e) {  // journal: a new connection -> a f
     m_finding = false;
     if (m_conn && e) {
         m_journal = std::make_unique<db::Journal>(*m_conn, e->dialect(), e->caps());
-        m_journal->set_on_change([this] { sync_undo(); });
+        // s020c: an import writes on the worker -- its changes are synced
+        // when it's done (long_done), never from the worker's thread.
+        m_journal->set_on_change([this] { if (std::this_thread::get_id() == m_ui_thread) sync_undo(); });
     }
     journal_note("", "");
     sync_undo();

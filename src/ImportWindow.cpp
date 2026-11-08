@@ -1,7 +1,9 @@
 #include "ImportWindow.hpp"
 #include "Registry.hpp"
 
+#include <gtkmm/eventcontrollerkey.h>
 #include <gtkmm/headerbar.h>
+#include <glibmm/main.h>
 #include <gtkmm/label.h>
 #include <gtkmm/stringlist.h>
 
@@ -119,7 +121,12 @@ ImportWindow::ImportWindow(Gtk::Window& parent)
 
     m_plan_buttons.set_halign(Gtk::Align::END);
     m_cancel.set_label("Cancel");
-    m_cancel.signal_clicked().connect([this] { set_visible(false); });
+    m_cancel.signal_clicked().connect([this] {
+        if (!m_running) { set_visible(false); return; }
+        if (m_stop) m_stop();   // s020c: Stop -- what went in so far is kept, one step
+        m_cancel.set_sensitive(false);
+        m_says.set_text("Stopping…");
+    });
     m_ok.set_label("Import");
     m_ok.add_css_class("acorn-primary");
     m_ok.set_tooltip_text("Add the records -- Ctrl+Z takes the whole import back in one step");
@@ -135,6 +142,16 @@ ImportWindow::ImportWindow(Gtk::Window& parent)
 
     set_child(*page);
     set_default_widget(m_ok);
+
+    // s020c: while the worker has it, the window can't be closed; Esc stops.
+    signal_close_request().connect([this] { return m_running; }, false);
+    auto keys = Gtk::EventControllerKey::create();
+    keys->signal_key_pressed().connect([this](guint key, guint, Gdk::ModifierType) {
+        if (!m_running || key != GDK_KEY_Escape) return false;
+        if (m_cancel.get_sensitive()) m_cancel.activate();
+        return true;
+    }, false);
+    add_controller(keys);
 }
 
 ImportWindow::~ImportWindow() { registry::remove(this); }
@@ -246,13 +263,50 @@ void ImportWindow::refresh() {
         s += ". " + std::to_string(pv.refused.size()) + (pv.refused.size() == 1 ? " row can't" : " rows can't") +
              " go in as they are -- the first, " + db::refusal_says(pv.refused[0]) + ". They'll be listed after";
     m_says.set_text(s + ".");
+    m_rows = pv.rows;
     m_ok.set_sensitive(pv.records > 0);
 }
 
 void ImportWindow::on_import() {
-    if (!m_import || !m_ok.get_sensitive()) return;
-    auto r = m_import(plan(), m_data);
+    if (!m_import || !m_ok.get_sensitive() || m_running) return;
+    m_ok.set_sensitive(false);   // until done: one Import at a time
+    m_import(plan(), m_data, [this](const std::expected<db::ImportResult, db::Error>& r) { finish(r); });
+}
+
+void ImportWindow::running(std::function<std::int64_t()> count, std::function<void()> stop) {  // s020c
+    m_count = std::move(count);
+    m_stop = std::move(stop);
+    set_running(true);
+    m_says.set_text("Importing…");
+    m_tick = Glib::signal_timeout().connect([this] {
+        if (!m_running) return false;
+        if (!m_cancel.get_sensitive()) return true;   // "Stopping…" stays
+        const auto n = m_count ? m_count() : 0;
+        m_says.set_text("Importing… " + std::to_string(n) + " of " + std::to_string(m_rows) +
+                        (m_rows == 1 ? " row" : " rows") + " -- Stop keeps what went in (Ctrl+Z takes it back)");
+        return true;
+    }, 250);
+}
+
+void ImportWindow::set_running(bool on) {
+    m_running = on;
+    set_deletable(!on);
+    m_header.set_sensitive(!on);
+    m_scroll.set_sensitive(!on);
+    m_cancel.set_label(on ? "Stop" : "Cancel");
+    m_cancel.set_tooltip_text(on ? "Stop after the row going in -- what went in is kept as one step (Esc)" : "");
+    m_cancel.set_sensitive(true);
+    if (!on) {
+        m_tick.disconnect();
+        m_count = nullptr;
+        m_stop = nullptr;
+    }
+}
+
+void ImportWindow::finish(const std::expected<db::ImportResult, db::Error>& r) {  // s020c: back from the worker
+    set_running(false);
     if (!r) {
+        refresh();   // Import sensitive again (it clears the reason line, so the reason goes after)
         m_reason.set_text("Not imported: " + r.error().message + ".");
         return;
     }
@@ -267,7 +321,7 @@ void ImportWindow::on_import() {
     m_close.set_visible(true);
     set_default_widget(m_close);
     std::string head = db::import_says(*r, m_table.name) + ".";
-    if (r->records > 0) head += " Ctrl+Z takes the whole import back.";
+    if (r->records > 0) head += r->stopped_at ? " Ctrl+Z takes back what went in." : " Ctrl+Z takes the whole import back.";
     if (!r->refused.empty()) head += "\nThese rows weren't imported -- nothing of them went in:";
     m_done.set_text(head);
     m_done.set_visible(true);

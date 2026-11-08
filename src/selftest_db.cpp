@@ -3525,6 +3525,24 @@ void test_import_book(Journal& j, Gate& g, const std::string& P) {
           u2 && count("contacts") == n0 && !im3 && im3.error().message == "Pick a field for at least one column" && r4 &&
               r4->records == 0 && r4->refused.size() == 1 && j.undo_label() == top && !j.in_batch(),
           im3 ? "" : im3.error().message);
+    // s020c: Stop (the worker's keep_going) -- what went in is kept as the one step.
+    auto d5 = read_delimited("Ann,One,\nBen,Two,\nCal,Three,\nDee,Four,\n", ',');
+    int asked = 0;
+    auto im5 = d5 ? import_records(j, *ct, *d5, p2, [&](std::int64_t n) { ++asked; return n < 2; })
+                  : std::unexpected(Error{Error::Code::Internal, ""});
+    check(P + "import: stopped after 2 rows -- those 2 kept as ONE step, where it stopped said, the rest not read",
+          im5 && im5->records == 2 && im5->rows == 2 && im5->stopped_at == 3 && asked == 3 && count("contacts") == n0 + 2 &&
+              j.undo_label() == "Import 2 records into “contacts”" && !j.in_batch() &&
+              import_says(*im5, "contacts") == "Imported 2 records into “contacts” -- stopped before line 3, the rest weren't read",
+          im5 ? import_says(*im5, "contacts") + " / " + j.undo_label() : im5.error().message);
+    auto u5 = j.undo();
+    const std::string top5 = j.undo_label();
+    auto im6 = d5 ? import_records(j, *ct, *d5, p2, [](std::int64_t) { return false; })
+                  : std::unexpected(Error{Error::Code::Internal, ""});
+    check(P + "import: Ctrl+Z takes the stopped import back; stopped before the first row -- nothing in, no step",
+          u5 && count("contacts") == n0 && im6 && im6->records == 0 && im6->stopped_at == 1 && j.undo_label() == top5 &&
+              !j.in_batch(),
+          im6 ? std::to_string(im6->stopped_at) : im6.error().message);
     check(P + "import: every write through the door -- no strays", j.strays() == strays0 && count("contacts") == n0,
           std::to_string(j.strays()));
 }
@@ -3797,6 +3815,52 @@ void test_accounts_changed(Journal& j, Gate& g, Dialect d, const std::string& P)
     j.clear();
     check(P + "accounts changed: the throwaway accounts dropped; no strays",
           drop_test_accounts(g, d) && !mine() && j.strays() == strays0, std::to_string(j.strays()));
+}
+
+// s020c: the Accounts area's read in one go (it runs on the worker) -- the
+// list, may this connection change accounts, each changeable one's picture;
+// Stop between pictures.
+void test_account_cards(Journal& j, Gate& g, Dialect d, const std::string& P) {
+    auto sch = g.introspect();
+    if (!sch) { check(P + "account cards: the schema", false, ""); return; }
+    const int strays0 = j.strays();
+    if (d == Dialect::SQLite) {
+        auto c = read_account_cards(g, d, *sch, &j.store(), true);
+        check(P + "account cards: SQLite -- none, said in words, nothing more read",
+              c.list && !c.list->supported && c.why.empty() && c.given.empty() && !c.stopped, c.list ? c.list->why : "");
+        return;
+    }
+    j.clear();
+    const std::string who = "acorn_selftest_" + std::to_string(::getpid()) + "_cards";
+    const std::string host = d == Dialect::MariaDB ? "%" : "";
+    const auto id = Store::account_id(who, host);
+    auto made = verbs::new_account(j, who, host, "pw");
+    auto c = read_account_cards(g, d, *sch, &j.store(), true);
+    std::size_t changeable = 0;
+    if (c.list) for (const auto& a : c.list->accounts) if (account_hold(a).empty()) ++changeable;
+    const auto it = c.given.find(id);
+    bool you_left = c.list.has_value();
+    if (c.list) for (const auto& a : c.list->accounts) if (a.you) you_left = you_left && !c.given.contains(Store::account_id(a.name, a.host));
+    check(P + "account cards: read in one go -- may change accounts, the database named, a picture per changeable account "
+              "(the new one: given nothing), none for your own",
+          made && c.list && c.why.empty() && !c.database.empty() && c.given.size() == changeable && it != c.given.end() &&
+              it->second && it->second->every == 0 && it->second->tables.empty() && you_left && !c.stopped,
+          made ? c.why + " " + std::to_string(c.given.size()) + "/" + std::to_string(changeable) : made.error().message);
+    auto ro = read_account_cards(g, d, *sch, &j.store(), false);
+    auto none = read_account_cards(g, d, *sch, nullptr, true);
+    check(P + "account cards: a read-only connection (or no journal) -- why in words, no pictures read",
+          ro.list && ro.why.find("read-only") != std::string::npos && ro.given.empty() && none.list &&
+              none.why.find("read-only") != std::string::npos && none.given.empty(), ro.why);
+    std::vector<std::int64_t> told;
+    auto st0 = read_account_cards(g, d, *sch, &j.store(), true, [](std::int64_t) { return false; });
+    auto st1 = read_account_cards(g, d, *sch, &j.store(), true, [&](std::int64_t n) { told.push_back(n); return n < 1; });
+    check(P + "account cards: Stop -- before the first picture none, after the first one; told 0, 1",
+          st0.stopped && st0.given.empty() && st0.list && (changeable < 2 || (st1.stopped && st1.given.size() == 1 &&
+              told == std::vector<std::int64_t>{0, 1})),
+          std::to_string(st1.given.size()) + " / " + std::to_string(changeable));
+    j.clear();
+    check(P + "account cards: the throwaway account dropped; reading wrote nothing (no strays)",
+          drop_test_accounts(g, d) && j.strays() == strays0, std::to_string(j.strays()));
 }
 
 // On the sample Address Book: this connection's account, and a throwaway one
@@ -4355,6 +4419,7 @@ void test_sample(Journal& j, Gate& g, const std::string& P, Dialect d) {
     test_import_book(j, g, P);     // s018b
     test_accounts(g, d, P);        // s019a
     test_accounts_changed(j, g, d, P);   // s019b
+    test_account_cards(j, g, d, P);      // s020c
     {   // s016
         const auto* lab = sol.layout("addresses", kSampleLabelsName);
         check(P + "labels: the sample's Mailing Labels kept beside the report", lab && *lab == sample_labels_layout(), "");

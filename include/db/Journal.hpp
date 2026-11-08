@@ -63,6 +63,7 @@
 #include "core/Undo.hpp"
 #include "core/Solution.hpp"
 #include "db/Engine.hpp"
+#include "db/Accounts.hpp"
 
 #include <cstdint>
 #include <expected>
@@ -702,5 +703,26 @@ struct Verb {
 };
 const std::vector<Verb>& all();
 }  // namespace verbs
+
+// s020c -- what the Accounts area paints, read in one go (off the UI thread):
+// the list, whether this connection may change accounts and why not, and --
+// when it may -- each changeable account's picture (what it was GIVEN here:
+// the boxes). `writable`: a journal on a connection that isn't read-only.
+// `keep_going(accounts read so far)` is asked before each picture; false
+// stops there (stopped = true, the pictures read so far kept).
+struct AccountCards {
+    std::expected<AccountList, Error>            list = std::unexpected(Error{Error::Code::Internal, "not read"});
+    std::string                                  why;        // "" = may change accounts here
+    std::string                                  database;   // the statements' database (when it may)
+    std::map<Store::Id, std::expected<AccountDef, std::string>> given;   // by account id; the error in words
+    bool                                         stopped = false;
+};
+// Why this connection can't change accounts ("" = it can) -- the words the
+// area shows greyed buttons with.
+std::string accounts_why(bool writable, const AccountList& l);
+// Why this account's card has no boxes / trash ("" = it has).
+std::string account_hold(const Account& a);
+AccountCards read_account_cards(Connection& c, Dialect d, const Schema& s, Store* st, bool writable,
+                                const std::function<bool(std::int64_t)>& keep_going = {});
 
 }  // namespace acorn::db

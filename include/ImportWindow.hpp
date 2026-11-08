@@ -28,18 +28,29 @@ namespace acorn {
 
 class ImportWindow : public Gtk::Window {
 public:
-    using Import = std::function<std::expected<db::ImportResult, db::Error>(const db::ImportPlan&, const db::Delimited&)>;
+    // s020c: the import runs on Shell's worker. Import starts it (or refuses
+    // at once through `done`); `done` comes back on the UI thread with what
+    // went in -- the window then turns into the report. The data is the
+    // window's own and is read by reference while it runs (nothing can call
+    // start() then: the main window is shut).
+    using Done   = std::function<void(std::expected<db::ImportResult, db::Error>)>;
+    using Import = std::function<void(const db::ImportPlan&, const db::Delimited&, Done)>;
 
     explicit ImportWindow(Gtk::Window& parent);
     ~ImportWindow() override;
 
     void start(const db::Table& t, const std::string& file_name, db::Delimited d, Import import);
+    // s020c: Shell says the worker started: the window says how far it's got
+    // (`count`: rows looked at so far), Cancel becomes Stop (and Esc).
+    void running(std::function<std::int64_t()> count, std::function<void()> stop);
 
 private:
     void build_grid();
     db::ImportPlan plan() const;
     void refresh();   // the header row's look, the live line, Import's sensitivity
     void on_import();
+    void finish(const std::expected<db::ImportResult, db::Error>& r);   // s020c: back from the worker
+    void set_running(bool on);
 
     db::Table                   m_table;
     std::string                 m_file;
@@ -50,6 +61,11 @@ private:
     std::vector<Gtk::Widget*>   m_first;     // the first line's cells (names when the box is ticked)
     bool                        m_resetting = false;
     Gtk::Label*                 m_hint = nullptr;   // the plan's how-to line (hidden in the report)
+    std::int64_t                m_rows = 0;         // rows Import will look at (the live line's count)
+    bool                        m_running = false;  // s020c: the worker has it
+    std::function<std::int64_t()> m_count;
+    std::function<void()>       m_stop;
+    sigc::connection            m_tick;
 
     widgets::Label          m_head;
     widgets::CheckButton    m_header;

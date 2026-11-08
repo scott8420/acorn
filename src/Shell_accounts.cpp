@@ -207,7 +207,7 @@ void Shell::make_account() {  // accounts: New Account -> verbs::new_account
         return;
     }
     m_accounts_editor.set_visible(false);
-    paint_accounts();
+    paint_accounts(true);
     journal_note("Made the account " + db::account_words(name, host) + ". Ctrl+Z deletes it again "
                  "(a redo would make it without its password).", "ok");
 }
@@ -235,31 +235,58 @@ void Shell::ask_delete_account(const std::string& name, const std::string& host)
         auto r = db::verbs::delete_account(*m_journal, id);
         if (auto lg = log::get(log::Area::App))
             lg->info("journal: delete account '{}': {}", name, r ? "deleted" : r.error().message);
-        paint_accounts();
+        paint_accounts(true);
         if (r) journal_note("Deleted the account " + db::account_words(name, host) + ". Ctrl+Z makes it again with its "
                             "rights here -- not its password.", "ok");
         else   journal_note("Not deleted: " + r.error().message + ".", "error");
     });
 }
 
-void Shell::paint_accounts() {  // accounts: one card per account, what it may do per table
-    auto status = [this](const std::string& s) {
-        auto l = line(s, "acorn-status");
-        l->set_valign(Gtk::Align::START);
-        m_accounts_scroll.set_child(*l);
-    };
-    m_accounts_can = false;
-    m_accounts_new.set_visible(false);
+void Shell::paint_accounts(bool keep) {  // accounts: read on the worker (s020c), painted by paint_account_cards
     if (!m_conn || !m_conn_engine) {
+        m_accounts_can = false;
+        m_accounts_new.set_visible(false);
         m_accounts_editor.set_visible(false);
         m_accounts_where.set_text("Connect to a database first.");
-        status("The server's accounts appear here once you connect.");
+        m_accounts_scroll.set_child(*account_status("The server's accounts appear here once you connect."));
         return;
     }
+    // `keep`: a repaint after a change -- the cards stay until the new read
+    // lands (no flash); otherwise say what's happening at once.
+    if (!keep) {
+        m_accounts_can = false;
+        m_accounts_new.set_visible(false);
+        m_accounts_where.set_text(m_conn_label);
+        m_accounts_scroll.set_child(*account_status("Reading the accounts…"));
+    }
     const auto d = m_conn_engine->dialect();
-    auto r = db::read_accounts(*m_conn, d, m_schema);
+    db::Store* st = m_journal ? &m_journal->store() : nullptr;
+    const bool writable = m_journal && m_writable;
+    const bool started = run_long("Reading the server's accounts",
+        [this, d, schema = m_schema, st, writable](LongTicket& tk) -> std::function<void()> {
+            auto cards = std::make_shared<db::AccountCards>(db::read_account_cards(
+                *m_conn, d, schema, st, writable, [&tk](std::int64_t n) { tk.count = n; return !tk.stop.load(); }));
+            return [this, cards] { paint_account_cards(*cards); };
+        });
+    if (!started) m_accounts_again = true;   // a worker is reading: long_done reads them after
+}
+
+Gtk::Label* Shell::account_status(const std::string& s) {  // accounts: one line in place of the cards
+    auto l = line(s, "acorn-status");
+    l->set_valign(Gtk::Align::START);
+    return l;
+}
+
+void Shell::paint_account_cards(const db::AccountCards& c) {  // accounts: one card per account, what it may do per table
+    auto status = [this](const std::string& s) { m_accounts_scroll.set_child(*account_status(s)); };
+    m_accounts_can = false;
+    m_accounts_new.set_visible(false);
+    if (!m_conn || !m_conn_engine) return;
+    const auto d = m_conn_engine->dialect();
+    const auto& r = c.list;
     if (auto lg = log::get(log::Area::Shell))
-        lg->info("accounts: {}", r ? std::to_string(r->accounts.size()) + " read" : r.error().message);
+        lg->info("accounts: {}{}", r ? std::to_string(r->accounts.size()) + " read" : r.error().message,
+                 c.stopped ? " (stopped)" : "");
     if (!r) {
         m_accounts_where.set_text(m_conn_label);
         status("Couldn't read the accounts: " + r.error().message + ".");
@@ -271,23 +298,30 @@ void Shell::paint_accounts() {  // accounts: one card per account, what it may d
         status(r->why);
         return;
     }
+    if (c.stopped) {   // s020c: Stop between accounts -- say so, offer the read again
+        m_accounts_editor.set_visible(false);
+        m_accounts_where.set_text(m_conn_label);
+        auto box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 8);
+        box->set_valign(Gtk::Align::START);
+        box->append(*account_status("Stopped before every account was read -- nothing to show."));
+        auto again = Gtk::make_managed<Gtk::Button>("Read Again");
+        again->set_name("shell.accounts.again");
+        again->set_halign(Gtk::Align::START);
+        again->signal_clicked().connect([this] { paint_accounts(); });
+        box->append(*again);
+        m_accounts_scroll.set_child(*box);
+        return;
+    }
     const std::size_t n = r->accounts.size();
     std::string w = std::to_string(n) + (n == 1 ? " account" : " accounts") + " · what each may do with this database's "
                     "records -- read, add, change, delete";
     if (r->only_you) w += " · only yours is shown: seeing the others takes the right to read the server's account list";
     m_accounts_where.set_text(w);
 
-    // s019b: may this connection change accounts -- and if not, why not.
-    const db::Account* me = nullptr;
-    for (const auto& a : r->accounts) if (a.you) me = &a;
-    m_accounts_why = !m_journal || !m_writable
-        ? "This connection is open read-only -- accounts can't be changed through it."
-        : r->only_you ? "Acorn can't read the server's account list through your account, so it changes no accounts here."
-        : !me || !(me->admin || me->super)
-            ? "Your account " + (me ? db::account_words(me->name, me->host) : std::string("here")) +
-                  " can't make accounts or give rights -- that takes an account that can (the server's admin's)."
-            : std::string{};
-    m_accounts_can = m_accounts_why.empty();
+    // s019b: may this connection change accounts -- and if not, why not
+    // (s020c: worked out with the read, db::accounts_why).
+    m_accounts_why = c.why;
+    m_accounts_can = m_accounts_why.empty() && m_journal;
     m_accounts_new.set_visible(true);
     m_accounts_new.set_sensitive(m_accounts_can);
     m_accounts_new.set_tooltip_text(m_accounts_can ? "Make an account on the server -- a name, a password; rights after, per table"
@@ -298,7 +332,7 @@ void Shell::paint_accounts() {  // accounts: one card per account, what it may d
     std::vector<std::string> tables;
     for (const auto& t : m_schema.tables) tables.push_back(t.name);
     const char q = m_conn->quote_ident("x").front();
-    const std::string dbname = m_accounts_can ? m_journal->store().database_name() : std::string{};
+    const std::string dbname = c.database;
     const bool maria = d == db::Dialect::MariaDB;
 
     auto flow = Gtk::make_managed<Gtk::FlowBox>();
@@ -324,9 +358,7 @@ void Shell::paint_accounts() {  // accounts: one card per account, what it may d
         if (!m_accounts_can) { flow->append(*card); continue; }
 
         // Why this one can't be changed here, if it can't.
-        const std::string hold = a.you   ? "Your own account -- Acorn doesn't change it from under the connection."
-                               : a.super ? "May do everything -- there's nothing to give it per table."
-                                         : std::string{};
+        const std::string hold = db::account_hold(a);
         auto del = Gtk::make_managed<Gtk::Button>();
         del->set_icon_name("user-trash-symbolic");
         del->add_css_class("flat");
@@ -341,19 +373,17 @@ void Shell::paint_accounts() {  // accounts: one card per account, what it may d
         head->append(*del);
         if (!hold.empty()) { card->append(*line(hold, "acorn-status")); flow->append(*card); continue; }
 
-        // Its own rights -- the boxes. Read through the store (the picture undo uses).
+        // Its own rights -- the boxes. Read through the store (the picture undo
+        // uses) on the worker, with the list.
         const auto id = db::Store::account_id(a.name, a.host);
-        auto& st = m_journal->store();
-        st.clear_failed();
-        auto got = st.get(id);
-        if (st.failed() || !got) {
+        const auto got = c.given.find(id);
+        if (got == c.given.end() || !got->second) {
             card->append(*line("Can't read what it was given here: " +
-                               (st.failed() ? st.error().message : std::string("it's gone")) + ".", "acorn-status"));
-            st.clear_failed();
+                               (got == c.given.end() ? std::string("not read") : got->second.error()) + ".", "acorn-status"));
             flow->append(*card);
             continue;
         }
-        const auto pic = std::get<db::AccountDef>(*got);
+        const auto& pic = *got->second;
         auto grid = Gtk::make_managed<Gtk::Grid>();
         grid->set_column_spacing(8);
         grid->set_row_spacing(2);
@@ -418,7 +448,7 @@ void Shell::paint_accounts() {  // accounts: one card per account, what it may d
                             auto res = db::verbs::set_rights(*m_journal, id, t, bit, now);
                             if (auto lg = log::get(log::Area::App))
                                 lg->info("journal: rights: {}", res ? m_journal->undo_label() : res.error().message);
-                            paint_accounts();
+                            paint_accounts(true);
                             if (res) journal_note("Did " + m_journal->undo_label() + ". Ctrl+Z undoes it.", "ok");
                             else     journal_note("Not changed: " + res.error().message + ".", "error");
                         });

@@ -351,3 +351,50 @@ std::expected<std::vector<std::string>, Error> account_preview(Journal& j, const
 
 }  // namespace verbs
 }  // namespace acorn::db
+
+// ── s020c: the Accounts area's read, in one go (off the UI thread) ───────────
+namespace acorn::db {
+
+std::string accounts_why(bool writable, const AccountList& l) {
+    const Account* me = nullptr;
+    for (const auto& a : l.accounts) if (a.you) me = &a;
+    return !writable ? "This connection is open read-only -- accounts can't be changed through it."
+         : l.only_you ? "Acorn can't read the server's account list through your account, so it changes no accounts here."
+         : !me || !(me->admin || me->super)
+             ? "Your account " + (me ? account_words(me->name, me->host) : std::string("here")) +
+                   " can't make accounts or give rights -- that takes an account that can (the server's admin's)."
+             : std::string{};
+}
+
+std::string account_hold(const Account& a) {
+    return a.you   ? "Your own account -- Acorn doesn't change it from under the connection."
+         : a.super ? "May do everything -- there's nothing to give it per table."
+                   : std::string{};
+}
+
+AccountCards read_account_cards(Connection& c, Dialect d, const Schema& s, Store* st, bool writable,
+                                const std::function<bool(std::int64_t)>& keep_going) {
+    AccountCards out;
+    out.list = read_accounts(c, d, s);
+    if (!out.list || !out.list->supported) return out;
+    out.why = accounts_why(writable && st, *out.list);
+    if (!out.why.empty()) return out;
+    out.database = st->database_name();
+    std::int64_t n = 0;
+    for (const auto& a : out.list->accounts) {
+        if (!account_hold(a).empty()) continue;
+        if (keep_going && !keep_going(n)) { out.stopped = true; break; }
+        const auto id = Store::account_id(a.name, a.host);
+        st->clear_failed();
+        auto got = st->get(id);
+        if (st->failed() || !got)
+            out.given.emplace(id, std::unexpected(st->failed() ? st->error().message : std::string("it's gone")));
+        else
+            out.given.emplace(id, std::get<AccountDef>(*got));
+        st->clear_failed();
+        ++n;
+    }
+    return out;
+}
+
+}  // namespace acorn::db

@@ -30,12 +30,7 @@ void Shell::build_busy() {  // long: the line and Stop, over the window
     m_busy_says.set_name("shell.busy.says");
     m_busy_stop.set_name("shell.busy.stop");
     m_busy_stop.set_tooltip_text("Stop after the read that's running (Esc)");
-    m_busy_stop.signal_clicked().connect([this] {
-        if (!m_long_ticket) return;
-        m_long_ticket->stop = true;
-        m_busy_stop.set_sensitive(false);
-        m_busy_says.set_text("Stopping…");
-    });
+    m_busy_stop.signal_clicked().connect([this] { stop_long(); });
     m_busy_bar.append(m_busy_spin);
     m_busy_bar.append(m_busy_says);
     m_busy_bar.append(m_busy_stop);
@@ -55,6 +50,13 @@ void Shell::build_busy() {  // long: the line and Stop, over the window
     add_controller(keys);
 
     m_long_done.connect(sigc::mem_fun(*this, &Shell::long_done));
+}
+
+void Shell::stop_long() {  // long: Stop (the pill's, Esc, or a window of the work's own -- Import's)
+    if (!m_long_ticket) return;
+    m_long_ticket->stop = true;
+    m_busy_stop.set_sensitive(false);
+    m_busy_says.set_text("Stopping…");
 }
 
 void Shell::shut(bool on) {  // long: no input while the worker has the connection
@@ -128,7 +130,10 @@ void Shell::long_done() {  // long: back on the UI thread
     shut(false);
     m_long_ticket.reset();
     if (auto lg = log::get(log::Area::Shell)) lg->info("long: done{}", stopped ? " (stopped)" : "");
+    sync_undo();   // s020c: a worker's journal changes weren't synced off the UI thread
     if (then) then();
+    // Accounts asked for while this ran: read them now.
+    if (std::exchange(m_accounts_again, false) && m_stack.get_visible_child_name() == "accounts") paint_accounts(true);
     // Preview asked for while this ran (a table picked in the same repaint):
     // paint it now, with what Browse shows now.
     if (std::exchange(m_preview_again, false) && m_browse_view == BrowseView::Preview) paint_preview();

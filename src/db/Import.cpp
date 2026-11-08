@@ -247,7 +247,8 @@ ImportResult import_preview(const Table& t, const Delimited& d, const ImportPlan
     return r;
 }
 
-std::expected<ImportResult, Error> import_records(Journal& j, const Table& t, const Delimited& d, const ImportPlan& p) {
+std::expected<ImportResult, Error> import_records(Journal& j, const Table& t, const Delimited& d, const ImportPlan& p,
+                                                  const std::function<bool(std::int64_t)>& keep_going) {
     if (const std::string why = check_import(t, p); !why.empty()) return std::unexpected(Error{Error::Code::Unsupported, why});
     if (const std::string why = Store::why_not_writable(t); !why.empty())
         return std::unexpected(Error{Error::Code::Unsupported, why});
@@ -256,6 +257,7 @@ std::expected<ImportResult, Error> import_records(Journal& j, const Table& t, co
     j.begin_batch(import_label(0, t.name));
     for (std::size_t i = p.header ? 1 : 0; i < d.rows.size(); ++i) {
         if (blank(d.rows[i])) continue;
+        if (keep_going && !keep_going(r.rows)) { r.stopped_at = d.lines[i]; break; }
         ++r.rows;
         auto v = row_values(t, d.rows[i], p);
         if (!v) { r.refused.push_back({d.lines[i], v.error()}); continue; }
@@ -275,6 +277,7 @@ std::string import_label(std::int64_t n, const std::string& table) {
 std::string import_says(const ImportResult& r, const std::string& table) {
     std::string s = "Imported " + std::to_string(r.records) + (r.records == 1 ? " record" : " records") + " into " + curly(table);
     if (!r.refused.empty()) s += " -- " + std::to_string(r.refused.size()) + " refused";
+    if (r.stopped_at) s += " -- stopped before line " + std::to_string(r.stopped_at) + ", the rest weren't read";
     return s;
 }
 

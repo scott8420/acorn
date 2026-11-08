@@ -75,20 +75,49 @@ void Shell::import_records_from_file() {  // import: the open dialog, then the f
         if (d->rows.empty() || d->width() == 0) { browse_note("Not imported: " + name + " is empty.", "error"); return; }
         if (!m_import_win) m_import_win = std::make_unique<ImportWindow>(*this);
         m_import_win->start(*t, name, std::move(*d),
-            [this, table](const db::ImportPlan& p, const db::Delimited& data) -> std::expected<db::ImportResult, db::Error> {
+            [this, table, name](const db::ImportPlan& p, const db::Delimited& data, ImportWindow::Done done) {
+                using Fail = std::unexpected<db::Error>;
                 const db::Table* t = browse_info();
-                if (!t || t->name != table || !m_journal)
-                    return std::unexpected(db::Error{db::Error::Code::Changed, "the table Browse shows changed"});
-                if (m_script_run) return std::unexpected(db::Error{db::Error::Code::Unsupported, "a script is running -- let it finish first"});
-                auto r = db::import_records(*m_journal, *t, data, p);
-                if (auto lg = log::get(log::Area::App))
-                    lg->info("journal: import into '{}': {}", table,
-                             r ? std::to_string(r->records) + " made, " + std::to_string(r->refused.size()) + " refused" : r.error().message);
-                if (!r) return r;
-                browse_note(db::import_says(*r, table) + (r->records > 0 ? ". Ctrl+Z takes it back." : "."),
-                            r->refused.empty() ? "ok" : "error");
-                Glib::signal_idle().connect_once([this] { load_browse_page(); });
-                return r;
+                if (!t || t->name != table || !m_journal) {
+                    done(Fail(db::Error{db::Error::Code::Changed, "the table Browse shows changed"}));
+                    return;
+                }
+                if (m_script_run) {
+                    done(Fail(db::Error{db::Error::Code::Unsupported, "a script is running -- let it finish first"}));
+                    return;
+                }
+                // s020c: on the worker (Shell_long.cpp) -- every row a write
+                // through the door, one batch, one step. `data` is the
+                // window's own: nothing can start() it again while shut.
+                const bool started = run_long("Importing " + name + " into “" + table + "”",
+                    [this, tc = *t, p, &data, done, table](LongTicket& tk) -> std::function<void()> {
+                        std::expected<db::ImportResult, db::Error> r = std::unexpected(db::Error{db::Error::Code::Internal, "not run"});
+                        try {   // the window waits for `done` -- it must come back whatever happens
+                            r = db::import_records(*m_journal, tc, data, p,
+                                                   [&tk](std::int64_t n) { tk.count = n; return !tk.stop.load(); });
+                        } catch (const std::exception& e) {
+                            if (m_journal->in_batch()) (void)m_journal->cancel_batch();
+                            r = std::unexpected(db::Error{db::Error::Code::Internal, e.what()});
+                        }
+                        if (auto lg = log::get(log::Area::App))
+                            lg->info("journal: import into '{}': {}{}", table,
+                                     r ? std::to_string(r->records) + " made, " + std::to_string(r->refused.size()) + " refused"
+                                       : r.error().message,
+                                     r && r->stopped_at ? ", stopped before line " + std::to_string(r->stopped_at) : "");
+                        return [this, r, done, table]() {
+                            if (r)
+                                browse_note(db::import_says(*r, table) + (r->records > 0 ? ". Ctrl+Z takes it back." : "."),
+                                            r->refused.empty() && !r->stopped_at ? "ok" : "error");
+                            if (r) load_browse_page();
+                            done(r);
+                        };
+                    });
+                if (!started) {
+                    done(Fail(db::Error{db::Error::Code::Unsupported, "Acorn is still reading -- try again when it's done"}));
+                    return;
+                }
+                m_import_win->running([this] { return m_long_ticket ? m_long_ticket->count.load() : std::int64_t{0}; },
+                                      [this] { stop_long(); });
             });
     });
 }

@@ -31,6 +31,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <functional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -81,6 +82,7 @@ struct ImportResult {
     std::int64_t               records = 0;   // made
     std::int64_t               rows = 0;      // the file's records looked at (not counting the names, nor empty lines)
     std::vector<ImportRefusal> refused;
+    std::size_t                stopped_at = 0;   // s020c: Stop -- the line it stopped before (0: it ran to the end)
 };
 
 // The rows that would go in, and the ones a field refuses (the database isn't
@@ -90,11 +92,17 @@ ImportResult import_preview(const Table& t, const Delimited& d, const ImportPlan
 // Every row through the door in one batch, labelled by import_label. A plan
 // check_import refuses, or a table that isn't writable by key, is refused
 // before anything is written. Nothing made: no step.
-std::expected<ImportResult, Error> import_records(Journal& j, const Table& t, const Delimited& d, const ImportPlan& p);
+//
+// s020c: `keep_going(rows looked at so far)` is asked before each row (it
+// runs on a worker); false stops there -- what went in is KEPT as the one
+// step (Ctrl+Z takes it back), stopped_at says where.
+std::expected<ImportResult, Error> import_records(Journal& j, const Table& t, const Delimited& d, const ImportPlan& p,
+                                                  const std::function<bool(std::int64_t)>& keep_going = {});
 
 // "Import 40 records into “contacts”"
 std::string import_label(std::int64_t n, const std::string& table);
-// "Imported 38 records into “contacts” -- 2 refused" (no refusals: no tail)
+// "Imported 38 records into “contacts” -- 2 refused" (no refusals: no tail);
+// stopped: "... -- stopped before line 4201, the rest weren't read"
 std::string import_says(const ImportResult& r, const std::string& table);
 // "Line 7: “birthday” needs a date like 1990-07-14"
 std::string refusal_says(const ImportRefusal& r);
