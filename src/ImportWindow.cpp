@@ -39,6 +39,8 @@ ImportWindow::ImportWindow(Gtk::Window& parent)
       m_refused_scroll("import.refused"),
       m_close("import.close") {
     set_name("import");
+    add_css_class("acorn");          // s020a: the skin on every window
+    add_css_class("acorn-dialog");
     registry::add("import", this);
     set_title("Import Records");
     set_modal(true);
@@ -86,6 +88,7 @@ ImportWindow::ImportWindow(Gtk::Window& parent)
     m_scroll.set_vexpand(true);
     m_scroll.set_min_content_height(200);
     m_scroll.set_child(m_grid);
+    m_scroll.add_css_class("acorn-well");
     page->append(m_scroll);
 
     m_says.set_xalign(0.0f);
@@ -110,6 +113,7 @@ ImportWindow::ImportWindow(Gtk::Window& parent)
     m_refused_scroll.set_policy(Gtk::PolicyType::AUTOMATIC, Gtk::PolicyType::AUTOMATIC);
     m_refused_scroll.set_vexpand(true);
     m_refused_scroll.set_child(m_refused);
+    m_refused_scroll.add_css_class("acorn-well");
     m_refused_scroll.set_visible(false);
     page->append(m_refused_scroll);
 
@@ -117,11 +121,11 @@ ImportWindow::ImportWindow(Gtk::Window& parent)
     m_cancel.set_label("Cancel");
     m_cancel.signal_clicked().connect([this] { set_visible(false); });
     m_ok.set_label("Import");
-    m_ok.add_css_class("suggested-action");
+    m_ok.add_css_class("acorn-primary");
     m_ok.set_tooltip_text("Add the records -- Ctrl+Z takes the whole import back in one step");
     m_ok.signal_clicked().connect([this] { on_import(); });
     m_close.set_label("Close");
-    m_close.add_css_class("suggested-action");
+    m_close.add_css_class("acorn-primary");
     m_close.set_visible(false);
     m_close.signal_clicked().connect([this] { set_visible(false); });
     m_plan_buttons.append(m_cancel);

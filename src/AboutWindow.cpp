@@ -10,6 +10,8 @@ namespace acorn {
 
 AboutWindow::AboutWindow(Gtk::Window& parent) {
     set_name("shell.about");
+    add_css_class("acorn");          // s020a: the skin on every window
+    add_css_class("acorn-dialog");
     registry::add("shell.about", this);
 
     set_title("About Acorn");
@@ -36,6 +38,7 @@ AboutWindow::AboutWindow(Gtk::Window& parent) {
     auto* logo = Gtk::make_managed<widgets::Image>(widgets::unregistered, "shell.about.logo");
     logo->set_from_icon_name("acorn-logo-symbolic");
     logo->set_pixel_size(88);
+    logo->add_css_class("acorn-hero-icon");   // s020a: the skin's amber
     page->append(*logo);
 
     auto* name = Gtk::make_managed<widgets::Label>(widgets::unregistered, "shell.about.name");
@@ -64,7 +67,7 @@ AboutWindow::AboutWindow(Gtk::Window& parent) {
 
     auto* close_btn = Gtk::make_managed<widgets::Button>(
         widgets::unregistered, "shell.about.close", "Close");
-    close_btn->add_css_class("suggested-action");
+    close_btn->add_css_class("acorn-primary");
     close_btn->set_halign(Gtk::Align::CENTER);
     close_btn->set_margin_top(8);
     close_btn->signal_clicked().connect([this]() { close(); });

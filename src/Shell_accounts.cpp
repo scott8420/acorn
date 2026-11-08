@@ -123,7 +123,7 @@ void Shell::build_accounts_page() {  // accounts: the Accounts area
     buttons->set_halign(Gtk::Align::END);
     m_acct_cancel.set_label("Cancel");
     m_acct_make.set_label("Make Account");
-    m_acct_make.add_css_class("suggested-action");
+    m_acct_make.add_css_class("acorn-primary");
     buttons->append(m_acct_cancel);
     buttons->append(m_acct_make);
     m_accounts_editor.append(*buttons);

@@ -9,6 +9,8 @@ namespace acorn {
 
 ShortcutsDialog::ShortcutsDialog() {
     set_name("shell.shortcuts");
+    add_css_class("acorn");          // s020a: the skin on every window
+    add_css_class("acorn-dialog");
     registry::add("shell.shortcuts", this);
 
     set_title("Keyboard Shortcuts");

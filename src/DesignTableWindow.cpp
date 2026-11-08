@@ -67,6 +67,8 @@ DesignTableWindow::DesignTableWindow(Gtk::Window& parent)
       m_cancel("design.cancel"),
       m_ok("design.apply") {
     set_name("design");
+    add_css_class("acorn");          // s020a: the skin on every window
+    add_css_class("acorn-dialog");
     registry::add("design", this);
     set_title("Design Table");
     set_modal(true);
@@ -158,6 +160,7 @@ DesignTableWindow::DesignTableWindow(Gtk::Window& parent)
     sscroll->set_min_content_height(150);
     sscroll->set_vexpand(true);
     sscroll->set_child(m_sql);
+    sscroll->add_css_class("acorn-well");
     page->append(*sscroll);
 
     m_losses.set_xalign(0.0f);
@@ -181,7 +184,7 @@ DesignTableWindow::DesignTableWindow(Gtk::Window& parent)
     m_cancel.set_label("Cancel");
     m_cancel.signal_clicked().connect([this] { set_visible(false); });
     m_ok.set_label("Apply");
-    m_ok.add_css_class("suggested-action");
+    m_ok.add_css_class("acorn-primary");
     m_ok.signal_clicked().connect([this] { on_apply(); });
     buttons->append(m_cancel);
     buttons->append(m_ok);

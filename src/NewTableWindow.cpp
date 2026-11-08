@@ -35,6 +35,8 @@ NewTableWindow::NewTableWindow(Gtk::Window& parent)
       m_cancel("newtable.cancel"),
       m_ok("newtable.create") {
     set_name("newtable");
+    add_css_class("acorn");          // s020a: the skin on every window
+    add_css_class("acorn-dialog");
     registry::add("newtable", this);
     set_title("New Table");
     set_modal(true);
@@ -91,6 +93,7 @@ NewTableWindow::NewTableWindow(Gtk::Window& parent)
     pscroll->set_policy(Gtk::PolicyType::AUTOMATIC, Gtk::PolicyType::AUTOMATIC);
     pscroll->set_min_content_height(120);
     pscroll->set_child(m_preview);
+    pscroll->add_css_class("acorn-well");
     page->append(*pscroll);
 
     auto* note = label("You can undo it: Ctrl+Z, or Undo in the menu.");
@@ -107,7 +110,7 @@ NewTableWindow::NewTableWindow(Gtk::Window& parent)
     m_cancel.set_label("Cancel");
     m_cancel.signal_clicked().connect([this] { set_visible(false); });
     m_ok.set_label("Create");
-    m_ok.add_css_class("suggested-action");
+    m_ok.add_css_class("acorn-primary");
     m_ok.signal_clicked().connect([this] { on_create(); });
     buttons->append(m_cancel);
     buttons->append(m_ok);

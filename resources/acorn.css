@@ -298,3 +298,87 @@ window.acorn scrolledwindow.acorn-list-values textview > text { background: tran
 .acorn-form popover list > row:hover,
 .acorn-form popover listview > row:hover,
 .acorn-form popover listview > row:selected { background: rgba(255, 255, 255, 0.08); }
+
+/* s020a: the skin on every window. The second windows (New Table, Design
+   Table, Import Records, About, Keyboard Shortcuts) wear window.acorn like the
+   main one; .acorn-dialog makes their ground calmer -- they hold a task, not
+   the whole app, so the gradient is quieter and the amber glow is gone. */
+window.acorn.acorn-dialog {
+    background: linear-gradient(170deg, shade(@acorn_forest_hi, 0.82), @acorn_forest_lo);
+}
+window.acorn label.error   { color: #ff9a8a; }
+window.acorn label.warning { color: @acorn_amber; }
+window.acorn label.success,
+window.acorn label.ok      { color: #9fe0a8; }
+window.acorn .dim-label    { color: @acorn_ink_dim; opacity: 1; }
+window.acorn .heading      { color: @acorn_amber; }
+window.acorn separator     { background: alpha(@acorn_ink, 0.10); }
+window.acorn checkbutton > check {
+    background: rgba(0, 0, 0, 0.25);
+    border: 1px solid rgba(255, 255, 255, 0.22);
+    color: #1d1405;
+    box-shadow: none;
+}
+window.acorn checkbutton > check:checked { background: @acorn_amber; border-color: @acorn_amber; }
+window.acorn checkbutton:disabled > check { opacity: 0.45; }
+
+/* A well: the SQL to be run, a file's first lines, the refused rows --
+   recessed like a box, the words in the skin's ink, not Adwaita's white. */
+window.acorn scrolledwindow.acorn-well {
+    background: rgba(0, 0, 0, 0.25);
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    border-radius: 8px;
+}
+window.acorn scrolledwindow.acorn-well textview,
+window.acorn scrolledwindow.acorn-well textview > text,
+window.acorn scrolledwindow.acorn-well viewport { background: transparent; color: @acorn_ink; }
+/* A text box anywhere else in the skin (a script's lines). */
+window.acorn textview,
+window.acorn textview > text { background: rgba(0, 0, 0, 0.25); color: @acorn_ink; caret-color: @acorn_amber; }
+window.acorn textview > text selection,
+window.acorn entry > text > selection { background: alpha(@acorn_amber, 0.35); color: @acorn_ink; }
+
+/* Every popover in the skin -- a drop-down's list, a menu -- the panel's
+   ground (the same as .acorn-panel's and .acorn-form's above). */
+window.acorn popover > contents,
+window.acorn popover > arrow { background: @acorn_panel; color: @acorn_ink; border: 1px solid @acorn_panel_edge; }
+window.acorn popover list,
+window.acorn popover listview,
+window.acorn popover scrolledwindow { background: transparent; color: @acorn_ink; }
+window.acorn popover list > row:hover,
+window.acorn popover listview > row:hover,
+window.acorn popover listview > row:selected { background: rgba(255, 255, 255, 0.08); }
+window.acorn popover.menu modelbutton { color: @acorn_ink; }
+window.acorn popover.menu modelbutton:hover { background: rgba(255, 255, 255, 0.08); }
+window.acorn popover.menu separator { background: alpha(@acorn_ink, 0.10); }
+
+/* GTK's own question and message windows (Gtk::AlertDialog -- Delete Account,
+   a script's Show Message and Delete Record) can't take a class, so they are
+   reached by what GTK names them: window.dialog.message. */
+window.dialog.message {
+    background: linear-gradient(170deg, shade(@acorn_forest_hi, 0.82), @acorn_forest_lo);
+    color: @acorn_ink;
+}
+window.dialog.message label.title { color: @acorn_ink; }
+window.dialog.message label { color: @acorn_ink; }
+window.dialog.message .dialog-action-area button {
+    background: transparent;
+    color: @acorn_ink;
+    border: none;
+    border-top: 1px solid alpha(@acorn_ink, 0.10);
+    border-radius: 0;
+    box-shadow: none;
+}
+window.dialog.message .dialog-action-area button + button { border-left: 1px solid alpha(@acorn_ink, 0.10); }
+window.dialog.message .dialog-action-area button:hover { background: rgba(255, 255, 255, 0.08); }
+window.dialog.message .dialog-action-area button:focus-visible { outline-color: @acorn_amber_dim; }
+window.acorn popover.menu modelbutton:focus,
+window.acorn popover.menu modelbutton:selected,
+window.acorn popover.menu modelbutton:active { background: alpha(@acorn_amber, 0.22); color: @acorn_ink; }
+window.acorn popover.menu modelbutton:disabled { color: alpha(@acorn_ink, 0.40); }
+window.acorn button:focus-visible,
+window.acorn entry:focus-visible,
+window.acorn checkbutton:focus-visible > check,
+window.acorn dropdown > button:focus-visible { outline-color: alpha(@acorn_amber, 0.60); }
+window.acorn stacksidebar row:focus-visible,
+window.acorn row:focus-visible { outline-color: alpha(@acorn_amber, 0.60); }

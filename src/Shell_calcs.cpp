@@ -390,7 +390,7 @@ void Shell::calc_section(const db::Table& t) {  // calcs: the Calculations secti
         cancel->set_name("tables.calc.cancel");
         auto save = Gtk::make_managed<Gtk::Button>(was.empty() ? "Add" : "Save");
         save->set_name("tables.calc.save");
-        save->add_css_class("suggested-action");
+        save->add_css_class("acorn-primary");
         buttons->append(*cancel);
         buttons->append(*save);
         ed->attach(*buttons, 0, 4, 3, 1);
@@ -523,7 +523,7 @@ void Shell::summary_editor(Gtk::Box& body, const db::Table& t, const std::map<st
     cancel->set_name("tables.summary.cancel");
     auto save = Gtk::make_managed<Gtk::Button>(was.empty() ? "Add" : "Save");
     save->set_name("tables.summary.save");
-    save->add_css_class("suggested-action");
+    save->add_css_class("acorn-primary");
     buttons->append(*cancel);
     buttons->append(*save);
     ed->attach(*buttons, 0, 3, 5, 1);

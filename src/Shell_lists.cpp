@@ -234,7 +234,7 @@ void Shell::list_section(const db::Table& t) {  // lists: the Value lists sectio
         cancel->set_name("tables.list.cancel");
         auto save = Gtk::make_managed<Gtk::Button>(was.empty() ? "Add" : "Save");
         save->set_name("tables.list.save");
-        save->add_css_class("suggested-action");
+        save->add_css_class("acorn-primary");
         buttons->append(*cancel);
         buttons->append(*save);
         ed->attach(*buttons, 0, 4, 4, 1);
