@@ -64,7 +64,7 @@ void Shell::list_section(const db::Table& t) {  // lists: the Value lists sectio
     if (!m_vl_editing.empty() && !m_solution.list(t.name, m_vl_editing)) m_vl_editing.clear();
     const bool editing = m_vl_new || !m_vl_editing.empty();
     const bool can = m_journal != nullptr;
-    const auto& lists = m_solution.lists_of(t.name);
+    const auto lists = m_solution.lists_for(t.name);   // s025b: its own + the shared
     const std::string table = t.name;
 
     auto body = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 8);
@@ -80,7 +80,9 @@ void Shell::list_section(const db::Table& t) {  // lists: the Value lists sectio
         ++r;
         for (const auto& [name, v] : lists) {
             if (name == m_vl_editing) continue;   // its editor is below
-            grid->attach(*cell(name, "acorn-calc-name"), 0, r);
+            auto nm = cell(v.table.empty() ? name + "  · every table" : name, "acorn-calc-name");   // s025b
+            if (v.table.empty()) nm->set_tooltip_text("Shared: every table's layouts may offer it");
+            grid->attach(*nm, 0, r);
             auto says = cell(core::value_list_says(v));
             says->set_ellipsize(Pango::EllipsizeMode::END);
             says->set_max_width_chars(48);
@@ -117,7 +119,8 @@ void Shell::list_section(const db::Table& t) {  // lists: the Value lists sectio
             del->set_name("tables.list.delete." + name);
             del->set_tooltip_text("Delete " + curly(name) + " -- Ctrl+Z brings it back");
             del->set_sensitive(can && !editing);
-            del->signal_clicked().connect([this, table, name] { drop_list(table, name); });
+            del->signal_clicked().connect([this, lt = v.table, name] { drop_list(lt, name); });   // s025b: shared: ""
+            (void)table;
             grid->attach(*del, 4, r);
             ++r;
         }
@@ -244,12 +247,21 @@ void Shell::list_section(const db::Table& t) {  // lists: the Value lists sectio
         strict_cb->set_tooltip_text("Ticked: a box offering it is a drop-down only -- no other value can be typed there");
         strict_cb->set_hexpand(true);
         buttons->prepend(*strict_cb);
+        // s025b: shared by every table -- chosen when it's made.
+        auto shared_cb = Gtk::make_managed<Gtk::CheckButton>("Every table");
+        shared_cb->set_name("tables.list.shared");
+        shared_cb->set_active(!m_vl_new && m_vl_typed.table.empty());
+        shared_cb->set_sensitive(m_vl_new);
+        shared_cb->set_tooltip_text(m_vl_new ? "Ticked: one list every table's layouts may offer (countries, states ...)"
+                                             : "Shared or not is chosen when a list is made");
+        buttons->prepend(*shared_cb);
         ed->attach(*buttons, 0, 4, 4, 1);
         body->append(*ed);
 
         // Read the widgets into m_vl_typed (and the text as typed).
-        auto gather = [this, name_e, text, from_dd, field_dd, shows_dd, tables, fields, table, strict_cb] {
-            m_vl_typed.table = table;
+        auto gather = [this, name_e, text, from_dd, field_dd, shows_dd, tables, fields, table, strict_cb, shared_cb] {
+            if (m_vl_new) m_vl_typed.table = shared_cb->get_active() ? std::string{} : table;   // s025b
+            else if (m_vl_typed.table != "") m_vl_typed.table = table;
             m_vl_typed.name = name_e->get_text();
             m_vl_typed.strict = strict_cb->get_active();   // s025a
             if (text) {
@@ -273,7 +285,9 @@ void Shell::list_section(const db::Table& t) {  // lists: the Value lists sectio
             gather();
             const auto& v = m_vl_typed;
             std::vector<std::string> taken, from_fields;
-            for (const auto& [n, x] : m_solution.lists_of(table)) if (n != (was.empty() ? v.name : was)) taken.push_back(n);
+            for (const auto& [lt, named] : m_solution.lists)   // s025b: the list itself (same table, same name) aside
+                if (v.table.empty() || lt.empty() || lt == v.table)
+                    for (const auto& [n, x] : named) if (!(lt == v.table && n == (was.empty() ? v.name : was))) taken.push_back(n);
             const db::Table* ft = v.typed() ? nullptr : m_schema.table(v.from);
             if (ft) for (const auto& c : ft->columns) from_fields.push_back(c.name);
             std::string why = v.name.empty() ? "Give it a name." : core::check_value_list(v, taken, ft ? &from_fields : nullptr);
@@ -296,6 +310,7 @@ void Shell::list_section(const db::Table& t) {  // lists: the Value lists sectio
         check();
         name_e->signal_changed().connect(check);
         strict_cb->signal_toggled().connect(check);   // s025a
+        shared_cb->signal_toggled().connect(check);   // s025b
         if (text) text->get_buffer()->signal_changed().connect(check);
         if (field_dd) field_dd->property_selected().signal_changed().connect(check);
         if (shows_dd) shows_dd->property_selected().signal_changed().connect(check);
@@ -502,7 +517,7 @@ void Shell::keep_list(const core::ValueList& v, const std::string& was) {  // li
     if (!r) { journal_note("Not kept: " + r.error().message + ".", "error"); return; }
     m_vl_new = false;
     m_vl_editing.clear();
-    if (m_table_sel == v.table) show_table(v.table);
+    if (v.table.empty() || m_table_sel == v.table) show_table(m_table_sel);   // s025b: a shared one shows under any table
     paint_layouts();
     sync_undo();
     if (m_journal->size() != before || could_redo != m_journal->can_redo())
@@ -515,7 +530,7 @@ void Shell::drop_list(const std::string& table, const std::string& name) {  // l
     if (auto lg = log::get(log::Area::App))
         lg->info("solution: delete value list '{}' of '{}': {}", name, table, r ? "done" : r.error().message);
     if (!r) { journal_note("Not deleted: " + r.error().message + ".", "error"); return; }
-    if (m_table_sel == table) show_table(table);
+    if (table.empty() || m_table_sel == table) show_table(m_table_sel);   // s025b
     paint_layouts();
     sync_undo();
     journal_note("Deleted the value list " + curly(name) + ". Ctrl+Z brings it back.", "ok");

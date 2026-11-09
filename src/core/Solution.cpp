@@ -79,11 +79,30 @@ const std::map<std::string, Summary>& Solution::summaries_of(const std::string& 
     return t == summaries.end() ? none : t->second;
 }
 
-const ValueList* Solution::list(const std::string& table, const std::string& name) const {
+const ValueList* Solution::list_exact(const std::string& table, const std::string& name) const {
     auto t = lists.find(table);
     if (t == lists.end()) return nullptr;
     auto n = t->second.find(name);
     return n == t->second.end() ? nullptr : &n->second;
+}
+
+const ValueList* Solution::list(const std::string& table, const std::string& name) const {
+    if (const auto* v = list_exact(table, name)) return v;
+    return table.empty() ? nullptr : list_exact("", name);   // s025b: shared by every table
+}
+
+std::map<std::string, ValueList> Solution::lists_for(const std::string& table) const {
+    std::map<std::string, ValueList> out = lists_of("");
+    for (const auto& [n, v] : lists_of(table)) out[n] = v;   // its own first, were a name ever both
+    return out;
+}
+
+std::vector<std::string> Solution::list_names_taken(const std::string& table) const {
+    std::vector<std::string> out;
+    for (const auto& [t, named] : lists)
+        if (table.empty() || t.empty() || t == table)
+            for (const auto& [n, v] : named) out.push_back(n);
+    return out;
 }
 
 const std::map<std::string, ValueList>& Solution::lists_of(const std::string& table) const {

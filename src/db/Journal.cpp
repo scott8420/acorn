@@ -1077,6 +1077,12 @@ Store::Id Store::list_id(const std::string& table, const std::string& name) {
 
 bool Store::parse_list_id(const Id& id, std::string& table, std::string& name) {
     if (!is_list(id)) return false;
+    // s025b: the table may be "" -- a list shared by every table.
+    if (id.size() > 8 && id.compare(6, 2, "0:") == 0 && id[8] == '/') {
+        table.clear();
+        name = id.substr(9);
+        return !name.empty();
+    }
     return parse_layout_id("layout:" + id.substr(6), table, name);
 }
 
@@ -1129,7 +1135,8 @@ std::string Store::describe(const Id& id) {
     if (parse_layout_id(id, table, name)) return "the layout " + curly(name) + " of " + curly(table);
     if (parse_calc_id(id, table, name)) return "the calculation " + curly(name) + " of " + curly(table);
     if (parse_summary_id(id, table, name)) return "the summary " + curly(name) + " of " + curly(table);
-    if (parse_list_id(id, table, name)) return "the value list " + curly(name) + " of " + curly(table);
+    if (parse_list_id(id, table, name))
+        return table.empty() ? "the shared value list " + curly(name) : "the value list " + curly(name) + " of " + curly(table);
     if (parse_script_id(id, table, name)) return "the script " + curly(name) + " of " + curly(table);
     std::string host;
     if (parse_account_id(id, name, host)) return "the account " + account_words(name, host);
@@ -1197,7 +1204,7 @@ std::optional<Record> Store::get(const Id& id) const {
     if (is_list(id)) {   // s014c: from the solution
         std::string t, n;
         if (!m_solution || !parse_list_id(id, t, n)) return std::nullopt;
-        if (const auto* v = m_solution->list(t, n)) return *v;
+        if (const auto* v = m_solution->list_exact(t, n)) return *v;   // s025b: exactly that one
         return std::nullopt;
     }
     return std::nullopt;   // "new:..." -- a declaration, never a record
@@ -2796,15 +2803,23 @@ std::expected<void, Error> save_value_list(Journal& j, const core::ValueList& v,
     Store& st = j.store();
     if (!st.solution()) return std::unexpected(Error{Error::Code::Unsupported, "there is no solution to keep value lists in"});
     st.forget_schema();
-    const Table* t = st.table_info(v.table);
-    if (st.failed()) { Error e = st.error(); st.clear_failed(); return std::unexpected(e); }
-    if (!t) return std::unexpected(Error{Error::Code::NotFound, "there's no table " + curly(v.table)});
+    if (!v.table.empty()) {   // s025b: "" -- shared by every table
+        const Table* t = st.table_info(v.table);
+        if (st.failed()) { Error e = st.error(); st.clear_failed(); return std::unexpected(e); }
+        if (!t) return std::unexpected(Error{Error::Code::NotFound, "there's no table " + curly(v.table)});
+    }
     const auto& lists = st.solution()->lists_of(v.table);
     if (!was.empty() && !lists.contains(was))
-        return std::unexpected(Error{Error::Code::NotFound, curly(v.table) + " has no value list " + curly(was)});
+        return std::unexpected(Error{Error::Code::NotFound, (v.table.empty() ? std::string("there's no shared value list ")
+                                                                             : curly(v.table) + " has no value list ") + curly(was)});
     const bool renaming = !was.empty() && was != v.name;
     std::vector<std::string> taken;
-    for (const auto& [n, x] : lists) if (n != (was.empty() ? v.name : was)) taken.push_back(n);
+    // s025b: a name taken by its own table's other lists or the shared ones (a
+    // shared one: by every list) -- the list itself (same table, same name) aside.
+    const std::string self = was.empty() ? v.name : was;
+    for (const auto& [lt, named] : st.solution()->lists)
+        if (v.table.empty() || lt.empty() || lt == v.table)
+            for (const auto& [n, x] : named) if (!(lt == v.table && n == self)) taken.push_back(n);
     std::vector<std::string> from_fields;
     const Table* from = nullptr;
     if (!v.typed() && !v.from.empty()) {
@@ -2884,7 +2899,8 @@ std::expected<void, Error> delete_script(Journal& j, const std::string& table, c
 std::expected<void, Error> delete_value_list(Journal& j, const std::string& table, const std::string& name) {
     const auto id = Store::list_id(table, name);
     if (!j.store().get(id))
-        return std::unexpected(Error{Error::Code::NotFound, curly(table) + " has no value list " + curly(name)});
+        return std::unexpected(Error{Error::Code::NotFound, (table.empty() ? std::string("there's no shared value list ")
+                                                                           : curly(table) + " has no value list ") + curly(name)});
     return j.run("Delete Value List " + curly(name), {id}, [&](Store& s) { s.put(id, std::nullopt); });
 }
 

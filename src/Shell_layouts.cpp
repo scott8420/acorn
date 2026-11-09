@@ -1131,7 +1131,7 @@ void Shell::paint_inspector() {  // layouts: the picked object's field / words /
         // s014c: the value list its box offers -- the table's own lists; one step.
         const db::Table* lt = m_schema.table(m_lay_table);
         if (lt && lt->column(o.field)) {
-            const auto& lists = m_solution.lists_of(m_lay_table);
+            const auto lists = m_solution.lists_for(m_lay_table);   // s025b: + the shared ones
             auto lnames = std::make_shared<std::vector<std::string>>();
             std::vector<Glib::ustring> lshown;
             lnames->push_back({});

@@ -2829,6 +2829,25 @@ void test_value_list_pure(const fs::path& dir) {
               core::value_list_says(st.lists["t"]["only"]) == "a · b -- only these" &&
               core::value_list_says(st.lists["t"]["free"]) == "a",
           core::value_list_says(st.lists["t"]["only"]));
+    // s025b: shared by every table -- kept under "", found from any table, a table's own first.
+    core::Solution sh;
+    sh.points_at = sol.points_at;
+    sh.lists[""]["countries"] = core::ValueList{"", "countries", {"US", "FR"}};
+    sh.lists[""]["kinds"] = core::ValueList{"", "kinds", {"x"}};
+    sh.lists["t"]["kinds"] = core::ValueList{"t", "kinds", {"own"}};
+    const auto shf = (dir / "vl_shared.acorn").string();
+    auto shb = core::save_solution(shf, sh) ? core::load_solution(shf) : std::nullopt;
+    const auto merged = sh.lists_for("t");
+    const auto taken_t = sh.list_names_taken("t"), taken_s = sh.list_names_taken("");
+    std::string tb, nm;
+    check("value list: shared -- found from any table (a table's own first), not by exact lookup; the merged list; names "
+          "taken across; round-trips in the .acorn; its id has an empty table",
+          sh.list("other", "countries") && sh.list("other", "countries")->values.size() == 2 && !sh.list_exact("other", "countries") &&
+              sh.list("t", "kinds")->values == std::vector<std::string>{"own"} && merged.size() == 2 && merged.at("kinds").table == "t" &&
+              taken_t.size() == 3 && taken_s.size() == 3 && shb && shb->list_exact("", "countries") &&
+              shb->list("anything", "countries") && Store::parse_list_id(Store::list_id("", "countries"), tb, nm) && tb.empty() &&
+              nm == "countries" && Store::describe(Store::list_id("", "countries")) == "the shared value list “countries”",
+          Store::describe(Store::list_id("", "countries")));
 }
 
 void test_value_lists(Engine* e, const ConnectParams& ro, const std::string& P) {
@@ -2856,6 +2875,22 @@ void test_value_lists(Engine* e, const ConnectParams& ro, const std::string& P) 
           m2 && same && after_same == "Change Value List “kinds”" && m3 && !sol.list("orders", "kinds") &&
           sol.list("orders", "phone kinds") && j.undo_label() == "Change Value List “kinds”",
           m3 ? j.undo_label() : m3.error().message);
+    {   // s025b: a list shared by every table -- one step; offered by any table; its name taken both ways
+        const ValueList countries{"", "countries", {"US", "FR"}};
+        auto ms = verbs::save_value_list(j, countries);
+        const bool seen = sol.list("orders", "countries") && sol.list("customers", "countries");
+        auto clash = verbs::save_value_list(j, ValueList{"orders", "countries", {"x"}});
+        auto clash2 = verbs::save_value_list(j, ValueList{"", "phone kinds", {"x"}});
+        auto del = verbs::delete_value_list(j, "", "countries");
+        const bool gone = !sol.list("orders", "countries");
+        auto back = j.undo();
+        check(P + "value lists: shared by every table -- New Value List one step, offered by any table; a table's list "
+                  "can't take its name, nor it a table's; Delete, Ctrl+Z back",
+              ms && seen && !clash && !clash2 && clash2.error().message.find("already") != std::string::npos && del && gone && back &&
+                  sol.list("orders", "countries") && g.strays() == 0,
+              clash2 ? "clash2 kept!" : clash2.error().message);
+        (void)j.undo();
+    }
     {   // s025a: ticking "only values from the list" is a change, one step; Ctrl+Z unticks it
         auto strict = *sol.list("orders", "phone kinds");
         strict.strict = true;

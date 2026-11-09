@@ -55,8 +55,15 @@ struct Solution {
     // s014c: value lists, by table then name. On disk: "value_lists": { "<table>":
     // { "<name>": {"values": [..]} | {"from": t, "field": f, "shows": s?} } }.
     std::map<std::string, std::map<std::string, ValueList>> lists;
+    // s025b: a table's list by name -- its own, else a SHARED one (kept under
+    // the table "", offered by every table's layouts).
     const ValueList* list(const std::string& table, const std::string& name) const;
-    const std::map<std::string, ValueList>& lists_of(const std::string& table) const;
+    const ValueList* list_exact(const std::string& table, const std::string& name) const;   // no falling back
+    const std::map<std::string, ValueList>& lists_of(const std::string& table) const;       // its own ("" : the shared)
+    std::map<std::string, ValueList> lists_for(const std::string& table) const;             // its own + the shared
+    // The names a new / renamed list of `table` may not take: a table's -- its
+    // own and the shared ones; a shared one's ("") -- every list's.
+    std::vector<std::string> list_names_taken(const std::string& table) const;
     // s017a: scripts, by table then name. On disk: "scripts": { "<table>":
     // { "<name>": [ {"step": "find", "field": f, "text": t}, ... ] } } --
     // a step's keys only when they say something.
