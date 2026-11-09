@@ -7,6 +7,7 @@
 // points (1/72 in) -- a layout pixel prints as a point, scaled down whole when
 // the layout is wider than the paper.
 // GTK-free, headless-testable.
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -19,6 +20,16 @@ struct Paper {
 };
 Paper paper_letter();
 Paper paper_a4();
+// s026a: the papers a layout may name, in the order offered; one by name
+// (an unknown name: nullopt).
+const std::vector<std::string>& paper_names();
+std::optional<Paper> paper_named(const std::string& name);
+// A layout's page: its paper (or `desktop` when it names none / one Acorn
+// doesn't know), on its side when landscape, its margin.
+struct Layout;
+Paper layout_paper(const Layout& l, const Paper& desktop);
+// The margins a layout may pick, points: 1/4, 1/2, 3/4, 1 inch.
+const std::vector<int>& margin_choices();
 
 struct PrintPage {
     int first = 0;   // the first record on it

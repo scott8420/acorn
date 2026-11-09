@@ -3004,6 +3004,52 @@ void test_print_pure() {
     check("print: paper -- Letter 612 x 792, A4 595 x 842; a layout fits whole (1) or is scaled to the printable width",
           L.width == 612 && L.height == 792 && std::lround(A.height) == 842 && core::print_scale(504, L) == 1.0 &&
           std::fabs(core::print_scale(1080, L) - 540.0 / 1080) < 1e-9 && core::page_words(2, 5) == "Page 2 of 5", "");
+    // s026a: a layout's page.
+    core::Layout lp;
+    lp.table = "t";
+    lp.name = "p";
+    const auto def = core::layout_paper(lp, L);
+    lp.paper = "Legal";
+    lp.landscape = true;
+    lp.margin = 72;
+    const auto legal = core::layout_paper(lp, A);
+    lp.paper = "Nope";
+    lp.landscape = false;
+    lp.margin = 999;
+    const auto odd = core::layout_paper(lp, A);
+    check("print: a layout's page -- none named: the desktop's; Legal landscape 1008 x 612 with 1 in margins; a paper "
+          "Acorn doesn't know: the desktop's; a margin clamped to 2 in",
+          def.name == "Letter" && def.margin == 36 && legal.name == "Legal" && legal.width == 1008 && legal.height == 612 &&
+              legal.margin == 72 && odd.name == "A4" && odd.margin == 144 && core::paper_names().size() == 4 &&
+              core::paper_named("A5") && std::lround(core::paper_named("A5")->width) == 420 && !core::paper_named("B5"),
+          legal.name);
+    {
+        const auto dir = fs::temp_directory_path() / ("acorn_page_" + std::to_string(::getpid()));
+        fs::create_directories(dir);
+        core::Solution sol;
+        sol.points_at.engine = "sqlite";
+        sol.points_at.path = (dir / "p.sqlite").string();
+        core::Layout a1 = core::default_layout("t", {"id"});
+        a1.name = "plain";
+        core::Layout a2 = a1;
+        a2.name = "wide";
+        a2.paper = "A4";
+        a2.landscape = true;
+        a2.margin = 18;
+        sol.layouts["t"]["plain"] = a1;
+        sol.layouts["t"]["wide"] = a2;
+        const auto file = (dir / "p.acorn").string();
+        auto back = core::save_solution(file, sol) ? core::load_solution(file) : std::nullopt;
+        std::ifstream in(file);
+        const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        std::size_t pages = 0;
+        for (auto at = text.find("\"page\""); at != std::string::npos; at = text.find("\"page\"", at + 1)) ++pages;
+        check("print: a layout's page round-trips in the .acorn -- written only when it isn't the default",
+              back && back->layout("t", "wide") && *back->layout("t", "wide") == a2 && back->layout("t", "plain") &&
+                  *back->layout("t", "plain") == a1 && pages == 1, std::to_string(pages));
+        std::error_code ec;
+        fs::remove_all(dir, ec);
+    }
 }
 
 void test_print(Engine* e, const ConnectParams& ro, const std::string& P) {

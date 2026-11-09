@@ -90,6 +90,11 @@ struct Layout {
     // list, one per row), `gap` px between labels both ways. The label's
     // size is the layout's width by the body's height.
     int across = 1, gap = 0;
+    // s026a: the PAGE it prints on -- `paper` "" (the desktop's), "Letter",
+    // "Legal", "A4", "A5"; turned on its side; the margin each side, points.
+    std::string paper;
+    bool        landscape = false;
+    int         margin = 36;
     std::vector<LayoutObject> objects;  // drawn in order (later on top)
     bool operator==(const Layout&) const = default;
 };

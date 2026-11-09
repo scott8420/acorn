@@ -226,7 +226,7 @@ void Shell::paint_preview() {  // preview: the List's layout on pages, read-only
     auto doc = std::make_shared<PreviewDoc>();
     bool kept = false;
     doc->layout = form_layout(&kept);
-    doc->paper = default_paper();
+    doc->paper = core::layout_paper(doc->layout, default_paper());   // s026a: the layout's page
     doc->scale = core::print_scale(core::labels_width(doc->layout), doc->paper);   // s016: a row of labels
     doc->room = (doc->paper.height - 2 * doc->paper.margin - kFolio) / doc->scale;
     doc->title = t->name + " — " + doc->layout.name;
@@ -342,7 +342,7 @@ void Shell::paint_preview() {  // preview: the List's layout on pages, read-only
     std::string says = std::to_string(n) +
                        (found ? " found" : "") + (n == 1 ? " record" : " records") + " · " +
                        std::to_string(doc->pages.size()) + (doc->pages.size() == 1 ? " page" : " pages") + " · " +
-                       doc->paper.name;
+                       doc->paper.name + (doc->paper.width > doc->paper.height ? " landscape" : "");
     if (doc->total > n) says += " · the first " + std::to_string(n) + " of " + std::to_string(doc->total);
     if (!groups.empty()) {   // s015b
         says += " · grouped by ";
@@ -381,6 +381,62 @@ void Shell::paint_preview() {  // preview: the List's layout on pages, read-only
     bar->append(*pdf);
     outer->append(*bar);
 
+    // s026a: the layout's page -- paper, on its side, margins. A change keeps
+    // the layout (one step) and the pages are laid out again.
+    {
+        auto page = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        page->set_name("shell.browse.page");
+        const core::Layout L = doc->layout;
+        std::vector<Glib::ustring> pw{"Desktop's (" + default_paper().name + ")"};
+        for (const auto& n2 : core::paper_names()) pw.push_back(n2);
+        auto paper_dd = Gtk::make_managed<Gtk::DropDown>(Gtk::StringList::create(pw));
+        paper_dd->set_name("shell.browse.paper");
+        const auto& names = core::paper_names();
+        const auto at = std::find(names.begin(), names.end(), L.paper);
+        paper_dd->set_selected(at == names.end() ? 0 : static_cast<guint>(at - names.begin()) + 1);
+        paper_dd->set_tooltip_text("The paper this layout prints on -- kept with the layout");
+        auto side = Gtk::make_managed<Gtk::CheckButton>("Landscape");
+        side->set_name("shell.browse.landscape");
+        side->set_active(L.landscape);
+        std::vector<Glib::ustring> mw{"¼ in margins", "½ in margins", "¾ in margins", "1 in margins"};
+        auto margin_dd = Gtk::make_managed<Gtk::DropDown>(Gtk::StringList::create(mw));
+        margin_dd->set_name("shell.browse.margin");
+        const auto& ms = core::margin_choices();
+        const auto mat = std::find(ms.begin(), ms.end(), L.margin);
+        margin_dd->set_selected(mat == ms.end() ? 1 : static_cast<guint>(mat - ms.begin()));
+        auto keep = [this, L, paper_dd, side, margin_dd] {
+            core::Layout want = L;
+            const auto& nm = core::paper_names();
+            const guint p = paper_dd->get_selected();
+            want.paper = p == 0 || p > nm.size() ? std::string{} : nm[p - 1];
+            want.landscape = side->get_active();
+            const guint m = margin_dd->get_selected();
+            want.margin = m < core::margin_choices().size() ? core::margin_choices()[m] : 36;
+            if (want == L || !m_journal) return;
+            Glib::signal_idle().connect_once([this, want] {
+                auto r = db::verbs::save_layout(*m_journal, want);
+                if (auto lg = log::get(log::Area::App))
+                    lg->info("layout: page of '{}': {}", want.name, r ? m_journal->undo_label() : r.error().message);
+                if (!r) { browse_note("Page not kept: " + r.error().message + ".", "error"); return; }
+                sync_undo();
+                browse_note("Did " + m_journal->undo_label() + " -- " + (want.paper.empty() ? std::string("the desktop's paper")
+                            : want.paper) + (want.landscape ? ", landscape" : "") + ". Ctrl+Z undoes it.", "ok");
+                paint_preview();
+            });
+        };
+        paper_dd->property_selected().signal_changed().connect(keep);
+        side->signal_toggled().connect(keep);
+        margin_dd->property_selected().signal_changed().connect(keep);
+        page->append(*paper_dd);
+        page->append(*side);
+        page->append(*margin_dd);
+        outer->append(*page);
+    }
+    if (m_print_when_ready && why.empty()) {   // s026a: Ctrl+P asked for these pages
+        m_print_when_ready = false;
+        Glib::signal_idle().connect_once([this] { print_preview(); });
+    }
+
     // The pages, one under another, at their size in points.
     for (std::size_t i = 0; i < doc->pages.size(); ++i) {
         auto da = Gtk::make_managed<Gtk::DrawingArea>();
@@ -400,6 +456,15 @@ void Shell::paint_preview() {  // preview: the List's layout on pages, read-only
     });  // the worker
 }
 
+void Shell::print_shortcut() {  // preview: s026a -- Ctrl+P: the shown layout's pages, then the print dialog
+    if (!m_conn || !browse_info() || m_finding) return;
+    if (m_stack.get_visible_child_name() != "browse") m_stack.set_visible_child("browse");
+    if (m_browse_view == BrowseView::Preview && m_preview && !m_preview->pages.empty() && !m_busy) { print_preview(); return; }
+    m_print_when_ready = true;   // the Preview paint prints once its pages land
+    if (m_browse_view == BrowseView::Preview) paint_preview();
+    else m_browse_preview_btn.set_active(true);
+}
+
 void Shell::print_preview() {  // preview: Print... -- the same pages through GtkPrintOperation
     auto doc = m_preview;
     if (!doc || doc->pages.empty()) return;
@@ -409,8 +474,11 @@ void Shell::print_preview() {  // preview: Print... -- the same pages through Gt
     op->set_unit(Gtk::Unit::POINTS);
     op->set_use_full_page(true);   // (0, 0) is the paper's corner: the margins are ours
     auto setup = Gtk::PageSetup::create();
-    setup->set_paper_size(Gtk::PaperSize(doc->paper.name == "A4" ? "iso_a4" : doc->paper.name == "Letter" ? "na_letter"
-                                                                                                        : Gtk::PaperSize::get_default()));
+    const std::string& pn = doc->paper.name;   // s026a: + Legal, A5, landscape
+    setup->set_paper_size(Gtk::PaperSize(pn == "A4" ? "iso_a4" : pn == "Letter" ? "na_letter" : pn == "Legal" ? "na_legal"
+                                         : pn == "A5" ? "iso_a5" : Gtk::PaperSize::get_default()));
+    setup->set_orientation(doc->paper.width > doc->paper.height ? Gtk::PageOrientation::LANDSCAPE
+                                                                : Gtk::PageOrientation::PORTRAIT);
     op->set_default_page_setup(setup);
     op->signal_draw_page().connect([doc](const Glib::RefPtr<Gtk::PrintContext>& ctx, int nr) {
         if (nr >= 0 && static_cast<std::size_t>(nr) < doc->pages.size()) draw_page(ctx->get_cairo_context(), *doc, nr);

@@ -32,6 +32,7 @@ void Shell::bind_journal() {  // journal: win.undo / win.redo / win.new-table + 
     m_design_table_action  = add_action("design-table",  sigc::mem_fun(*this, &Shell::on_design_table));   // s007b
     m_find_action          = add_action("find",          sigc::mem_fun(*this, &Shell::start_find));        // s013a
     m_show_all_action      = add_action("show-all",      sigc::mem_fun(*this, &Shell::show_all));          // s013a
+    m_print_action         = add_action("print",         sigc::mem_fun(*this, &Shell::print_shortcut));    // s026a
 
     auto keys = Gtk::EventControllerKey::create();
     keys->set_propagation_phase(Gtk::PropagationPhase::BUBBLE);
@@ -98,6 +99,7 @@ void Shell::sync_undo() {  // journal: re-label + grey Undo / Redo / New Table
         m_edit_menu->append("Delete Record", "win.delete-record");
         m_edit_menu->append("Find…", "win.find");          // s013a
         m_edit_menu->append("Show All", "win.show-all");
+        m_edit_menu->append("Print…", "win.print");        // s026a
     }
 }
 

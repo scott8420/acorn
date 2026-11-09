@@ -292,6 +292,7 @@ private:
     // ── preview + print (s015a) -- src/Shell_preview.cpp ──────────────────────
     void paint_preview();                        // category: preview: the List's layout on pages, read-only
     void print_preview();                        // category: preview: Print... -- GtkPrintOperation over the same pages
+    void print_shortcut();                       // category: preview: s026a -- Ctrl+P: Preview, then Print...
     void save_preview_pdf();                     // category: preview: Save as PDF... -- Cairo's PDF surface, the same pages
     void script_section(const db::Table& t);     // category: scripts: s017a -- the Tables area's Scripts section (list or editor)
     void keep_script(const core::Script& s, const std::string& was);   // category: scripts: verbs::save_script, the note, a repaint
@@ -478,6 +479,8 @@ private:
     bool                            m_export_tab = false;   // tab-separated (else comma)
     widgets::Button                 m_browse_import;        // s018b: records in from CSV / TSV
     Glib::RefPtr<Gio::SimpleAction> m_find_action, m_show_all_action;
+    Glib::RefPtr<Gio::SimpleAction> m_print_action;   // s026a: win.print (Ctrl+P)
+    bool                            m_print_when_ready = false;   // s026a: Print... once Preview's pages land
     // s006c -- the record panel and its verbs.
     widgets::Label                  m_browse_note;    // "Changed “age”. Ctrl+Z undoes it." / a refusal
     widgets::Button                 m_browse_new, m_browse_delete;

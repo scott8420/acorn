@@ -171,6 +171,11 @@ std::optional<Solution> load_solution(const std::string& file) {
                                 l.subs.push_back(std::move(sub));
                             }
                     }
+                    if (auto pg = lj.find("page"); pg != lj.end() && pg->is_object()) {   // s026a
+                        l.paper = str_or_empty(*pg, "paper");
+                        if (auto ls = pg->find("landscape"); ls != pg->end() && ls->is_boolean()) l.landscape = ls->get<bool>();
+                        if (auto mg = pg->find("margin"); mg != pg->end() && mg->is_number()) l.margin = std::clamp(mg->get<int>(), 0, 144);
+                    }
                     if (auto lb = lj.find("labels"); lb != lj.end() && lb->is_object()) {   // s016
                         l.across = std::max(1, num_or_0(*lb, "across"));
                         l.gap = num_or_0(*lb, "gap");
@@ -317,6 +322,13 @@ bool save_solution(const std::string& file, const Solution& s) {
                 objects.push_back(std::move(oj));
             }
             layouts[table][name] = {{"width", l.width}, {"height", l.height}, {"objects", std::move(objects)}};
+            if (!l.paper.empty() || l.landscape || l.margin != 36) {   // s026a: only when it isn't the default page
+                nlohmann::json pg = nlohmann::json::object();
+                if (!l.paper.empty()) pg["paper"] = l.paper;
+                if (l.landscape) pg["landscape"] = true;
+                if (l.margin != 36) pg["margin"] = l.margin;
+                layouts[table][name]["page"] = std::move(pg);
+            }
             if (l.across > 1)   // s016: only for labels
                 layouts[table][name]["labels"] = {{"across", l.across}, {"gap", l.gap}};
             if (l.header || l.footer || !l.subs.empty()) {   // s010d: only when there are parts (an older Acorn reads it as all body)

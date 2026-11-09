@@ -110,6 +110,7 @@ const std::vector<ShortcutSpec>& shortcut_registry() {
         // ── Browse (s013a) ────────────────────────────────────────────────────
         {"Browse", "win.find",     {"<Ctrl>f"}, "", "Find records -- type what to look for in the layout's boxes"},
         {"Browse", "win.show-all", {"<Ctrl>j"}, "", "Show every record again (after a find)"},
+        {"Browse", "win.print",    {"<Ctrl>p"}, "", "Print the shown layout -- Preview, then the print dialog"},
         {"Browse", "", {}, "Enter", "In Find: find the records that match every box"},
         {"Browse", "", {}, "Esc", "In Find: back to the records as they were"},
 

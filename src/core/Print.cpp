@@ -1,4 +1,7 @@
 #include "core/Print.hpp"
+#include "core/Layout.hpp"
+
+#include <algorithm>
 
 #include <algorithm>
 
@@ -6,6 +9,28 @@ namespace acorn::core {
 
 Paper paper_letter() { return {"Letter", 612, 792, 36}; }
 Paper paper_a4() { return {"A4", 595.28, 841.89, 36}; }
+
+const std::vector<std::string>& paper_names() {
+    static const std::vector<std::string> n{"Letter", "Legal", "A4", "A5"};
+    return n;
+}
+std::optional<Paper> paper_named(const std::string& name) {
+    if (name == "Letter") return paper_letter();
+    if (name == "Legal") return Paper{"Legal", 612, 1008, 36};
+    if (name == "A4") return paper_a4();
+    if (name == "A5") return Paper{"A5", 419.53, 595.28, 36};
+    return std::nullopt;
+}
+Paper layout_paper(const Layout& l, const Paper& desktop) {
+    Paper p = paper_named(l.paper).value_or(desktop);
+    if (l.landscape && p.width < p.height) std::swap(p.width, p.height);
+    p.margin = std::clamp(l.margin, 0, 144);
+    return p;
+}
+const std::vector<int>& margin_choices() {
+    static const std::vector<int> m{18, 36, 54, 72};
+    return m;
+}
 
 std::vector<PrintPage> paginate(int header, int body, int footer, int records, double room) {
     std::vector<PrintPage> out;
