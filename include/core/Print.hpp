@@ -45,8 +45,11 @@ std::vector<PrintPage> paginate(int header, int body, int footer, int records, d
 // block marked `keep` (a leading sub-summary) is never the last thing on a
 // page while something follows it -- it moves over with what it heads.
 // No blocks: one page.
+// s027b: `breaks[i]` -- a page ends after block i; `carry[i]` -- the height a
+// page STARTING at block i (not the first page) gives to repeated headings.
 std::vector<PrintPage> paginate_blocks(int header, int footer, const std::vector<int>& heights,
-                                       const std::vector<bool>& keep, double room);
+                                       const std::vector<bool>& keep, double room,
+                                       const std::vector<bool>& breaks = {}, const std::vector<int>& carry = {});
 
 // How much a layout `width` wide is scaled to fit `paper`'s printable width
 // (1 when it fits).

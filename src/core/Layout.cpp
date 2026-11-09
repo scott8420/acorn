@@ -1,6 +1,7 @@
 #include "core/Layout.hpp"
 
 #include <algorithm>
+#include <map>
 
 // core/Layout.cpp -- the default layout and the model's own checks.
 
@@ -648,24 +649,39 @@ std::vector<ReportBlock> report_blocks(const Layout& l, const std::vector<std::v
         while (k < ka.size() && k < kc.size() && ka[k] == kc[k]) ++k;
         return static_cast<int>(k);
     };
+    std::map<int, int> open;   // s027b: level -> its leading sub's block, while its group runs
+    auto push = [&](ReportBlock b) {
+        const int lv = b.part == Part::Sub ? group_level(l, b.sub) : -1;
+        const bool lead = b.part == Part::Sub && l.subs[static_cast<std::size_t>(b.sub)].leading && lv >= 0;
+        if (lead) open.erase(open.lower_bound(lv), open.end());   // its level starts again; deeper ones too
+        const bool trail = b.part == Part::Sub && !l.subs[static_cast<std::size_t>(b.sub)].leading && lv >= 0;
+        for (const auto& [lvl, at] : open)
+            if (!trail || lvl <= lv) b.heads.push_back(at);   // a foot is headed by its own level and those outside it
+        out.push_back(std::move(b));
+        if (lead) open[lv] = static_cast<int>(out.size()) - 1;
+    };
     for (int r = 0; r < n; ++r) {
         const int starts = r == 0 ? 0 : parts_at(r - 1, r);       // groups at this level and in start here
         const int ends = r == n - 1 ? 0 : parts_at(r, r + 1);     // ... end here
         if (r == 0)   // s027a: the leading grand summary, once, above everything (its values: the first record's)
             for (const auto& bd : bs)
                 if (bd.part == Part::Sub && l.subs[static_cast<std::size_t>(bd.sub)].leading && l.subs[static_cast<std::size_t>(bd.sub)].by.empty())
-                    out.push_back({Part::Sub, bd.sub, r});
+                    push({Part::Sub, bd.sub, r});
         for (const auto& bd : bs)
             if (bd.part == Part::Sub && l.subs[static_cast<std::size_t>(bd.sub)].leading && group_level(l, bd.sub) >= starts)
-                out.push_back({Part::Sub, bd.sub, r});
-        out.push_back({Part::Body, -1, r});
+                push({Part::Sub, bd.sub, r});
+        push({Part::Body, -1, r});
         for (const auto& bd : bs)
             if (bd.part == Part::Sub && !l.subs[static_cast<std::size_t>(bd.sub)].leading && group_level(l, bd.sub) >= ends)
-                out.push_back({Part::Sub, bd.sub, r});
+                push({Part::Sub, bd.sub, r});
+        open.erase(open.lower_bound(ends), open.end());   // s027b: the groups ending here are headed no more
+        if (r < n - 1 && !out.empty())   // s027b: a page_after sub's group ends here -> a new page
+            for (int k = 0; k < static_cast<int>(l.subs.size()); ++k)
+                if (l.subs[static_cast<std::size_t>(k)].page_after && group_level(l, k) >= ends) out.back().break_after = true;
         if (r == n - 1)   // s027a: the trailing grand summary, once, under everything
             for (const auto& bd : bs)
                 if (bd.part == Part::Sub && !l.subs[static_cast<std::size_t>(bd.sub)].leading && l.subs[static_cast<std::size_t>(bd.sub)].by.empty())
-                    out.push_back({Part::Sub, bd.sub, r});
+                    push({Part::Sub, bd.sub, r});
     }
     return out;
 }

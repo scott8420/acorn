@@ -168,6 +168,7 @@ std::optional<Solution> load_solution(const std::string& file) {
                                 sub.by = str_or_empty(x, "by");
                                 sub.leading = str_or_empty(x, "when") != "trailing";
                                 sub.height = num_or_0(x, "height");
+                                if (auto pa = x.find("page_after"); pa != x.end() && pa->is_boolean()) sub.page_after = pa->get<bool>();   // s027b
                                 l.subs.push_back(std::move(sub));
                             }
                     }
@@ -349,8 +350,10 @@ bool save_solution(const std::string& file, const Solution& s) {
                 layouts[table][name]["parts"] = {{"header", l.header}, {"footer", l.footer}};
                 if (!l.subs.empty()) {   // s015b: only when there are some
                     nlohmann::json subs = nlohmann::json::array();
-                    for (const auto& x : l.subs)
+                    for (const auto& x : l.subs) {
                         subs.push_back({{"by", x.by}, {"when", x.leading ? "leading" : "trailing"}, {"height", x.height}});
+                        if (x.page_after) subs.back()["page_after"] = true;   // s027b: only when on
+                    }
                     layouts[table][name]["parts"]["subs"] = std::move(subs);
                 }
             }

@@ -43,21 +43,26 @@ std::vector<PrintPage> paginate(int header, int body, int footer, int records, d
 }
 
 std::vector<PrintPage> paginate_blocks(int header, int footer, const std::vector<int>& heights,
-                                       const std::vector<bool>& keep, double room) {
+                                       const std::vector<bool>& keep, double room,
+                                       const std::vector<bool>& breaks, const std::vector<int>& carry) {
     std::vector<PrintPage> out;
     const int n = static_cast<int>(heights.size());
     if (n == 0) { out.push_back({0, 0}); return out; }
     const double left = room - header - footer;
     auto kept = [&](int i) { return static_cast<std::size_t>(i) < keep.size() && keep[static_cast<std::size_t>(i)]; };
+    auto broke = [&](int i) { return static_cast<std::size_t>(i) < breaks.size() && breaks[static_cast<std::size_t>(i)]; };
     int first = 0;
     while (first < n) {
-        double used = 0;
+        // s027b: a page that starts mid-group repeats its headings first.
+        double used = first > 0 && static_cast<std::size_t>(first) < carry.size() ? carry[static_cast<std::size_t>(first)] : 0;
         int end = first;   // one past the last that fits
+        bool forced = false;
         while (end < n && (end == first || used + heights[static_cast<std::size_t>(end)] <= left + 1e-6)) {
             used += heights[static_cast<std::size_t>(end)];
             ++end;
+            if (broke(end - 1)) { forced = true; break; }   // s027b: a page break after a group
         }
-        if (end < n) {   // a heading left at the foot goes over with what it heads (unless it's all the page has)
+        if (end < n && !forced) {   // a heading left at the foot goes over with what it heads (unless it's all the page has)
             int e = end;
             while (e > first && kept(e - 1)) --e;
             if (e > first) end = e;

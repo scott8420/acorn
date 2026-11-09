@@ -1003,6 +1003,24 @@ void Shell::paint_inspector() {  // layouts: the picked object's field / words /
                                  (here ? "" : " (there's no such field now -- Preview leaves it out)"), here ? nullptr : "acorn-missing");
             lb->set_hexpand(true);
             row->append(*lb);
+            if (!x.by.empty()) {   // s027b: a new page after each of its groups
+                auto pa = Gtk::make_managed<Gtk::CheckButton>("New page after each");
+                pa->set_name("layouts.sub.page_after." + std::to_string(i));
+                pa->set_active(x.page_after);
+                pa->set_sensitive(can);
+                pa->set_tooltip_text("Preview starts a new page after each group (not after the last)");
+                pa->signal_toggled().connect([this, i, pa, gen] {
+                    if (gen != m_lay_gen || i >= m_lay.subs.size()) return;
+                    auto l = m_lay;
+                    l.subs[i].page_after = pa->get_active();
+                    if (l == m_lay) return;
+                    const std::string what = std::string(pa->get_active() ? "A new page after each group of the "
+                                                                          : "No new page after the groups of the ") +
+                                             core::sub_label(l.subs[i]);
+                    Glib::signal_idle().connect_once([this, l, what] { keep_layout(l, what); });
+                });
+                row->append(*pa);
+            }
             auto rm = Gtk::make_managed<Gtk::Button>();
             rm->set_icon_name("list-remove-symbolic");
             rm->add_css_class("flat");

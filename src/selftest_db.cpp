@@ -3057,6 +3057,11 @@ void test_print_pure() {
         words.bold = true;
         t1.objects.push_back(words);
         sol.layouts["t"]["typed"] = t1;
+        core::Layout rb = a1;   // s027b: a sub with a page after each group
+        rb.name = "report";
+        (void)core::add_sub(rb, "id", true);
+        rb.subs[0].page_after = true;
+        sol.layouts["t"]["report"] = rb;
         auto back2 = core::save_solution(file, sol) ? core::load_solution(file) : std::nullopt;
         std::ifstream in2(file);
         const std::string text2((std::istreambuf_iterator<char>(in2)), std::istreambuf_iterator<char>());
@@ -3068,7 +3073,9 @@ void test_print_pure() {
               core::font_desc(words, "Sans", 10) == "Serif Bold 18" && core::font_desc(size_o, "Sans", 9) == "Sans 12" &&
                   core::font_desc(plain_o, "Sans", 9) == "Sans 9" && !core::has_font(plain_o) && core::has_font(size_o) &&
                   core::font_says(words) == "Serif 18 bold" && core::font_says(plain_o) == "the default type" &&
-                  back2 && back2->layout("t", "typed") && *back2->layout("t", "typed") == t1 && types == 1,
+                  back2 && back2->layout("t", "typed") && *back2->layout("t", "typed") == t1 && types == 1 &&
+                  back2->layout("t", "report") && back2->layout("t", "report")->subs.at(0).page_after &&
+                  text2.find("page_after") != std::string::npos,
               core::font_desc(words, "Sans", 10) + " / " + std::to_string(types));
         check("print: a layout's page round-trips in the .acorn -- written only when it isn't the default",
               back && back->layout("t", "wide") && *back->layout("t", "wide") == a2 && back->layout("t", "plain") &&
@@ -3235,9 +3242,31 @@ void test_report_pure(const fs::path& dir) {
         {Part::Sub, 0, 0}, {Part::Sub, 1, 0}, {Part::Body, -1, 0}, {Part::Body, -1, 1}, {Part::Sub, 2, 1},
         {Part::Sub, 1, 2}, {Part::Body, -1, 2}, {Part::Sub, 2, 2}, {Part::Sub, 3, 2},
         {Part::Sub, 0, 3}, {Part::Sub, 1, 3}, {Part::Body, -1, 3}, {Part::Sub, 2, 3}, {Part::Sub, 3, 3}};
+    auto bare = [](std::vector<B> v) { for (auto& x : v) { x.heads.clear(); x.break_after = false; } return v; };   // s027b
     const auto got = core::report_blocks(g2, keys);
     check("report: blocks -- a state's heading, a town's, the town's records, the town's foot, the state's foot (two levels)",
-          got == want, std::to_string(got.size()) + " blocks");
+          bare(got) == want, std::to_string(got.size()) + " blocks");
+    // s027b: what heads each block, and a page break after each state.
+    const std::vector<int> h3 = got[3].heads, h5 = got[5].heads, h11 = got[11].heads, h13 = got[13].heads;
+    check("report: the headings over a block -- a body under its state and town; a town heading under its state; the "
+          "next state's records under the next headings; a foot still under its own",
+          h3 == std::vector<int>{0, 1} && h5 == std::vector<int>{0} && h11 == std::vector<int>{9, 10} && h13 == std::vector<int>{9} &&
+              got[0].heads.empty() && got[9].heads.empty(),
+          std::to_string(h11.size()));
+    core::Layout g5 = g2;
+    g5.subs[0].page_after = true;   // the leading state sub
+    const auto pb = core::report_blocks(g5, keys);
+    int breaks = 0, at = -1;
+    for (int k = 0; k < static_cast<int>(pb.size()); ++k) if (pb[static_cast<std::size_t>(k)].break_after) { ++breaks; at = k; }
+    check("report: a new page after each state -- a break after TN's last block (its foot), none after the last state",
+          breaks == 1 && at == 8 && bare(pb) == want, std::to_string(breaks) + " at " + std::to_string(at));
+    const auto pp1 = core::paginate_blocks(0, 0, {40, 32, 32, 40, 32}, {}, 1000, {false, false, true, false, false});
+    const auto pp2 = core::paginate_blocks(0, 0, {40, 32, 32, 32}, {true, false, false, false}, 100);
+    const auto pp3 = core::paginate_blocks(0, 0, {40, 32, 32, 32}, {true, false, false, false}, 100, {}, {0, 40, 40, 40});
+    check("report: pages -- a break ends a page however much room is left; repeated headings take a mid-group page's room",
+          pp1 == std::vector<core::PrintPage>{{0, 3}, {3, 2}} && pp2 == std::vector<core::PrintPage>{{0, 2}, {2, 2}} &&
+              pp3 == std::vector<core::PrintPage>{{0, 2}, {2, 1}, {3, 1}},
+          std::to_string(pp3.size()));
     core::Layout plain = core::default_layout("t", {"a"});
     check("report: no subs -- one body per record; no records -- nothing",
           core::report_blocks(plain, {{}, {}, {}}) == std::vector<B>{{Part::Body, -1, 0}, {Part::Body, -1, 1}, {Part::Body, -1, 2}} &&
@@ -3277,7 +3306,7 @@ void test_report_pure(const fs::path& dir) {
     check("report: grand summaries -- the leading one first above every heading, the trailing one last under every "
           "foot; no group level; the groups unchanged; words",
           lg == 0 && tg == static_cast<int>(g3.subs.size()) - 1 && gsub(lg).by.empty() && gsub(lg).leading && !gsub(tg).leading &&
-              gb.size() == want.size() + 2 && gb.front() == B{Part::Sub, lg, 0} && gb.back() == B{Part::Sub, tg, 3} &&
+              gb.size() == want.size() + 2 && bare({gb.front()})[0] == B{Part::Sub, lg, 0} && gb.back() == B{Part::Sub, tg, 3} &&
               core::group_fields(g3) == core::group_fields(g2) && core::group_level(g3, lg) == -1 &&
               core::sub_label(gsub(lg)) == "leading grand summary" && core::sub_label(gsub(tg)) == "trailing grand summary" &&
               core::check_layout(g3).empty() && core::bands(g3)[0].sub == lg,

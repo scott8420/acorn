@@ -188,6 +188,14 @@ void draw_page(const Cairo::RefPtr<Cairo::Context>& cr, const PreviewDoc& d, int
     const bool any = !lead.empty() || L.objects.empty();
     if (header > 0 && any) draw_part(cr, d, band_of(L, core::Part::Header), lead, 0);
     double y = header;
+    if (pg.first > 0 && pg.count > 0)   // s027b: mid-group -- its headings again, "continued"
+        for (int h : d.blocks[static_cast<std::size_t>(pg.first)].at.heads) {
+            if (h < 0 || static_cast<std::size_t>(h) >= d.blocks.size()) continue;
+            const auto& hb = d.blocks[static_cast<std::size_t>(h)];
+            draw_part(cr, d, band_of(L, core::Part::Sub, hb.at.sub), hb.sub, y);
+            text_in(cr, "(continued)", 0, y, L.width, std::min(hb.height, 24), Pango::Alignment::RIGHT, 0.45);
+            y += hb.height;
+        }
     for (int k = 0; k < pg.count; ++k) {
         const auto& b = d.blocks[static_cast<std::size_t>(pg.first + k)];
         if (b.at.part == core::Part::Sub) draw_part(cr, d, band_of(L, core::Part::Sub, b.at.sub), b.sub, y);
@@ -316,14 +324,18 @@ void Shell::paint_preview() {  // preview: the List's layout on pages, read-only
             doc->blocks.push_back(std::move(blk));
         }
     }
-    std::vector<int> heights;
-    std::vector<bool> keep;
+    std::vector<int> heights, carry;
+    std::vector<bool> keep, breaks;
     for (const auto& b : doc->blocks) {
         heights.push_back(b.height);
         keep.push_back(b.at.part == core::Part::Sub && doc->layout.subs[static_cast<std::size_t>(b.at.sub)].leading);
+        breaks.push_back(b.at.break_after);   // s027b
+        int c = 0;
+        for (int h : b.at.heads) if (h >= 0 && static_cast<std::size_t>(h) < doc->blocks.size()) c += doc->blocks[static_cast<std::size_t>(h)].height;
+        carry.push_back(c);
     }
     doc->pages = core::paginate_blocks(core::part_height(doc->layout, core::Part::Header),
-                                       core::part_height(doc->layout, core::Part::Footer), heights, keep, doc->room);
+                                       core::part_height(doc->layout, core::Part::Footer), heights, keep, doc->room, breaks, carry);
     if (auto lg = log::get(log::Area::Shell))
         lg->info("preview: '{}' {} records -> {} pages ({}, scale {:.3f}){}", doc->title, doc->records.size(), doc->pages.size(),
                  doc->paper.name, doc->scale, why.empty() ? "" : " -- " + why);

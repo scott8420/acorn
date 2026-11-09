@@ -76,6 +76,7 @@ struct SubSummary {
     std::string by;        // the field the records are grouped by
     bool leading = true;   // above its group (else below)
     int height = 0;
+    bool page_after = false;   // s027b: a new page after each of its groups (not after the last)
     bool operator==(const SubSummary&) const = default;
 };
 
@@ -323,6 +324,12 @@ struct ReportBlock {
     Part part = Part::Body;   // Body or Sub
     int sub = -1;
     int record = 0;
+    // s027b: a page ends after it (a group of a page_after sub ends here).
+    bool break_after = false;
+    // s027b: the leading sub blocks heading it (indexes into the run, outermost
+    // first) -- what a page that starts here repeats, marked "continued". A
+    // leading sub's own block lists only the levels outside it.
+    std::vector<int> heads = {};
     bool operator==(const ReportBlock&) const = default;
 };
 std::vector<ReportBlock> report_blocks(const Layout& l, const std::vector<std::vector<std::string>>& keys);
