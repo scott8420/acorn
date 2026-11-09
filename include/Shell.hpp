@@ -91,6 +91,10 @@ class DesignTableWindow;
 
 struct PreviewDoc;   // s015a: Shell_preview.cpp
 
+// s026b: an object's type (core::has_font) onto its widgets -- every Label and
+// Entry in `w`, as Pango attributes. Nothing when it has the default type.
+void apply_object_type(Gtk::Widget& w, const core::LayoutObject& o);
+
 class Shell : public Gtk::ApplicationWindow {
 public:
     Shell();

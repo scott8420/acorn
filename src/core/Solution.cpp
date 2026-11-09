@@ -198,6 +198,13 @@ std::optional<Solution> load_solution(const std::string& file) {
                             if (o.kind == ObjectKind::Button) o.script = str_or_empty(oj, "script");   // s017b
                             o.text = str_or_empty(oj, "text");
                             o.align = parse_align(str_or_empty(oj, "align"));   // s012b: missing -> right
+                            if (auto ft = oj.find("type"); ft != oj.end() && ft->is_object()) {   // s026b
+                                const std::string fam = str_or_empty(*ft, "font");
+                                const auto& fams = font_families();
+                                if (std::find(fams.begin(), fams.end(), fam) != fams.end()) o.font = fam;
+                                o.size = std::clamp(num_or_0(*ft, "size"), 0, 96);
+                                if (auto b = ft->find("bold"); b != ft->end() && b->is_boolean()) o.bold = b->get<bool>();
+                            }
                             o.x = num_or_0(oj, "x");
                             o.y = num_or_0(oj, "y");
                             o.w = num_or_0(oj, "w");
@@ -319,6 +326,13 @@ bool save_solution(const std::string& file, const Solution& s) {
                 }
                 else oj["kind"] = o.kind == ObjectKind::Line ? "line" : "box";   // s010c: drawing has only a place
                 oj["x"] = o.x; oj["y"] = o.y; oj["w"] = o.w; oj["h"] = o.h;
+                if (has_font(o)) {   // s026b: only when it isn't the default type
+                    nlohmann::json ft = nlohmann::json::object();
+                    if (!o.font.empty()) ft["font"] = o.font;
+                    if (o.size > 0) ft["size"] = o.size;
+                    if (o.bold) ft["bold"] = true;
+                    oj["type"] = std::move(ft);
+                }
                 objects.push_back(std::move(oj));
             }
             layouts[table][name] = {{"width", l.width}, {"height", l.height}, {"objects", std::move(objects)}};

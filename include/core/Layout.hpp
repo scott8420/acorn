@@ -59,6 +59,11 @@ struct LayoutObject {
     Align align = Align::Right;        // s012b: Text -- how the words sit
     std::string list;                  // s014c: Field -- the table's value list its box offers ("" none)
     std::string script;                // s017b: Button -- the table's script it runs ("" none)
+    // s026b: Text / Field / Related -- its type: a family ("" = the default,
+    // "Sans", "Serif", "Monospace"), a size in points (0 = the default), bold.
+    std::string font;
+    int         size = 0;
+    bool        bold = false;
     bool operator==(const LayoutObject&) const = default;
 };
 
@@ -245,6 +250,16 @@ const char* align_name(Align a);
 Align parse_align(const std::string& s);
 // How the inspector and the notes say it: "left" / "centred" / "right".
 const char* align_label(Align a);
+
+// ── s026b: type per object ──────────────────────────────────────────────────
+const std::vector<std::string>& font_families();   // Sans, Serif, Monospace
+const std::vector<int>& font_sizes();              // 8 .. 36
+bool has_font(const LayoutObject& o);              // anything but the default
+// A Pango description: its family (else `family`), its size (else `size`),
+// Bold when bold -- "Serif Bold 12".
+std::string font_desc(const LayoutObject& o, const std::string& family, int size);
+// How the notes say it: "Serif 12 bold" / "the default type".
+std::string font_says(const LayoutObject& o);
 
 // ── s012a: the list view ────────────────────────────────────────────────────
 // Browse -> List draws a layout as rows: the header once at the top, the body

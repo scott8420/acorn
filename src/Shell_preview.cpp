@@ -72,10 +72,10 @@ core::Paper default_paper() {
 }
 
 void text_in(const Cairo::RefPtr<Cairo::Context>& cr, const std::string& s, double x, double y, double w, double h,
-             Pango::Alignment how, double grey, bool bold = false) {
+             Pango::Alignment how, double grey, bool bold = false, const core::LayoutObject* o = nullptr) {
     if (s.empty() || w <= 2) return;
     auto pl = Pango::Layout::create(cr);
-    Pango::FontDescription fd("Sans 9");
+    Pango::FontDescription fd(o && core::has_font(*o) ? core::font_desc(*o, "Sans", 9) : std::string("Sans 9"));   // s026b
     if (bold) fd.set_weight(Pango::Weight::BOLD);
     pl->set_font_description(fd);
     pl->set_text(s);
@@ -134,11 +134,11 @@ void draw_part(const Cairo::RefPtr<Cairo::Context>& cr, const PreviewDoc& d, con
         case core::ObjectKind::Text:
             text_in(cr, p.text, x, y, w, h, o.align == core::Align::Left ? Pango::Alignment::LEFT
                                             : o.align == core::Align::Center ? Pango::Alignment::CENTER
-                                                                             : Pango::Alignment::RIGHT, 0.35);
+                                                                             : Pango::Alignment::RIGHT, 0.35, false, &o);
             break;
         case core::ObjectKind::Field:
         case core::ObjectKind::Related:
-            text_in(cr, p.text, x, y, w, h, Pango::Alignment::LEFT, 0.05);
+            text_in(cr, p.text, x, y, w, h, Pango::Alignment::LEFT, 0.05, false, &o);
             if (core::is_labels(L)) break;          // s016: a label is plain words
             cr->set_source_rgb(0.82, 0.82, 0.82);   // a hairline under the value, where its box was
             cr->move_to(x, y + h - 0.5);
@@ -237,7 +237,8 @@ void Shell::paint_preview() {  // preview: the List's layout on pages, read-only
     const bool labels = core::is_labels(doc->layout);   // s016: labels print no sub-summaries
     if (labels) while (!doc->layout.subs.empty()) core::remove_sub(doc->layout, static_cast<int>(doc->layout.subs.size()) - 1);
     for (int i = static_cast<int>(doc->layout.subs.size()) - 1; i >= 0; --i)
-        if (!t->column(doc->layout.subs[static_cast<std::size_t>(i)].by)) {
+        if (!doc->layout.subs[static_cast<std::size_t>(i)].by.empty() &&   // s027a: a grand summary has no field to lose
+            !t->column(doc->layout.subs[static_cast<std::size_t>(i)].by)) {
             gone = doc->layout.subs[static_cast<std::size_t>(i)].by;
             core::remove_sub(doc->layout, i);
         }
@@ -301,7 +302,9 @@ void Shell::paint_preview() {  // preview: the List's layout on pages, read-only
                 const auto& key = keys[static_cast<std::size_t>(b.record)];
                 std::map<std::string, core::CalcValue> gsum;   // every summary: the group's, else empty
                 for (const auto& [n, x] : sums) gsum[n] = core::CalcValue{};
-                if (lv >= 0 && static_cast<std::size_t>(lv) < level.size()) {
+                if (doc->layout.subs[static_cast<std::size_t>(b.sub)].by.empty())   // s027a: a grand summary -- the whole found set's
+                    for (const auto& [n, v] : browse_sums) gsum[n] = v;
+                else if (lv >= 0 && static_cast<std::size_t>(lv) < level.size()) {
                     const std::vector<std::string> prefix(key.begin(), key.begin() + std::min<std::ptrdiff_t>(lv + 1, static_cast<std::ptrdiff_t>(key.size())));
                     if (auto it = level[static_cast<std::size_t>(lv)].find(prefix); it != level[static_cast<std::size_t>(lv)].end())
                         for (const auto& [n, v] : it->second) gsum[n] = v;

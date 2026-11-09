@@ -3044,6 +3044,32 @@ void test_print_pure() {
         const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
         std::size_t pages = 0;
         for (auto at = text.find("\"page\""); at != std::string::npos; at = text.find("\"page\"", at + 1)) ++pages;
+        // s026b: type per object.
+        core::Layout t1 = a1;
+        t1.name = "typed";
+        core::LayoutObject words;
+        words.kind = core::ObjectKind::Text;
+        words.text = "Title";
+        words.w = 200;
+        words.h = 24;
+        words.font = "Serif";
+        words.size = 18;
+        words.bold = true;
+        t1.objects.push_back(words);
+        sol.layouts["t"]["typed"] = t1;
+        auto back2 = core::save_solution(file, sol) ? core::load_solution(file) : std::nullopt;
+        std::ifstream in2(file);
+        const std::string text2((std::istreambuf_iterator<char>(in2)), std::istreambuf_iterator<char>());
+        std::size_t types = 0;
+        for (auto at = text2.find("\"type\""); at != std::string::npos; at = text2.find("\"type\"", at + 1)) ++types;
+        core::LayoutObject plain_o, size_o;
+        size_o.size = 12;
+        check("layouts: type per object -- Serif Bold 18; only a size; the default; round-trips, written only when set",
+              core::font_desc(words, "Sans", 10) == "Serif Bold 18" && core::font_desc(size_o, "Sans", 9) == "Sans 12" &&
+                  core::font_desc(plain_o, "Sans", 9) == "Sans 9" && !core::has_font(plain_o) && core::has_font(size_o) &&
+                  core::font_says(words) == "Serif 18 bold" && core::font_says(plain_o) == "the default type" &&
+                  back2 && back2->layout("t", "typed") && *back2->layout("t", "typed") == t1 && types == 1,
+              core::font_desc(words, "Sans", 10) + " / " + std::to_string(types));
         check("print: a layout's page round-trips in the .acorn -- written only when it isn't the default",
               back && back->layout("t", "wide") && *back->layout("t", "wide") == a2 && back->layout("t", "plain") &&
                   *back->layout("t", "plain") == a1 && pages == 1, std::to_string(pages));
@@ -3234,12 +3260,34 @@ void test_report_pure(const fs::path& dir) {
     const std::string text = slurp(file);
     check("report: subs kept in the .acorn and read back the same (\"when\": \"trailing\")",
           saved && back && *back == sol && text.find("\"subs\"") != std::string::npos && text.find("\"trailing\"") != std::string::npos, "");
-    core::Layout bad = l;
+    core::Layout bad = l;   // s027a: a sub with no field is a grand summary -- two leading ones are refused
     bad.subs[0].by.clear();
+    bad.subs.insert(bad.subs.begin(), core::SubSummary{"", true, 40});
+    bad.height += 40;
     core::Layout tall = l;
     tall.subs[0].height = 2000;
-    check("report: check_layout -- a sub needs its field, and the parts leave the body room",
-          !core::check_layout(bad).empty() && !core::check_layout(tall).empty(), "");
+    check("report: check_layout -- one leading / one trailing grand summary at most, and the parts leave the body room",
+          core::check_layout(bad).find("grand summary") != std::string::npos && !core::check_layout(tall).empty(), core::check_layout(bad));
+    // s027a: grand summaries -- once above everything, once under everything.
+    core::Layout g3 = g2;
+    const int lg = core::add_sub(g3, "", true);
+    const int tg = core::add_sub(g3, "", false);
+    const auto gb = core::report_blocks(g3, keys);
+    const auto gsub = [&](int i) { return g3.subs[static_cast<std::size_t>(i)]; };
+    check("report: grand summaries -- the leading one first above every heading, the trailing one last under every "
+          "foot; no group level; the groups unchanged; words",
+          lg == 0 && tg == static_cast<int>(g3.subs.size()) - 1 && gsub(lg).by.empty() && gsub(lg).leading && !gsub(tg).leading &&
+              gb.size() == want.size() + 2 && gb.front() == B{Part::Sub, lg, 0} && gb.back() == B{Part::Sub, tg, 3} &&
+              core::group_fields(g3) == core::group_fields(g2) && core::group_level(g3, lg) == -1 &&
+              core::sub_label(gsub(lg)) == "leading grand summary" && core::sub_label(gsub(tg)) == "trailing grand summary" &&
+              core::check_layout(g3).empty() && core::bands(g3)[0].sub == lg,
+          std::to_string(gb.size()) + " / " + core::check_layout(g3));
+    core::Layout g4 = core::default_layout("t", {"a"});
+    g4.name = "g";
+    (void)core::add_sub(g4, "", false);
+    const auto only = core::report_blocks(g4, {{}, {}});
+    check("report: a trailing grand summary alone -- the records, then it once",
+          only == std::vector<B>{{Part::Body, -1, 0}, {Part::Body, -1, 1}, {Part::Sub, 0, 1}}, std::to_string(only.size()));
 }
 
 // ── s016: labels ─────────────────────────────────────────────────────────────

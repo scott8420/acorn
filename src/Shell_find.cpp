@@ -384,6 +384,7 @@ void Shell::paint_find() {  // find: the layout's boxes, empty
                 w = line;
             }
         }
+        apply_object_type(*w, o);   // s026b
         w->set_size_request(o.w, o.h);
         fixed->put(*w, o.x, o.y - top);
     }

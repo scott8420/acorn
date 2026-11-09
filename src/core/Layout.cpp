@@ -36,12 +36,13 @@ std::string check_layout(const Layout& l) {
         if (ch < 0x20) return "a layout's name can't hold control characters";
     if (l.name.size() > 120) return "a layout's name is at most 120 bytes";
     if (l.width <= 0 || l.height <= 0) return "a layout needs a size";
-    int subs = 0;
-    for (const auto& x : l.subs) {   // s015b
-        if (x.by.empty()) return "a sub-summary needs the field it groups by";
+    int subs = 0, grand_lead = 0, grand_trail = 0;
+    for (const auto& x : l.subs) {   // s015b; s027a: no field -- a grand summary, one each way at most
+        if (x.by.empty()) ++(x.leading ? grand_lead : grand_trail);
         if (x.height <= 0) return "a sub-summary needs a height";
         subs += x.height;
     }
+    if (grand_lead > 1 || grand_trail > 1) return "a layout has one leading and one trailing grand summary at most";
     if (l.across < 1 || l.across > kLabelsMax) return "labels are 1 to " + std::to_string(kLabelsMax) + " across";   // s016
     if (l.gap < 0) return "the gap between labels can't be negative";
     if (l.header < 0 || l.footer < 0 || l.header + l.footer + subs >= l.height)
@@ -476,6 +477,26 @@ Align parse_align(const std::string& s) {
     return Align::Right;
 }
 
+const std::vector<std::string>& font_families() {
+    static const std::vector<std::string> f{"Sans", "Serif", "Monospace"};
+    return f;
+}
+const std::vector<int>& font_sizes() {
+    static const std::vector<int> s{8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 36};
+    return s;
+}
+bool has_font(const LayoutObject& o) { return !o.font.empty() || o.size > 0 || o.bold; }
+std::string font_desc(const LayoutObject& o, const std::string& family, int size) {
+    return (o.font.empty() ? family : o.font) + (o.bold ? " Bold " : " ") + std::to_string(o.size > 0 ? o.size : size);
+}
+std::string font_says(const LayoutObject& o) {
+    if (!has_font(o)) return "the default type";
+    std::string s = o.font.empty() ? std::string("the default font") : o.font;
+    if (o.size > 0) s += " " + std::to_string(o.size);
+    if (o.bold) s += " bold";
+    return s;
+}
+
 const char* align_label(Align a) {
     return a == Align::Left ? "left" : a == Align::Center ? "centred" : "right";
 }
@@ -539,22 +560,32 @@ std::vector<int> band_objects(const Layout& l, const Band& b) {
 std::vector<std::string> group_fields(const Layout& l) {
     std::vector<std::string> out;
     auto add = [&](const std::string& f) { if (std::find(out.begin(), out.end(), f) == out.end()) out.push_back(f); };
-    for (const auto& x : l.subs) if (x.leading) add(x.by);
-    for (auto it = l.subs.rbegin(); it != l.subs.rend(); ++it) if (!it->leading) add(it->by);
+    for (const auto& x : l.subs) if (x.leading && !x.by.empty()) add(x.by);   // s027a: a grand summary groups nothing
+    for (auto it = l.subs.rbegin(); it != l.subs.rend(); ++it) if (!it->leading && !it->by.empty()) add(it->by);
     return out;
 }
 
 int group_level(const Layout& l, int i) {
     if (i < 0 || static_cast<std::size_t>(i) >= l.subs.size()) return -1;
+    if (l.subs[static_cast<std::size_t>(i)].by.empty()) return -1;   // s027a: a grand summary -- no group level
     const auto g = group_fields(l);
     return static_cast<int>(std::find(g.begin(), g.end(), l.subs[static_cast<std::size_t>(i)].by) - g.begin());
 }
 
 std::string sub_label(const SubSummary& s) {
+    if (s.by.empty()) return std::string(s.leading ? "leading" : "trailing") + " grand summary";   // s027a
     return std::string(s.leading ? "leading" : "trailing") + " sub-summary by “" + s.by + "”";
 }
 
 int add_sub(Layout& l, const std::string& by, bool leading) {
+    if (by.empty()) {   // s027a: a grand summary -- above every leading sub / below every trailing one, nothing in it yet
+        const int at = leading ? l.header : footer_top(l);
+        for (auto& o : l.objects) if (o.y >= at) o.y += kSubH;
+        l.height += kSubH;
+        const std::size_t pos = leading ? 0 : l.subs.size();
+        l.subs.insert(l.subs.begin() + static_cast<std::ptrdiff_t>(pos), SubSummary{"", leading, kSubH});
+        return static_cast<int>(pos);
+    }
     // Where it goes: leading -- the body's top (under the leading subs);
     // trailing -- the body's bottom (over the trailing subs).
     const int at = leading ? body_top(l) : body_bottom(l);
@@ -620,6 +651,10 @@ std::vector<ReportBlock> report_blocks(const Layout& l, const std::vector<std::v
     for (int r = 0; r < n; ++r) {
         const int starts = r == 0 ? 0 : parts_at(r - 1, r);       // groups at this level and in start here
         const int ends = r == n - 1 ? 0 : parts_at(r, r + 1);     // ... end here
+        if (r == 0)   // s027a: the leading grand summary, once, above everything (its values: the first record's)
+            for (const auto& bd : bs)
+                if (bd.part == Part::Sub && l.subs[static_cast<std::size_t>(bd.sub)].leading && l.subs[static_cast<std::size_t>(bd.sub)].by.empty())
+                    out.push_back({Part::Sub, bd.sub, r});
         for (const auto& bd : bs)
             if (bd.part == Part::Sub && l.subs[static_cast<std::size_t>(bd.sub)].leading && group_level(l, bd.sub) >= starts)
                 out.push_back({Part::Sub, bd.sub, r});
@@ -627,6 +662,10 @@ std::vector<ReportBlock> report_blocks(const Layout& l, const std::vector<std::v
         for (const auto& bd : bs)
             if (bd.part == Part::Sub && !l.subs[static_cast<std::size_t>(bd.sub)].leading && group_level(l, bd.sub) >= ends)
                 out.push_back({Part::Sub, bd.sub, r});
+        if (r == n - 1)   // s027a: the trailing grand summary, once, under everything
+            for (const auto& bd : bs)
+                if (bd.part == Part::Sub && !l.subs[static_cast<std::size_t>(bd.sub)].leading && l.subs[static_cast<std::size_t>(bd.sub)].by.empty())
+                    out.push_back({Part::Sub, bd.sub, r});
     }
     return out;
 }

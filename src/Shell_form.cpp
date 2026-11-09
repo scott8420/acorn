@@ -36,6 +36,27 @@
 
 namespace acorn {
 
+void apply_object_type(Gtk::Widget& w, const core::LayoutObject& o) {  // s026b
+    if (!core::has_font(o)) return;
+    const Pango::FontDescription fd(core::font_desc(o, "Sans", 10));
+    auto walk = [&](auto&& self, Gtk::Widget& x) -> void {
+        if (auto* l = dynamic_cast<Gtk::Label*>(&x)) {
+            Pango::AttrList a;
+            auto at = Pango::Attribute::create_attr_font_desc(fd);
+            a.insert(at);
+            l->set_attributes(a);
+        } else if (auto* e = dynamic_cast<Gtk::Entry*>(&x)) {
+            Pango::AttrList a;
+            auto at = Pango::Attribute::create_attr_font_desc(fd);
+            a.insert(at);
+            e->set_attributes(a);
+        }
+        for (auto* c = x.get_first_child(); c; c = c->get_next_sibling()) self(self, *c);
+    };
+    walk(walk, w);
+}
+
+
 namespace {
 
 std::string curly(const std::string& s) { return "“" + s + "”"; }
@@ -487,6 +508,7 @@ Gtk::Fixed* Shell::layout_part(const core::Layout& L, core::Part part, bool edit
                 }
             }
         }
+        apply_object_type(*w, o);   // s026b
         w->set_size_request(o.w, o.h);
         fixed->put(*w, o.x, o.y - top);
     }

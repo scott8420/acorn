@@ -572,7 +572,7 @@ void Shell::draw_layout(const Cairo::RefPtr<Cairo::Context>& cr, int w, int h) {
         if (b.part == core::Part::Body && !m_lay.subs.empty()) rule(b.top + b.height);
         if (b.part != core::Part::Sub) continue;
         const auto& x = m_lay.subs[static_cast<std::size_t>(b.sub)];
-        const std::string name = std::string(x.leading ? "leading" : "trailing") + " · " + x.by;
+        const std::string name = std::string(x.leading ? "leading" : "trailing") + " · " + (x.by.empty() ? std::string("grand summary") : x.by);
         band(b.top, b.top + b.height, name.c_str());
         rule(b.top + b.height);
     }
@@ -594,6 +594,7 @@ void Shell::draw_layout(const Cairo::RefPtr<Cairo::Context>& cr, int w, int h) {
 
     auto text_in = [&](const std::string& s, const core::LayoutObject& o, Pango::Alignment how, double alpha) {
         auto pl = m_lay_canvas.create_pango_layout(s);
+        if (core::has_font(o)) pl->set_font_description(Pango::FontDescription(core::font_desc(o, "Sans", 10)));   // s026b
         pl->set_width(std::max(0, o.w - 12) * PANGO_SCALE);
         pl->set_ellipsize(Pango::EllipsizeMode::END);
         pl->set_alignment(how);
@@ -995,8 +996,10 @@ void Shell::paint_inspector() {  // layouts: the picked object's field / words /
         for (std::size_t i = 0; i < m_lay.subs.size(); ++i) {
             const auto x = m_lay.subs[i];
             auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 4);
-            const bool here = std::find(live.begin(), live.end(), x.by) != live.end();
-            auto lb = side_label((x.leading ? "Leading by " : "Trailing by ") + curly(x.by) +
+            const bool here = x.by.empty() || std::find(live.begin(), live.end(), x.by) != live.end();
+            auto lb = side_label(x.by.empty() ? std::string(x.leading ? "Leading grand summary -- above every record"   // s027a
+                                                                      : "Trailing grand summary -- under every record") :
+                                 (x.leading ? "Leading by " : "Trailing by ") + curly(x.by) +
                                  (here ? "" : " (there's no such field now -- Preview leaves it out)"), here ? nullptr : "acorn-missing");
             lb->set_hexpand(true);
             row->append(*lb);
@@ -1019,29 +1022,40 @@ void Shell::paint_inspector() {  // layouts: the picked object's field / words /
         }
         auto byf = std::make_shared<std::vector<std::string>>(live);
         std::vector<Glib::ustring> byshown(live.begin(), live.end());
+        byf->insert(byf->begin(), std::string{});   // s027a: no field -- a grand summary over every record
+        byshown.insert(byshown.begin(), "-- every record (grand summary) --");
         auto sdd = Gtk::make_managed<Gtk::DropDown>(Gtk::StringList::create(byshown));
         sdd->set_name("layouts.sub.by");
         sdd->set_tooltip_text("The field the records are grouped by");
-        sdd->set_sensitive(can && !live.empty());
+        sdd->set_sensitive(can);
         auto wdd = Gtk::make_managed<Gtk::DropDown>(Gtk::StringList::create({"Leading -- above the group", "Trailing -- below the group"}));
         wdd->set_name("layouts.sub.when");
-        wdd->set_sensitive(can && !live.empty());
+        wdd->set_sensitive(can);
         auto addsub = Gtk::make_managed<Gtk::Button>("Add Sub-summary");
         addsub->set_name("layouts.sub.add");
-        addsub->set_sensitive(can && !live.empty());
-        addsub->set_tooltip_text("A part printed once per group of records alike in the field, with the field's box in it");
+        addsub->set_sensitive(can);
+        addsub->set_tooltip_text("A part printed once per group of records alike in the field, with the field's box in it -- "
+                                 "or, with no field, once above / under every record (a grand summary)");
         addsub->signal_clicked().connect([this, sdd, wdd, byf, gen] {
             if (gen != m_lay_gen) return;
             const auto i = sdd->get_selected();
             if (i == GTK_INVALID_LIST_POSITION || i >= byf->size()) return;
             const bool leading = wdd->get_selected() != 1;
             auto l = m_lay;
+            if ((*byf)[i].empty())   // s027a: one grand summary each way
+                for (const auto& x : l.subs)
+                    if (x.by.empty() && x.leading == leading) {
+                        layouts_note("This layout has a " + core::sub_label(x) + " already.", "error");
+                        return;
+                    }
             const int k = core::add_sub(l, (*byf)[i], leading);
-            m_lay_picks = {static_cast<int>(l.objects.size()) - 1};   // its box, picked
+            if (!(*byf)[i].empty()) m_lay_picks = {static_cast<int>(l.objects.size()) - 1};   // its box, picked
+            else m_lay_picks.clear();
             const std::string what = "Added a " + core::sub_label(l.subs[static_cast<std::size_t>(k)]);
             Glib::signal_idle().connect_once([this, l, what] { m_lay_focus.clear(); keep_layout(l, what); m_lay_canvas.grab_focus(); });
         });
-        if (!live.empty()) { m_lay_inspector.append(*sdd); m_lay_inspector.append(*wdd); }
+        m_lay_inspector.append(*sdd);   // s027a: the grand summary needs no field
+        m_lay_inspector.append(*wdd);
         m_lay_inspector.append(*addsub);
         // s016: labels -- the body printed several across in Preview / Print.
         auto lab_head = side_label("Labels", "acorn-field-name");
@@ -1390,6 +1404,56 @@ void Shell::paint_inspector() {  // layouts: the picked object's field / words /
         m_lay_inspector.append(*side_label("Aligned", "acorn-status"));
         m_lay_inspector.append(*ad);
         if (m_lay_focus == "layouts.align") focus_back = ad;
+    }
+
+    // s026b: its type -- Words, a field's box, a related field.
+    if (o.kind == core::ObjectKind::Text || o.kind == core::ObjectKind::Field || o.kind == core::ObjectKind::Related) {
+        auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
+        std::vector<Glib::ustring> fw{"Default"};
+        for (const auto& f : core::font_families()) fw.push_back(f);
+        auto fd = Gtk::make_managed<Gtk::DropDown>(Gtk::StringList::create(fw));
+        const auto& fams = core::font_families();
+        const auto fat = std::find(fams.begin(), fams.end(), o.font);
+        fd->set_selected(fat == fams.end() ? 0 : static_cast<guint>(fat - fams.begin()) + 1);
+        fd->set_sensitive(can);
+        fd->set_tooltip_text("Its font -- printed in Preview, drawn in Form and List");
+        remember(*fd, "layouts.font");
+        std::vector<Glib::ustring> sw{"Default"};
+        for (int z : core::font_sizes()) sw.push_back(std::to_string(z) + " pt");
+        auto sd = Gtk::make_managed<Gtk::DropDown>(Gtk::StringList::create(sw));
+        const auto& zs = core::font_sizes();
+        const auto zat = std::find(zs.begin(), zs.end(), o.size);
+        sd->set_selected(zat == zs.end() ? 0 : static_cast<guint>(zat - zs.begin()) + 1);
+        sd->set_sensitive(can);
+        remember(*sd, "layouts.size");
+        auto bd = Gtk::make_managed<Gtk::CheckButton>("Bold");
+        bd->set_active(o.bold);
+        bd->set_sensitive(can);
+        remember(*bd, "layouts.bold");
+        auto keep_type = [this, idx, gen, fd, sd, bd] {
+            if (gen != m_lay_gen || idx >= m_lay.objects.size()) return;
+            auto l = m_lay;
+            auto& x = l.objects[idx];
+            const guint f = fd->get_selected(), z = sd->get_selected();
+            x.font = f == 0 || f > core::font_families().size() ? std::string{} : core::font_families()[f - 1];
+            x.size = z == 0 || z > core::font_sizes().size() ? 0 : core::font_sizes()[z - 1];
+            x.bold = bd->get_active();
+            if (x == m_lay.objects[idx]) return;
+            const std::string what = "Set the type of " + (x.kind == core::ObjectKind::Text ? curly(x.text) : curly(x.field)) +
+                                     " to " + core::font_says(x);
+            Glib::signal_idle().connect_once([this, l, what] { keep_layout(l, what); });
+        };
+        fd->property_selected().signal_changed().connect(keep_type);
+        sd->property_selected().signal_changed().connect(keep_type);
+        bd->signal_toggled().connect(keep_type);
+        row->append(*fd);
+        row->append(*sd);
+        row->append(*bd);
+        m_lay_inspector.append(*side_label("Type", "acorn-status"));
+        m_lay_inspector.append(*row);
+        if (m_lay_focus == "layouts.font") focus_back = fd;
+        if (m_lay_focus == "layouts.size") focus_back = sd;
+        if (m_lay_focus == "layouts.bold") focus_back = bd;
     }
 
     // Its place and size, in pixels.
